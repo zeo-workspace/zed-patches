@@ -488,10 +488,10 @@ index 0000000..b92b69d
 +}
 diff --git a/crates/agent_ui/src/tasks_card/tray/decision_tests.rs b/crates/agent_ui/src/tasks_card/tray/decision_tests.rs
 new file mode 100644
-index 0000000..22fb522
+index 0000000..b035a4c
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/tray/decision_tests.rs
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,265 @@
 +// Story 013 / task 6.1 — `should_notify` and `TaskOutcomeDatagram`
 +// (R5.1, R5.2, R5.3, R5.5, Q12). Filter: `tasks_card::tray::decision`.
 +
@@ -618,8 +618,17 @@ index 0000000..22fb522
 +    .into_iter()
 +    .collect();
 +    assert_eq!(keys, expected);
-+    for forbidden in ["description", "summary", "command", "last_tool", "output_file"] {
-+        assert!(!keys.contains(forbidden), "{forbidden} must not cross the socket");
++    for forbidden in [
++        "description",
++        "summary",
++        "command",
++        "last_tool",
++        "output_file",
++    ] {
++        assert!(
++            !keys.contains(forbidden),
++            "{forbidden} must not cross the socket"
++        );
 +    }
 +}
 +
@@ -677,8 +686,14 @@ index 0000000..22fb522
 +        .collect();
 +    let (tasks, session, _visual) = model_tasks(wire, cx).await;
 +    for (status, word) in pairs {
-+        let datagram = datagram_for(by_id(&tasks, status), &session, None, Some("T"), at_ms(9_000))
-+            .unwrap_or_else(|| panic!("an ended task ({status}) yields a datagram"));
++        let datagram = datagram_for(
++            by_id(&tasks, status),
++            &session,
++            None,
++            Some("T"),
++            at_ms(9_000),
++        )
++        .unwrap_or_else(|| panic!("an ended task ({status}) yields a datagram"));
 +        assert_eq!(datagram.task_outcome, word);
 +    }
 +}
@@ -744,10 +759,10 @@ index 0000000..22fb522
 +}
 diff --git a/crates/agent_ui/src/tasks_card/tray/send_tests.rs b/crates/agent_ui/src/tasks_card/tray/send_tests.rs
 new file mode 100644
-index 0000000..c85f3f0
+index 0000000..bdf5140
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/tray/send_tests.rs
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,314 @@
 +// Story 013 / task 6.2 — the non-blocking send and its wiring (R5.1, R5.3, R5.4).
 +// Filter: `tasks_card::tray::send`.
 +//
@@ -869,7 +884,11 @@ index 0000000..c85f3f0
 +    let tmp_socket = PathBuf::from("/tmp/zeo-systray.sock");
 +    let existed = tmp_socket.exists();
 +    assert!(send(&datagram()).is_ok());
-+    assert_eq!(tmp_socket.exists(), existed, "nothing is created under /tmp");
++    assert_eq!(
++        tmp_socket.exists(),
++        existed,
++        "nothing is created under /tmp"
++    );
 +}
 +
 +// ---- wiring: TaskEnded -> decide -> send ---------------------------------------------
@@ -951,13 +970,19 @@ index 0000000..c85f3f0
 +        ],
 +        &mut cx,
 +    );
-+    assert!(receive(&socket).is_none(), "an unwatched completion is not notified");
++    assert!(
++        receive(&socket).is_none(),
++        "an unwatched completion is not notified"
++    );
 +
 +    // B is the thread shown and the window is active: a failure in B is in view.
 +    cx.update(|window, _| window.activate_window());
 +    cx.run_until_parked();
 +    send_tasks(&b, vec![wire_task("b2", "failed", true, 3_000)], &mut cx);
-+    assert!(receive(&socket).is_none(), "a failure in view is not notified");
++    assert!(
++        receive(&socket).is_none(),
++        "a failure in view is not notified"
++    );
 +
 +    // A is not the thread shown: its failure is out of view even with focus.
 +    send_tasks(&a, vec![wire_task("a1", "failed", true, 1_000)], &mut cx);
@@ -975,9 +1000,7 @@ index 0000000..c85f3f0
 +    clippy::await_holding_lock,
 +    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
 +)]
-+async fn test_an_absent_daemon_drops_the_datagram_and_the_card_carries_on(
-+    cx: &mut TestAppContext,
-+) {
++async fn test_an_absent_daemon_drops_the_datagram_and_the_card_carries_on(cx: &mut TestAppContext) {
 +    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 +    let dir = tempfile::tempdir().expect("tempdir");
 +    set_runtime_dir(Some(dir.path()));

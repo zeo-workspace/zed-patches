@@ -203,10 +203,10 @@ index ab76f65..fdc7287 100644
  }
 diff --git a/crates/agent_settings/src/agent_settings_tasks_card_tests.rs b/crates/agent_settings/src/agent_settings_tasks_card_tests.rs
 new file mode 100644
-index 0000000..022bda7
+index 0000000..54bdc62
 --- /dev/null
 +++ b/crates/agent_settings/src/agent_settings_tasks_card_tests.rs
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,74 @@
 +// Story 013 / task 3.1 — `agent.tasks_card.{enabled, position}` (R2.3, R2.4).
 +//
 +// Included at the end of `mod tests` in `agent_settings.rs`:
@@ -264,7 +264,11 @@ index 0000000..022bda7
 +            true,
 +            TasksCardPosition::TopRight,
 +        ),
-+        (r#"{"agent": {"tasks_card": {}}}"#, true, TasksCardPosition::TopRight),
++        (
++            r#"{"agent": {"tasks_card": {}}}"#,
++            true,
++            TasksCardPosition::TopRight,
++        ),
 +        (r#"{"agent": {}}"#, true, TasksCardPosition::TopRight),
 +    ] {
 +        SettingsStore::update_global(cx, |store, cx| {
@@ -2791,10 +2795,10 @@ index 0000000..3ee252b
 +}
 diff --git a/crates/agent_ui/src/tasks_card/background_tests.rs b/crates/agent_ui/src/tasks_card/background_tests.rs
 new file mode 100644
-index 0000000..c8b1a88
+index 0000000..ac5de33
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/background_tests.rs
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,114 @@
 +// Story 013 / task 5.2 — Send to Background (R4.4, R4.5, R4.7).
 +// Filter: `tasks_card::background`.
 +
@@ -2858,9 +2862,14 @@ index 0000000..c8b1a88
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "fg", &mut cx).unwrap().task.id;
 +
-+    card.update(&mut cx, |card, cx| card.send_to_background(sa.clone(), id, cx));
++    card.update(&mut cx, |card, cx| {
++        card.send_to_background(sa.clone(), id, cx)
++    });
 +    cx.run_until_parked();
-+    assert!(!cx.has_pending_prompt(), "moving to the background loses no work: no prompt");
++    assert!(
++        !cx.has_pending_prompt(),
++        "moving to the background loses no work: no prompt"
++    );
 +    // The action is addressed by the task's tool call.
 +    assert_eq!(
 +        connection.backgrounds(),
@@ -2882,24 +2891,34 @@ index 0000000..c8b1a88
 +    // An error from the action.
 +    *connection.background_answer.lock().unwrap() =
 +        BackgroundAnswer::Err("background failed for task toolu_fg: busy");
-+    card.update(&mut cx, |card, cx| card.send_to_background(sa.clone(), id.clone(), cx));
++    card.update(&mut cx, |card, cx| {
++        card.send_to_background(sa.clone(), id.clone(), cx)
++    });
 +    cx.run_until_parked();
-+    let error = find_row(&card, &sa, "fg", &mut cx).unwrap().error.expect("error on the row");
++    let error = find_row(&card, &sa, "fg", &mut cx)
++        .unwrap()
++        .error
++        .expect("error on the row");
 +    assert!(error.contains("busy"), "row error was {error:?}");
 +
 +    // `Ok(false)`: the call succeeded and moved nothing — that is not silent success.
 +    *connection.background_answer.lock().unwrap() = BackgroundAnswer::NothingMoved;
-+    card.update(&mut cx, |card, cx| card.send_to_background(sa.clone(), id, cx));
++    card.update(&mut cx, |card, cx| {
++        card.send_to_background(sa.clone(), id, cx)
++    });
 +    cx.run_until_parked();
-+    let error = find_row(&card, &sa, "fg", &mut cx).unwrap().error.expect("error on the row");
++    let error = find_row(&card, &sa, "fg", &mut cx)
++        .unwrap()
++        .error
++        .expect("error on the row");
 +    assert_eq!(error.to_string(), "Nothing was moved to the background");
 +}
 diff --git a/crates/agent_ui/src/tasks_card/live_tests.rs b/crates/agent_ui/src/tasks_card/live_tests.rs
 new file mode 100644
-index 0000000..773bb29
+index 0000000..31f7327
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/live_tests.rs
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,101 @@
 +// Story 013 / task 4.2 — live progress and the elapsed-time tick (R1.4, R1.5).
 +// Filter: `tasks_card::live`.
 +
@@ -2916,7 +2935,8 @@ index 0000000..773bb29
 +    let count = Rc::new(Cell::new(0));
 +    let sink = count.clone();
 +    cx.update(|_, cx| {
-+        cx.observe(card, move |_, _| sink.set(sink.get() + 1)).detach();
++        cx.observe(card, move |_, _| sink.set(sink.get() + 1))
++            .detach();
 +    });
 +    count
 +}
@@ -2939,10 +2959,17 @@ index 0000000..773bb29
 +    let card = card(&panel, &cx);
 +    let notifies = count_notifies(&card, &mut cx);
 +
-+    send_tasks(&a, vec![progress_task(250, 4, "Grep", "Searching the tree")], &mut cx);
++    send_tasks(
++        &a,
++        vec![progress_task(250, 4, "Grep", "Searching the tree")],
++        &mut cx,
++    );
 +    assert!(notifies.get() >= 1, "a changed snapshot repaints the card");
 +    let row = find_row(&card, &sa, "t1", &mut cx).unwrap();
-+    assert_eq!(row.task.last_tool.as_ref().map(|s| s.to_string()), Some("Grep".into()));
++    assert_eq!(
++        row.task.last_tool.as_ref().map(|s| s.to_string()),
++        Some("Grep".into())
++    );
 +    assert_eq!(
 +        row.task.summary.as_ref().map(|s| s.to_string()),
 +        Some("Searching the tree".into())
@@ -2954,9 +2981,7 @@ index 0000000..773bb29
 +/// The tick runs only while the card is expanded AND a task runs — a timer that
 +/// never sleeps is the failure this guards against, in both directions.
 +#[gpui::test]
-+async fn test_elapsed_tick_runs_only_while_expanded_with_a_running_task(
-+    cx: &mut TestAppContext,
-+) {
++async fn test_elapsed_tick_runs_only_while_expanded_with_a_running_task(cx: &mut TestAppContext) {
 +    let (panel, mut cx) = setup_card_panel(cx).await;
 +    let connection = TaskActionsConnection::new();
 +    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
@@ -2968,7 +2993,11 @@ index 0000000..773bb29
 +    for _ in 0..3 {
 +        advance(&mut cx, Duration::from_secs(1));
 +    }
-+    assert!(notifies.get() >= 3, "ticked {} times in 3 s", notifies.get());
++    assert!(
++        notifies.get() >= 3,
++        "ticked {} times in 3 s",
++        notifies.get()
++    );
 +
 +    // Minimized: the timer is gone.
 +    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
@@ -2993,10 +3022,10 @@ index 0000000..773bb29
 +}
 diff --git a/crates/agent_ui/src/tasks_card/model_tests.rs b/crates/agent_ui/src/tasks_card/model_tests.rs
 new file mode 100644
-index 0000000..ec5d283
+index 0000000..61bf722
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/model_tests.rs
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,412 @@
 +// Story 013 / task 3.2 — the TasksCard state and its `rows()` projection
 +// (R1.2, R1.3, R1.6, R1.7, R1.8, R2.5, R3.1, R3.3). Filter: `tasks_card::model`.
 +
@@ -3025,7 +3054,11 @@ index 0000000..ec5d283
 +
 +    let card = card(&panel, &cx);
 +    let groups = rows(&card, &mut cx);
-+    assert_eq!(groups.len(), 2, "one group per thread, even with equal titles");
++    assert_eq!(
++        groups.len(),
++        2,
++        "one group per thread, even with equal titles"
++    );
 +    let sessions: Vec<_> = groups.iter().map(|g| g.session_id.clone()).collect();
 +    assert!(sessions.contains(&session_of(&a, &cx)));
 +    assert!(sessions.contains(&session_of(&b, &cx)));
@@ -3087,7 +3120,10 @@ index 0000000..ec5d283
 +        .collect();
 +    assert_eq!(
 +        order,
-+        vec![session_of(&second_opened, &cx), session_of(&first_opened, &cx)]
++        vec![
++            session_of(&second_opened, &cx),
++            session_of(&first_opened, &cx)
++        ]
 +    );
 +}
 +
@@ -3095,22 +3131,40 @@ index 0000000..ec5d283
 +/// even when their tasks started earlier — and among themselves the most recent
 +/// ending comes first.
 +#[gpui::test]
-+async fn test_rows_put_ended_only_threads_last_most_recent_ending_first(
-+    cx: &mut TestAppContext,
-+) {
++async fn test_rows_put_ended_only_threads_last_most_recent_ending_first(cx: &mut TestAppContext) {
 +    let (panel, mut cx) = setup_card_panel(cx).await;
 +    let connection = TaskActionsConnection::new();
 +    // Ended early, started earliest of all.
 +    let ended_first = open_titled_thread(&panel, &connection, "Ended first", &mut cx);
-+    send_tasks(&ended_first, vec![wire_task("e1", "running", true, 100)], &mut cx);
-+    send_tasks(&ended_first, vec![wire_task("e1", "completed", true, 100)], &mut cx);
++    send_tasks(
++        &ended_first,
++        vec![wire_task("e1", "running", true, 100)],
++        &mut cx,
++    );
++    send_tasks(
++        &ended_first,
++        vec![wire_task("e1", "completed", true, 100)],
++        &mut cx,
++    );
 +    // Running, started latest of all.
 +    let running = open_titled_thread(&panel, &connection, "Running", &mut cx);
-+    send_tasks(&running, vec![wire_task("r1", "running", true, 90_000)], &mut cx);
++    send_tasks(
++        &running,
++        vec![wire_task("r1", "running", true, 90_000)],
++        &mut cx,
++    );
 +    // Ended later than `ended_first`.
 +    let ended_last = open_titled_thread(&panel, &connection, "Ended last", &mut cx);
-+    send_tasks(&ended_last, vec![wire_task("e2", "running", true, 200)], &mut cx);
-+    send_tasks(&ended_last, vec![wire_task("e2", "failed", true, 200)], &mut cx);
++    send_tasks(
++        &ended_last,
++        vec![wire_task("e2", "running", true, 200)],
++        &mut cx,
++    );
++    send_tasks(
++        &ended_last,
++        vec![wire_task("e2", "failed", true, 200)],
++        &mut cx,
++    );
 +
 +    let card = card(&panel, &cx);
 +    let order: Vec<_> = rows(&card, &mut cx)
@@ -3148,8 +3202,16 @@ index 0000000..ec5d283
 +    let group = &groups[0];
 +    assert_eq!(group.title.as_ref(), "Bump the series");
 +    assert_eq!(group.project.as_ref(), "project");
-+    let fg = group.rows.iter().find(|r| r.task.id.as_ref() == "fg").unwrap();
-+    let bg = group.rows.iter().find(|r| r.task.id.as_ref() == "bg").unwrap();
++    let fg = group
++        .rows
++        .iter()
++        .find(|r| r.task.id.as_ref() == "fg")
++        .unwrap();
++    let bg = group
++        .rows
++        .iter()
++        .find(|r| r.task.id.as_ref() == "bg")
++        .unwrap();
 +    assert_eq!(fg.task.kind.to_string(), "shell");
 +    assert_eq!(fg.task.description.to_string(), "Task fg");
 +    assert!(!fg.task.background);
@@ -3160,9 +3222,7 @@ index 0000000..ec5d283
 +// ---- R1.1 / R1.7 / R1.6 -------------------------------------------------------------
 +
 +#[gpui::test]
-+async fn test_card_visible_only_while_a_task_runs_or_an_ended_row_shows(
-+    cx: &mut TestAppContext,
-+) {
++async fn test_card_visible_only_while_a_task_runs_or_an_ended_row_shows(cx: &mut TestAppContext) {
 +    let (panel, mut cx) = setup_card_panel(cx).await;
 +    let connection = TaskActionsConnection::new();
 +    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
@@ -3176,13 +3236,14 @@ index 0000000..ec5d283
 +    assert!(visible(&card, &mut cx), "an ended row keeps the card up");
 +
 +    advance(&mut cx, Duration::from_secs(11));
-+    assert!(!visible(&card, &mut cx), "nothing running and nothing on show");
++    assert!(
++        !visible(&card, &mut cx),
++        "nothing running and nothing on show"
++    );
 +}
 +
 +#[gpui::test]
-+async fn test_ended_row_shows_its_final_status_for_ten_seconds_then_goes(
-+    cx: &mut TestAppContext,
-+) {
++async fn test_ended_row_shows_its_final_status_for_ten_seconds_then_goes(cx: &mut TestAppContext) {
 +    let (panel, mut cx) = setup_card_panel(cx).await;
 +    let connection = TaskActionsConnection::new();
 +    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
@@ -3211,10 +3272,16 @@ index 0000000..ec5d283
 +    // row must not vanish before its 10 s are up.
 +    send_tasks(&a, vec![wire_task("t2", "running", true, 2_000)], &mut cx);
 +    advance(&mut cx, Duration::from_secs(9));
-+    assert!(find_row(&card, &sid, "t1", &mut cx).is_some(), "still on show at 9 s");
++    assert!(
++        find_row(&card, &sid, "t1", &mut cx).is_some(),
++        "still on show at 9 s"
++    );
 +
 +    advance(&mut cx, Duration::from_secs(2));
-+    assert!(find_row(&card, &sid, "t1", &mut cx).is_none(), "gone after 10 s");
++    assert!(
++        find_row(&card, &sid, "t1", &mut cx).is_none(),
++        "gone after 10 s"
++    );
 +    // The running neighbour is untouched by the expiry.
 +    assert!(find_row(&card, &sid, "t2", &mut cx).is_some());
 +}
@@ -3233,8 +3300,12 @@ index 0000000..ec5d283
 +    assert_eq!(rows(&card, &mut cx).len(), 2);
 +
 +    // The panel now holds only B.
-+    let b_view = panel.read_with(&cx, |panel, _| panel.active_conversation_view().cloned().unwrap());
-+    card.update(&mut cx, |card, cx| card.sync_threads([&b_view].into_iter(), cx));
++    let b_view = panel.read_with(&cx, |panel, _| {
++        panel.active_conversation_view().cloned().unwrap()
++    });
++    card.update(&mut cx, |card, cx| {
++        card.sync_threads([&b_view].into_iter(), cx)
++    });
 +    cx.run_until_parked();
 +
 +    let groups = rows(&card, &mut cx);
@@ -3262,12 +3333,16 @@ index 0000000..ec5d283
 +    let card = card(&panel, &cx);
 +
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
-+    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id.clone(), cx));
++    card.update(&mut cx, |card, cx| {
++        card.toggle_watch(sa.clone(), id.clone(), cx)
++    });
 +    assert!(find_row(&card, &sa, "t1", &mut cx).unwrap().watched);
 +    assert!(!find_row(&card, &sb, "t1", &mut cx).unwrap().watched);
 +
 +    // Toggling again unmarks it.
-+    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id.clone(), cx));
++    card.update(&mut cx, |card, cx| {
++        card.toggle_watch(sa.clone(), id.clone(), cx)
++    });
 +    assert!(!find_row(&card, &sa, "t1", &mut cx).unwrap().watched);
 +}
 +
@@ -3283,9 +3358,13 @@ index 0000000..ec5d283
 +    old.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id, cx));
 +
 +    // A fresh card (what a Zeo restart builds) shares nothing with the old one.
-+    let a_view = panel.read_with(&cx, |panel, _| panel.active_conversation_view().cloned().unwrap());
++    let a_view = panel.read_with(&cx, |panel, _| {
++        panel.active_conversation_view().cloned().unwrap()
++    });
 +    let fresh = cx.update(|_, cx| cx.new(|cx| TasksCard::new(cx)));
-+    fresh.update(&mut cx, |card, cx| card.sync_threads([&a_view].into_iter(), cx));
++    fresh.update(&mut cx, |card, cx| {
++        card.sync_threads([&a_view].into_iter(), cx)
++    });
 +    cx.run_until_parked();
 +    let row = find_row(&fresh, &sa, "t1", &mut cx).expect("the fresh card lists the task");
 +    assert!(!row.watched);
@@ -3312,7 +3391,10 @@ index 0000000..ec5d283
 +
 +    send_tasks(&a, vec![wire_task("t2", "running", true, 20_000)], &mut cx);
 +    assert!(visible(&card, &mut cx));
-+    assert!(card.read_with(&cx, |card, _| card.is_minimized()), "still minimized");
++    assert!(
++        card.read_with(&cx, |card, _| card.is_minimized()),
++        "still minimized"
++    );
 +}
 +
 +// ---- the card keeps its model while not painting -------------------------------------
@@ -3345,7 +3427,10 @@ index 0000000..ec5d283
 +    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
 +    let sa = session_of(&a, &cx);
 +    assert!(!visible(&card, &mut cx), "disabled: nothing is shown");
-+    assert!(find_row(&card, &sa, "t1", &mut cx).is_some(), "but the row is known");
++    assert!(
++        find_row(&card, &sa, "t1", &mut cx).is_some(),
++        "but the row is known"
++    );
 +
 +    // Minimized: an ending still lands as an ended row.
 +    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
@@ -3355,15 +3440,15 @@ index 0000000..ec5d283
 +}
 diff --git a/crates/agent_ui/src/tasks_card/open_tests.rs b/crates/agent_ui/src/tasks_card/open_tests.rs
 new file mode 100644
-index 0000000..4240fb7
+index 0000000..3eea8da
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/open_tests.rs
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,169 @@
 +// Story 013 / task 5.3 — open the thread at the task's tool call (R4.6).
 +// Filter: `tasks_card::open`.
 +
-+use agent_client_protocol::schema::v1 as acp;
 +use acp_thread::{AcpThread, AgentThreadEntry};
++use agent_client_protocol::schema::v1 as acp;
 +use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 +use serde_json::json;
 +
@@ -3375,27 +3460,29 @@ index 0000000..4240fb7
 +fn fill_with_entries(thread: &Entity<AcpThread>, cx: &mut VisualTestContext) {
 +    thread.update(cx, |thread, cx| {
 +        let mut push = |update: acp::SessionUpdate| {
-+            thread.handle_session_update(update, cx).expect("entry applies");
++            thread
++                .handle_session_update(update, cx)
++                .expect("entry applies");
 +        };
 +        for i in 0..20 {
-+            push(acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
-+                format!("question {i}").into(),
-+            )));
-+            push(acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-+                format!("answer {i}").into(),
-+            )));
++            push(acp::SessionUpdate::UserMessageChunk(
++                acp::ContentChunk::new(format!("question {i}").into()),
++            ));
++            push(acp::SessionUpdate::AgentMessageChunk(
++                acp::ContentChunk::new(format!("answer {i}").into()),
++            ));
 +        }
 +        push(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
 +            "toolu_t1",
 +            "Run the suite",
 +        )));
 +        for i in 20..40 {
-+            push(acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
-+                format!("question {i}").into(),
-+            )));
-+            push(acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-+                format!("answer {i}").into(),
-+            )));
++            push(acp::SessionUpdate::UserMessageChunk(
++                acp::ContentChunk::new(format!("question {i}").into()),
++            ));
++            push(acp::SessionUpdate::AgentMessageChunk(
++                acp::ContentChunk::new(format!("answer {i}").into()),
++            ));
 +        }
 +    });
 +    cx.run_until_parked();
@@ -3431,7 +3518,9 @@ index 0000000..4240fb7
 +
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
-+    card.update_in(&mut cx, |card, window, cx| card.open_task(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.open_task(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    assert_eq!(active_session_id(&panel, &cx), sa);
 +}
@@ -3449,7 +3538,9 @@ index 0000000..4240fb7
 +
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
-+    card.update_in(&mut cx, |card, window, cx| card.open_task(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.open_task(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    assert_eq!(scroll_top(&panel, &mut cx), expected);
 +}
@@ -3472,11 +3563,17 @@ index 0000000..4240fb7
 +
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "n1", &mut cx).unwrap().task.id;
-+    card.update_in(&mut cx, |card, window, cx| card.open_task(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.open_task(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    assert_eq!(active_session_id(&panel, &cx), sa);
 +    let toolu_t1 = tool_call_index(&a, "toolu_t1", &cx);
-+    assert_ne!(scroll_top(&panel, &mut cx), toolu_t1, "no scroll to an unrelated tool call");
++    assert_ne!(
++        scroll_top(&panel, &mut cx),
++        toolu_t1,
++        "no scroll to an unrelated tool call"
++    );
 +}
 +
 +/// A failed open shows its error on the row. Injection: the row belongs to a thread
@@ -3492,16 +3589,25 @@ index 0000000..4240fb7
 +    });
 +    let connection = TaskActionsConnection::new();
 +    let foreign = open_titled_thread(&other, &connection, "Elsewhere", &mut cx);
-+    send_tasks(&foreign, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    send_tasks(
++        &foreign,
++        vec![wire_task("t1", "running", true, 1_000)],
++        &mut cx,
++    );
 +    let sf = session_of(&foreign, &cx);
-+    let foreign_view =
-+        other.read_with(&cx, |other, _| other.active_conversation_view().cloned().unwrap());
++    let foreign_view = other.read_with(&cx, |other, _| {
++        other.active_conversation_view().cloned().unwrap()
++    });
 +
 +    let card = card(&panel, &cx);
-+    card.update(&mut cx, |card, cx| card.sync_threads([&foreign_view].into_iter(), cx));
++    card.update(&mut cx, |card, cx| {
++        card.sync_threads([&foreign_view].into_iter(), cx)
++    });
 +    cx.run_until_parked();
 +    let id = find_row(&card, &sf, "t1", &mut cx).unwrap().task.id;
-+    card.update_in(&mut cx, |card, window, cx| card.open_task(sf.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.open_task(sf.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +
 +    let row = find_row(&card, &sf, "t1", &mut cx).expect("the row stays listed");
@@ -3774,10 +3880,10 @@ index 0000000..96d03f4
 +}
 diff --git a/crates/agent_ui/src/tasks_card/render_tests.rs b/crates/agent_ui/src/tasks_card/render_tests.rs
 new file mode 100644
-index 0000000..8e8882d
+index 0000000..49f0bb1
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/render_tests.rs
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,208 @@
 +// Story 013 / task 4.1 — the card painted over the agent panel
 +// (R1.1, R1.2, R1.7, R2.1, R2.2, R2.3, R2.4, R3.2). Filter: `tasks_card::render`.
 +//
@@ -3820,13 +3926,19 @@ index 0000000..8e8882d
 +
 +    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
 +    draw(&mut cx);
-+    assert!(cx.debug_bounds("tasks-card").is_some(), "a running task shows the card");
++    assert!(
++        cx.debug_bounds("tasks-card").is_some(),
++        "a running task shows the card"
++    );
 +    assert!(cx.debug_bounds("tasks-card-row-t1").is_some());
 +
 +    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
 +    advance(&mut cx, Duration::from_secs(11));
 +    draw(&mut cx);
-+    assert!(cx.debug_bounds("tasks-card").is_none(), "hidden once idle (R1.7)");
++    assert!(
++        cx.debug_bounds("tasks-card").is_none(),
++        "hidden once idle (R1.7)"
++    );
 +}
 +
 +#[gpui::test]
@@ -3850,9 +3962,15 @@ index 0000000..8e8882d
 +    let bottom_right = cx.debug_bounds("tasks-card").expect("card painted");
 +
 +    assert_eq!(default, top_right, "top_right is the default corner");
-+    assert!(top_right.origin.x > top_left.origin.x, "right is right of left");
++    assert!(
++        top_right.origin.x > top_left.origin.x,
++        "right is right of left"
++    );
 +    assert!(bottom_right.origin.x > bottom_left.origin.x);
-+    assert!(bottom_left.origin.y > top_left.origin.y, "bottom is below top");
++    assert!(
++        bottom_left.origin.y > top_left.origin.y,
++        "bottom is below top"
++    );
 +    assert!(bottom_right.origin.y > top_right.origin.y);
 +}
 +
@@ -3886,15 +4004,23 @@ index 0000000..8e8882d
 +    let card = card(&panel, &cx);
 +    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
 +    draw(&mut cx);
-+    assert!(cx.debug_bounds("tasks-card").is_none(), "the card is collapsed");
-+    let pill = cx.debug_bounds("tasks-card-pill").expect("the pill is painted");
++    assert!(
++        cx.debug_bounds("tasks-card").is_none(),
++        "the card is collapsed"
++    );
++    let pill = cx
++        .debug_bounds("tasks-card-pill")
++        .expect("the pill is painted");
 +    // Same corner (top_right): the pill hugs the card's right and top edges.
 +    assert!((pill.right() - expanded.right()).abs() < gpui::px(1.));
 +    assert!((pill.top() - expanded.top()).abs() < gpui::px(1.));
 +
 +    cx.simulate_click(pill.center(), Modifiers::none());
 +    draw(&mut cx);
-+    assert!(cx.debug_bounds("tasks-card").is_some(), "clicking the pill expands");
++    assert!(
++        cx.debug_bounds("tasks-card").is_some(),
++        "clicking the pill expands"
++    );
 +    assert!(cx.debug_bounds("tasks-card-pill").is_none());
 +}
 +
@@ -3925,7 +4051,10 @@ index 0000000..8e8882d
 +    assert!(cx.debug_bounds("tasks-card-details-t2").is_none());
 +    let watched = cx.debug_bounds("tasks-card-row-t1").unwrap();
 +    let plain = cx.debug_bounds("tasks-card-row-t2").unwrap();
-+    assert!(watched.size.height > plain.size.height, "the watched row is taller");
++    assert!(
++        watched.size.height > plain.size.height,
++        "the watched row is taller"
++    );
 +}
 +
 +/// A running row paints its elapsed time; once ended, the row paints its final
@@ -3942,12 +4071,21 @@ index 0000000..8e8882d
 +
 +    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
 +    draw(&mut cx);
-+    assert!(cx.debug_bounds("tasks-card-ended-t1").is_some(), "final status on show");
-+    assert!(cx.debug_bounds("tasks-card-elapsed-t1").is_none(), "no ticking clock once ended");
++    assert!(
++        cx.debug_bounds("tasks-card-ended-t1").is_some(),
++        "final status on show"
++    );
++    assert!(
++        cx.debug_bounds("tasks-card-elapsed-t1").is_none(),
++        "no ticking clock once ended"
++    );
 +
 +    advance(&mut cx, Duration::from_secs(9));
 +    draw(&mut cx);
-+    assert!(cx.debug_bounds("tasks-card-ended-t1").is_some(), "still on show at 9 s");
++    assert!(
++        cx.debug_bounds("tasks-card-ended-t1").is_some(),
++        "still on show at 9 s"
++    );
 +
 +    advance(&mut cx, Duration::from_secs(2));
 +    draw(&mut cx);
@@ -4143,10 +4281,10 @@ index 0000000..90ccf3e
 +}
 diff --git a/crates/agent_ui/src/tasks_card/stop_tests.rs b/crates/agent_ui/src/tasks_card/stop_tests.rs
 new file mode 100644
-index 0000000..7ab3520
+index 0000000..54c31cc
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/stop_tests.rs
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,150 @@
 +// Story 013 / task 5.1 — Stop with confirmation (R4.1, R4.2, R4.3).
 +// Filter: `tasks_card::stop`.
 +
@@ -4166,10 +4304,15 @@ index 0000000..7ab3520
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
 +
-+    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    assert!(cx.has_pending_prompt(), "Stop asks before sending");
-+    assert!(connection.stops().is_empty(), "nothing is sent while the prompt is open");
++    assert!(
++        connection.stops().is_empty(),
++        "nothing is sent while the prompt is open"
++    );
 +    let (message, detail) = cx.pending_prompt().unwrap();
 +    assert!(
 +        format!("{message} {detail}").contains("Task t1"),
@@ -4198,7 +4341,9 @@ index 0000000..7ab3520
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
 +
-+    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    cx.simulate_prompt_answer("Stop");
 +    cx.run_until_parked();
@@ -4217,7 +4362,9 @@ index 0000000..7ab3520
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
 +
-+    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    cx.simulate_prompt_answer("Stop");
 +    cx.run_until_parked();
@@ -4242,14 +4389,19 @@ index 0000000..7ab3520
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
 +
-+    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    assert!(connection.stops().is_empty());
 +
 +    // The window goes, and the prompt view and its sender with it.
 +    cx.update(|window, _| window.remove_window());
 +    cx.executor().run_until_parked();
-+    assert!(connection.stops().is_empty(), "a dropped prompt must not stop the task");
++    assert!(
++        connection.stops().is_empty(),
++        "a dropped prompt must not stop the task"
++    );
 +}
 +
 +/// The task ends while the prompt is open; answering Stop afterwards sends nothing
@@ -4264,23 +4416,31 @@ index 0000000..7ab3520
 +    let card = card(&panel, &cx);
 +    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
 +
-+    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
 +    cx.run_until_parked();
 +    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
 +    cx.simulate_prompt_answer("Stop");
 +    cx.run_until_parked();
 +
-+    assert!(connection.stops().is_empty(), "an ended task is not stopped");
++    assert!(
++        connection.stops().is_empty(),
++        "an ended task is not stopped"
++    );
 +    let row = find_row(&card, &sa, "t1", &mut cx).expect("the ended row is on show");
 +    assert_eq!(row.task.status, AgentTaskStatus::Completed);
-+    assert!(row.error.is_none(), "no error for a race the user did not cause");
++    assert!(
++        row.error.is_none(),
++        "no error for a race the user did not cause"
++    );
 +}
 diff --git a/crates/agent_ui/src/tasks_card/test_helpers.rs b/crates/agent_ui/src/tasks_card/test_helpers.rs
 new file mode 100644
-index 0000000..07d5444
+index 0000000..7a2a1cf
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/test_helpers.rs
-@@ -0,0 +1,416 @@
+@@ -0,0 +1,418 @@
 +// Story 013 — shared fixtures for the tasks card tests (patch 0033/0034).
 +//
 +// Declared in `src/tasks_card.rs` as:
@@ -4541,7 +4701,9 @@ index 0000000..07d5444
 +    let multi_workspace =
 +        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
 +    let workspace = multi_workspace
-+        .read_with(cx, |multi_workspace, _cx| multi_workspace.workspace().clone())
++        .read_with(cx, |multi_workspace, _cx| {
++            multi_workspace.workspace().clone()
++        })
 +        .unwrap();
 +    let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
 +    cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
