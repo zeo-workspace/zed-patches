@@ -1,0 +1,4763 @@
+From 13fd8b4e3dd1e162254bc2ae68ef8505694f64d0 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sun, 4 Oct 2026 13:57:25 -0300
+Subject: [PATCH] agent_ui: show the agent's tasks in a floating card over the
+ agent panel
+
+0034 gave AcpThread the adapter's task feed -- every live task of a session,
+how each one ended, and _claude/tasks/stop and /background over the
+connection -- and rendered none of it. A task sent to the background outlives
+the turn that launched it, so the transcript scrolls it away, and the only
+trace left is 0029's sidebar spinner: it says that something runs, not what,
+for how long, or how to stop it. This patch is the card that shows the tasks
+and acts on them (story 013). The tray notification is 0038.
+
+What the card is:
+
+  * One TasksCard per AgentPanel, created with the panel before any thread,
+    floating over the conversation in a corner of the panel. It lists the
+    live tasks of every conversation the panel holds -- the active one and
+    the retained ones -- grouped by thread: title and project once per group,
+    the tasks beneath, each with its status, elapsed time (repainted every
+    second while something runs), type, and a foreground/background chip. An
+    ended task keeps its final status on the card for 10 seconds, then drops
+    off. With nothing to show, the card is not drawn at all.
+
+  * The card owns only what belongs to no thread: minimized, watched, ended
+    rows still on show, per-row errors. The tasks are read live from each
+    root AcpThread, so there is no copy to drift. Minimized, it becomes a
+    pill carrying the running count. Disabled, hidden or minimized only stops
+    painting: it keeps following every thread in every state.
+
+  * Two settings, in default.json and settings_content:
+    agent.tasks_card.enabled (default true) and agent.tasks_card.position
+    (top_right, top_left, bottom_right or bottom_left; default top_right).
+    It defaults to ON because it costs nothing until there is a task: with
+    none, nothing is drawn.
+
+  * Placement is measured at prepaint, in TasksCardOverlay, painted deferred
+    so it sits over the panel's own floating controls. The card stays inside
+    the conversation's viewport -- clear of the toolbar above and of the
+    message editor's send, stop and model controls below -- or, for an empty
+    thread, inside the editor's text area. A plain absolute div spilled past
+    a small panel and covered exactly those controls.
+
+The actions, each a Tab stop with a tooltip and an accessible label:
+
+  * Stop asks first ("Stop this task?", naming it), then sends
+    _claude/tasks/stop. A prompt dropped unanswered is a Cancel. A task that
+    ended while the prompt was open is not the user's error, so its "is not
+    running" answer shows nothing; any other failure is shown on the row with
+    the whole error chain ({:#}), because the connection wraps the agent's
+    own text under its context and the outer line alone says nothing.
+
+  * Send to Background, offered only for a running foreground task that has
+    a tool call id, sends _claude/tasks/background. It does not ask: the task
+    keeps running, so nothing is lost. An answer that nothing moved is a row
+    error, not a silent no-op.
+
+  * Open brings the task's thread forward and scrolls to the tool call that
+    started it; the group header opens at its oldest running task. The card
+    holds no handle to the panel -- the panel owns it -- so it emits
+    TasksCardEvent::OpenTask and the owning panel acts. A thread the panel
+    does not hold is refused with a row error rather than loaded, which would
+    start its agent as the side effect of a click. A nested subagent's tool
+    call is not an entry of the root thread, so that task opens the thread
+    without scrolling.
+
+  * Watch shows a row's progress (tokens, tool uses, last tool, summary) and
+    marks its ending as one the tray should hear about (0038). In memory
+    only: a restart starts with nothing watched.
+
+Three changes reach into upstream code, and each is needed by the above:
+
+  * ConversationView's NewEntry handler syncs every entry not yet synced --
+    EntryViewState::synced_entry_count()..len, the count being new -- instead
+    of only len - 1. Entries pushed within one update reach the view as one
+    event each, all flushed after the last push, so the old handler synced
+    the last entry against a state missing the ones before it and indexed
+    past its end: a panic, reached by opening a task's thread whose entries
+    arrived in one batch. For one entry per flush it is identical; when
+    nothing is pending it is a no-op instead of a duplicate splice.
+
+  * AgentPanel::open_thread_by_session first reactivates a conversation the
+    panel already holds, by its thread id. A held thread with no metadata row
+    yet was otherwise reopened through the native agent as a second, empty
+    conversation. It also changes 0024's deep link in that one case: a link
+    to a thread that is already open now brings that thread forward.
+
+  * remove_retained_thread takes cx and tells the card; the raw removal is
+    split out as take_retained_thread, which test_unload_retained_thread now
+    uses, and one upstream test call site gains its cx. The card is synced
+    deferred and coalesced to the end of the effect cycle, because activating
+    a thread removes its view and re-adds it, and an immediate sync read that
+    gap as a closed thread and dropped its ended rows and watches.
+
+The dock caches the panel's view, so a notify from the card alone never
+repaints it: the panel observes the card and re-renders when the card shows
+or hides; once shown, the card repaints itself. The two AgentSettings struct
+literals in test modules (agent_ui, agent::tool_permissions) gain the new
+field, as they did for 0027: they construct the struct exhaustively.
+
+Rides the claude-agent-acp-plus flag BY DEPENDENCY, like 0011, 0013, 0029 and
+0034: only this adapter sends _meta["_claude/tasks"], and without it the card
+has nothing to list and draws nothing. It needs claude-agent-acp-plus 0.24.0
+or later. The released 0.23.6 sends only 0029's _claude/backgroundTasks count,
+never the snapshot -- measured live: two background sleeps ran and no card
+appeared -- so until 0.24.0 is published and the ebuild requires it, this card
+and 0034's feed beneath it are inert. Nothing breaks; nothing shows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index 5843217..c541492 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -1422,6 +1422,15 @@
+     //
+     // Default: card
+     "elicitation_placement": "card",
++    // The tasks card: a floating card in the agent panel listing the
++    // background tasks of the agent's threads.
++    "tasks_card": {
++      // Whether to show the card and, when it is minimized, its pill.
++      "enabled": true,
++      // The corner of the agent panel the card is anchored to. One of
++      // "top_right", "top_left", "bottom_right" or "bottom_left".
++      "position": "top_right",
++    },
+     // Whether to show the merge conflict indicator in the status bar
+     // that offers to resolve conflicts using the agent.
+     //
+diff --git a/crates/agent/src/tool_permissions.rs b/crates/agent/src/tool_permissions.rs
+index 3df102d..38f6d79 100644
+--- a/crates/agent/src/tool_permissions.rs
++++ b/crates/agent/src/tool_permissions.rs
+@@ -608,6 +608,10 @@ mod tests {
+             sandbox_permissions: Default::default(),
+             show_turn_stats: false,
+             elicitation_placement: settings::ElicitationPlacement::default(),
++            tasks_card: agent_settings::TasksCardSettings {
++                enabled: true,
++                position: settings::TasksCardPosition::default(),
++            },
+             show_merge_conflict_indicator: true,
+             max_idle_retained_threads: 5,
+             threads_sidebar: agent_settings::ThreadsSidebarSettings {
+diff --git a/crates/agent_settings/src/agent_settings.rs b/crates/agent_settings/src/agent_settings.rs
+index ab76f65..fdc7287 100644
+--- a/crates/agent_settings/src/agent_settings.rs
++++ b/crates/agent_settings/src/agent_settings.rs
+@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
+ use settings::{
+     DockPosition, DockSide, ElicitationPlacement, IntoGpui, LanguageModelParameters,
+     LanguageModelSelection, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting,
+-    Settings, SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide,
++    Settings, SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide, TasksCardPosition,
+     ThinkingBlockDisplay, ToolPermissionMode, update_settings_file,
+     update_settings_file_with_completion,
+ };
+@@ -249,11 +249,21 @@ pub struct AgentSettings {
+     pub message_editor_min_lines: usize,
+     pub show_turn_stats: bool,
+     pub elicitation_placement: ElicitationPlacement,
++    pub tasks_card: TasksCardSettings,
+     pub show_merge_conflict_indicator: bool,
+     pub tool_permissions: ToolPermissions,
+     pub sandbox_permissions: SandboxPermissions,
+ }
+ 
++/// The resolved `agent.tasks_card` settings.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct TasksCardSettings {
++    /// Whether the tasks card (and its minimized pill) is shown at all.
++    pub enabled: bool,
++    /// The corner of the agent panel the card is anchored to.
++    pub position: TasksCardPosition,
++}
++
+ #[derive(Clone, Copy, Debug)]
+ pub struct ThreadsSidebarSettings {
+     pub auto_open: bool,
+@@ -846,6 +856,13 @@ impl Settings for AgentSettings {
+             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),
+             show_turn_stats: agent.show_turn_stats.unwrap(),
+             elicitation_placement: agent.elicitation_placement.unwrap(),
++            tasks_card: {
++                let tasks_card = agent.tasks_card.unwrap();
++                TasksCardSettings {
++                    enabled: tasks_card.enabled.unwrap(),
++                    position: tasks_card.position.unwrap(),
++                }
++            },
+             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
+             tool_permissions: compile_tool_permissions(agent.tool_permissions),
+             sandbox_permissions: compile_sandbox_permissions(agent.sandbox_permissions),
+@@ -2265,4 +2282,6 @@ mod tests {
+             assert_eq!(user_layout.project_panel_dock, Some(DockSide::Right));
+         });
+     }
++
++    include!("agent_settings_tasks_card_tests.rs");
+ }
+diff --git a/crates/agent_settings/src/agent_settings_tasks_card_tests.rs b/crates/agent_settings/src/agent_settings_tasks_card_tests.rs
+new file mode 100644
+index 0000000..022bda7
+--- /dev/null
++++ b/crates/agent_settings/src/agent_settings_tasks_card_tests.rs
+@@ -0,0 +1,70 @@
++// Story 013 / task 3.1 — `agent.tasks_card.{enabled, position}` (R2.3, R2.4).
++//
++// Included at the end of `mod tests` in `agent_settings.rs`:
++//
++//     include!("agent_settings_tasks_card_tests.rs");
++//
++// Filter: `cargo test -p agent_settings tasks_card`.
++
++#[gpui::test]
++fn test_tasks_card_defaults_to_enabled_in_the_top_right(cx: &mut gpui::App) {
++    let store = SettingsStore::test(cx);
++    cx.set_global(store);
++    project::DisableAiSettings::register(cx);
++    AgentSettings::register(cx);
++
++    let tasks_card = &AgentSettings::get_global(cx).tasks_card;
++    assert!(tasks_card.enabled);
++    assert_eq!(tasks_card.position, settings::TasksCardPosition::TopRight);
++}
++
++#[gpui::test]
++fn test_tasks_card_follows_user_settings_one_key_at_a_time(cx: &mut gpui::App) {
++    use settings::TasksCardPosition;
++
++    let store = SettingsStore::test(cx);
++    cx.set_global(store);
++    project::DisableAiSettings::register(cx);
++    AgentSettings::register(cx);
++
++    // Each key is independent: setting one must not reset the other to a
++    // zero value (`enabled: false`, or the first corner).
++    for (content, enabled, position) in [
++        (
++            r#"{"agent": {"tasks_card": {"position": "bottom_left"}}}"#,
++            true,
++            TasksCardPosition::BottomLeft,
++        ),
++        (
++            r#"{"agent": {"tasks_card": {"enabled": false}}}"#,
++            false,
++            TasksCardPosition::TopRight,
++        ),
++        (
++            r#"{"agent": {"tasks_card": {"enabled": false, "position": "top_left"}}}"#,
++            false,
++            TasksCardPosition::TopLeft,
++        ),
++        (
++            r#"{"agent": {"tasks_card": {"position": "bottom_right"}}}"#,
++            true,
++            TasksCardPosition::BottomRight,
++        ),
++        (
++            r#"{"agent": {"tasks_card": {"position": "top_right"}}}"#,
++            true,
++            TasksCardPosition::TopRight,
++        ),
++        (r#"{"agent": {"tasks_card": {}}}"#, true, TasksCardPosition::TopRight),
++        (r#"{"agent": {}}"#, true, TasksCardPosition::TopRight),
++    ] {
++        SettingsStore::update_global(cx, |store, cx| {
++            store
++                .set_user_settings(content, cx)
++                .expect("user settings should load");
++        });
++        let tasks_card = &AgentSettings::get_global(cx).tasks_card;
++        assert_eq!(tasks_card.enabled, enabled, "{content}");
++        assert_eq!(tasks_card.position, position, "{content}");
++    }
++}
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 3e32c75..e01aee2 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -39,6 +39,7 @@ use crate::ExpandMessageEditor;
+ use crate::ManageProfiles;
+ use crate::agent_connection_store::AgentConnectionStore;
+ use crate::completion_provider::{AgentContextSelection, AgentContextSource};
++use crate::tasks_card::{TasksCard, TasksCardEvent, TasksCardOverlay};
+ use crate::terminal_thread_metadata_store::{
+     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
+     normalize_terminal_custom_title, terminal_title_without_prefix,
+@@ -74,10 +75,10 @@ use feature_flags::{CreateThreadToolFeatureFlag, FeatureFlagAppExt as _};
+ use fs::Fs;
+ use futures::FutureExt as _;
+ use gpui::{
+-    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
+-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
+-    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
+-    pulsating_between,
++    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, Bounds,
++    ClipboardItem, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
++    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, deferred, point,
++    prelude::*, pulsating_between,
+ };
+ use language::LanguageRegistry;
+ use language_model::LanguageModelRegistry;
+@@ -1153,6 +1154,14 @@ pub struct AgentPanel {
+     _settings_subscription: Subscription,
+     retained_thread_subscriptions: HashMap<ThreadId, Subscription>,
+     last_context_source: Option<AgentContextSource>,
++    /// The floating list of the live tasks of every conversation this panel holds.
++    tasks_card: Entity<TasksCard>,
++    /// A `sync_tasks_card` is already deferred to the end of this effect cycle.
++    tasks_card_sync_pending: bool,
++    /// Whether the tasks card was visible when it last notified.
++    tasks_card_visible: bool,
++    _tasks_card_observation: Subscription,
++    _tasks_card_subscription: Subscription,
+ 
+     is_active: bool,
+ }
+@@ -1460,7 +1469,7 @@ impl AgentPanel {
+         })
+     }
+ 
+-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
++    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+         let fs = workspace.app_state().fs.clone();
+         let user_store = workspace.app_state().user_store.clone();
+         let project = workspace.project();
+@@ -1521,7 +1530,7 @@ impl AgentPanel {
+             &ThreadMetadataStore::global(cx),
+             |this, _store, event, cx| {
+                 let ThreadMetadataStoreEvent::ThreadArchived(thread_id) = event;
+-                if this.remove_retained_thread(thread_id).is_some() {
++                if this.remove_retained_thread(thread_id, cx).is_some() {
+                     cx.notify();
+                 }
+             },
+@@ -1529,6 +1538,8 @@ impl AgentPanel {
+ 
+         let _settings_subscription = cx.observe_global::<SettingsStore>(|this, cx| {
+             this.cleanup_retained_threads(cx);
++            // The tasks card's `enabled` and `position` are read when the panel renders.
++            cx.notify();
+         });
+ 
+         cx.on_release(|this, cx| {
+@@ -1536,6 +1547,38 @@ impl AgentPanel {
+         })
+         .detach();
+ 
++        // Created with the panel, before any thread: it follows every conversation
++        // from the first one, whether or not it is enabled or shown.
++        let tasks_card = cx.new(TasksCard::new);
++        // The dock caches this panel's view, and a hidden card is not rendered at
++        // all, so the card's own notify would never reach the screen: whether it
++        // shows is decided here, in `render`. Once shown, the card repaints itself;
++        // only showing and hiding need the panel.
++        let _tasks_card_observation = cx.observe(&tasks_card, |panel, card, cx| {
++            let visible = card.read(cx).is_visible(cx);
++            if visible != panel.tasks_card_visible {
++                panel.tasks_card_visible = visible;
++                cx.notify();
++            }
++        });
++        let _tasks_card_subscription = cx.subscribe_in(
++            &tasks_card,
++            window,
++            |panel, _card, event, window, cx| match event {
++                TasksCardEvent::OpenTask {
++                    session_id,
++                    task_id,
++                    tool_call_id,
++                } => panel.open_task_from_card(
++                    session_id.clone(),
++                    task_id.clone(),
++                    tool_call_id.as_ref(),
++                    window,
++                    cx,
++                ),
++            },
++        );
++
+         let panel = Self {
+             workspace_id,
+             base_view,
+@@ -1575,6 +1618,11 @@ impl AgentPanel {
+             _settings_subscription,
+             retained_thread_subscriptions: HashMap::default(),
+             last_context_source: None,
++            tasks_card,
++            tasks_card_sync_pending: false,
++            tasks_card_visible: false,
++            _tasks_card_observation,
++            _tasks_card_subscription,
+             is_active: false,
+         };
+ 
+@@ -1718,6 +1766,26 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        // A conversation this panel already holds is brought forward as it is: a
++        // thread with no metadata row yet would otherwise be reopened through the
++        // native agent below, as a second, empty conversation.
++        if let Some(view) = self.held_conversation_view(&session_id, cx) {
++            let (agent, thread_id) = {
++                let view = view.read(cx);
++                (view.agent_key().clone(), view.thread_id)
++            };
++            self.load_agent_thread(
++                agent,
++                thread_id,
++                None,
++                None,
++                true,
++                AgentThreadSource::AgentPanel,
++                window,
++                cx,
++            );
++            return;
++        }
+         let metadata = ThreadMetadataStore::try_global(cx)
+             .and_then(|store| store.read(cx).entry_by_session(&session_id).cloned());
+         let Some(metadata) = metadata else {
+@@ -1736,6 +1804,92 @@ impl AgentPanel {
+         );
+     }
+ 
++    /// The conversation this panel holds — active or retained — whose root thread
++    /// is `session_id`'s.
++    fn held_conversation_view(
++        &self,
++        session_id: &acp::SessionId,
++        cx: &App,
++    ) -> Option<Entity<ConversationView>> {
++        self.conversation_views().into_iter().find(|view| {
++            view.read(cx)
++                .root_thread(cx)
++                .is_some_and(|thread| thread.read(cx).session_id() == session_id)
++        })
++    }
++
++    /// Opens a task's thread from the tasks card at the tool call that started it
++    /// (R4.6); a failure is shown on the task's row.
++    fn open_task_from_card(
++        &mut self,
++        session_id: acp::SessionId,
++        task_id: acp_thread::AgentTaskId,
++        tool_call_id: Option<&acp::ToolCallId>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let Err(error) = self.open_thread_at_tool_call(&session_id, tool_call_id, window, cx)
++        else {
++            return;
++        };
++        let message = format!("{error:#}");
++        log::error!(
++            "agent panel: opening task {task_id} of session {session_id} from the tasks card \
++             failed: {message}"
++        );
++        self.tasks_card.update(cx, |card, cx| {
++            card.set_row_error((session_id, task_id), message.into(), cx)
++        });
++    }
++
++    fn open_thread_at_tool_call(
++        &mut self,
++        session_id: &acp::SessionId,
++        tool_call_id: Option<&acp::ToolCallId>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Result<()> {
++        // The card lists only the conversations this panel holds. Anything else is
++        // a card out of step with its panel, and opening it would load a new
++        // conversation — starting its agent — as the side effect of a click.
++        if self.held_conversation_view(session_id, cx).is_none() {
++            return Err(anyhow!(
++                "the thread of session {session_id} is not open in this agent panel"
++            ));
++        }
++        self.open_thread_by_session(session_id.clone(), window, cx);
++        let thread = self
++            .active_agent_thread(cx)
++            .filter(|thread| thread.read(cx).session_id() == session_id)
++            .with_context(|| format!("the thread of session {session_id} did not come forward"))?;
++
++        let Some(tool_call_id) = tool_call_id else {
++            return Ok(());
++        };
++        // A nested subagent's tool call lives in its own thread, not among the
++        // root's entries: that task opens the thread only.
++        let Some(item_ix) = thread.read(cx).entries().iter().position(|entry| {
++            matches!(entry, acp_thread::AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id)
++        }) else {
++            log::debug!(
++                "agent panel: tool call {tool_call_id} is not an entry of the root thread of \
++                 session {session_id}; opened without scrolling"
++            );
++            return Ok(());
++        };
++        let thread_view = self
++            .active_thread_view(cx)
++            .with_context(|| format!("the thread of session {session_id} has no view"))?;
++        thread_view.update(cx, |thread_view, cx| {
++            thread_view.list_state.scroll_to(gpui::ListOffset {
++                item_ix,
++                offset_in_item: px(0.),
++            });
++            cx.notify();
++        });
++        Ok(())
++    }
++
+     fn external_thread_by_session(
+         &mut self,
+         agent: Agent,
+@@ -1779,6 +1933,9 @@ impl AgentPanel {
+         let old_view = std::mem::replace(&mut self.base_view, BaseView::Uninitialized);
+         self.retain_running_thread(old_view, cx);
+         self.activate_draft(false, AgentThreadSource::AgentPanel, window, cx);
++        // `activate_draft` returns early without a project, and an empty draft is
++        // not retained, so neither path is guaranteed to have told the card.
++        self.sync_tasks_card(cx);
+         self.serialize(cx);
+         cx.emit(AgentPanelEvent::ActiveViewChanged);
+         cx.notify();
+@@ -3232,7 +3389,7 @@ impl AgentPanel {
+             return false;
+         }
+ 
+-        self.remove_retained_thread(&thread_id);
++        self.remove_retained_thread(&thread_id, cx);
+         self.set_ephemeral_draft(conversation_view, cx);
+         true
+     }
+@@ -3310,7 +3467,7 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        let conversation_view = if let Some(view) = self.remove_retained_thread(&id) {
++        let conversation_view = if let Some(view) = self.remove_retained_thread(&id, cx) {
+             self.try_make_empty_draft_ephemeral(view.clone(), cx);
+             view
+         } else if let Some(draft) = &self.draft_thread {
+@@ -3362,7 +3519,7 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        self.remove_retained_thread(&id);
++        self.remove_retained_thread(&id, cx);
+         ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+             store.delete(id, cx);
+         });
+@@ -3384,6 +3541,9 @@ impl AgentPanel {
+             } else {
+                 self.refresh_base_view_subscriptions(window, cx);
+             }
++            // `activate_draft` returns early without a project, leaving the removed
++            // view on the card.
++            self.sync_tasks_card(cx);
+             self.serialize(cx);
+             cx.emit(AgentPanelEvent::ActiveViewChanged);
+             cx.notify();
+@@ -4277,6 +4437,7 @@ impl AgentPanel {
+         self.retained_threads
+             .insert(thread_id, conversation_view.clone());
+         self.observe_retained_thread(thread_id, conversation_view, cx);
++        self.sync_tasks_card(cx);
+     }
+ 
+     fn observe_retained_thread(
+@@ -4313,12 +4474,115 @@ impl AgentPanel {
+             .insert(thread_id, subscription);
+     }
+ 
+-    fn remove_retained_thread(&mut self, thread_id: &ThreadId) -> Option<Entity<ConversationView>> {
++    fn remove_retained_thread(
++        &mut self,
++        thread_id: &ThreadId,
++        cx: &mut Context<Self>,
++    ) -> Option<Entity<ConversationView>> {
++        let removed = self.take_retained_thread(thread_id);
++        if removed.is_some() {
++            self.sync_tasks_card(cx);
++        }
++        removed
++    }
++
++    /// `remove_retained_thread` without telling the tasks card.
++    fn take_retained_thread(&mut self, thread_id: &ThreadId) -> Option<Entity<ConversationView>> {
+         self.retained_thread_subscriptions.remove(thread_id);
+         self.retained_threads.remove(thread_id)
+     }
+ 
+-    fn cleanup_retained_threads(&mut self, cx: &App) {
++    #[cfg(test)]
++    pub(crate) fn tasks_card(&self) -> &Entity<TasksCard> {
++        &self.tasks_card
++    }
++
++    /// Hands the tasks card the conversations this panel now holds (R1.8).
++    ///
++    /// Deferred to the end of the effect cycle: a view moving between the active
++    /// slot and the retained set is removed and then re-added, and the card must
++    /// not see the moment in between as a closed thread — it would drop the
++    /// thread's ended rows and watches.
++    fn sync_tasks_card(&mut self, cx: &mut Context<Self>) {
++        if self.tasks_card_sync_pending {
++            return;
++        }
++        self.tasks_card_sync_pending = true;
++        let panel = cx.weak_entity();
++        cx.defer(move |cx| {
++            panel
++                .update(cx, |panel, cx| {
++                    panel.tasks_card_sync_pending = false;
++                    let views = panel.conversation_views();
++                    panel
++                        .tasks_card
++                        .update(cx, |card, cx| card.sync_threads(views.iter(), cx));
++                })
++                .ok();
++        });
++    }
++
++    /// The tasks card over the panel, in the configured corner (R1.1, R2.3), or
++    /// nothing while it is disabled or has nothing to show (R1.7, R2.4).
++    ///
++    /// Deferred so it paints after — over — the conversation and its own floating
++    /// controls; an absolute child alone is covered by any later sibling.
++    fn render_tasks_card(&self, cx: &App) -> Option<impl IntoElement> {
++        if !self.tasks_card.read(cx).is_visible(cx) {
++            return None;
++        }
++        let toolbar_height = Tab::container_height(cx);
++        let thread_view = match self.visible_surface() {
++            VisibleSurface::AgentThread(_) => self.active_thread_view(cx),
++            VisibleSurface::Uninitialized | VisibleSurface::Terminal(_) => None,
++        };
++        // The card keeps clear of the toolbar above and of the message editor
++        // below — its send, stop and model controls — and covers only the
++        // conversation. Measured at prepaint, so it follows the editor as it grows.
++        let free_area = move |content: Bounds<Pixels>, cx: &App| {
++            let below_toolbar = Bounds::from_corners(
++                point(content.left(), content.top() + toolbar_height),
++                content.bottom_right(),
++            );
++            let Some(thread_view) = thread_view.as_ref() else {
++                return below_toolbar;
++            };
++            let thread_view = thread_view.read(cx);
++            if thread_view.list_state.item_count() > 0 {
++                // The entries' viewport: everything between the thread's own
++                // header bars and the callouts and editor stacked under it.
++                let viewport = thread_view.list_state.viewport_bounds();
++                if !viewport.is_empty() {
++                    return viewport;
++                }
++            } else if let Some(editor) = thread_view
++                .message_editor
++                .read(cx)
++                .editor()
++                .read(cx)
++                .last_bounds()
++            {
++                // An empty thread's editor fills the panel; its controls sit under
++                // the text area, so the text area is what the card may cover.
++                return Bounds::from_corners(
++                    below_toolbar.origin,
++                    point(
++                        below_toolbar.right(),
++                        editor.bottom().min(below_toolbar.bottom()),
++                    ),
++                );
++            }
++            below_toolbar
++        };
++        Some(deferred(TasksCardOverlay::new(
++            self.tasks_card.clone(),
++            AgentSettings::get_global(cx).tasks_card.position,
++            DynamicSpacing::Base08.px(cx),
++            free_area,
++        )))
++    }
++
++    fn cleanup_retained_threads(&mut self, cx: &mut Context<Self>) {
+         let mut potential_removals = self
+             .retained_threads
+             .iter()
+@@ -4345,7 +4609,7 @@ impl AgentPanel {
+             .take(n)
+             .collect::<Vec<_>>();
+         for id in to_remove {
+-            self.remove_retained_thread(&id);
++            self.remove_retained_thread(&id, cx);
+         }
+     }
+ 
+@@ -4434,6 +4698,7 @@ impl AgentPanel {
+             }
+         };
+         self.serialize(cx);
++        self.sync_tasks_card(cx);
+     }
+ 
+     fn visible_surface(&self) -> VisibleSurface<'_> {
+@@ -4480,7 +4745,7 @@ impl AgentPanel {
+                             this.draft_thread = None;
+                             this._draft_editor_observation = None;
+                         }
+-                        this.remove_retained_thread(&thread_id);
++                        this.remove_retained_thread(&thread_id, cx);
+                         cx.emit(AgentPanelEvent::ThreadInteracted { thread_id });
+                     }
+                 },
+@@ -4556,7 +4821,7 @@ impl AgentPanel {
+             );
+             return;
+         }
+-        if let Some(conversation_view) = self.remove_retained_thread(&thread_id) {
++        if let Some(conversation_view) = self.remove_retained_thread(&thread_id, cx) {
+             self.try_make_empty_draft_ephemeral(conversation_view.clone(), cx);
+             self.set_base_view(
+                 BaseView::AgentThread { conversation_view },
+@@ -6596,6 +6861,7 @@ impl Render for AgentPanel {
+         // - Scrolling in all views works as expected
+         // - Files can be dropped into the panel
+         let content = v_flex()
++            .debug_selector(|| "agent-panel".into())
+             .key_context(self.key_context())
+             .relative()
+             .size_full()
+@@ -6679,7 +6945,8 @@ impl Render for AgentPanel {
+                         .child(self.render_drag_target(cx))
+                 }
+             })
+-            .children(self.render_trial_end_upsell(window, cx));
++            .children(self.render_trial_end_upsell(window, cx))
++            .children(self.render_tasks_card(cx));
+ 
+         match self.visible_font_size() {
+             WhichFontSize::AgentFont => {
+@@ -6717,7 +6984,7 @@ impl AgentPanel {
+     /// Drops a thread's `ConversationView` from `retained_threads` without
+     /// deleting its metadata or kvp state. Simulates the post-restart
+     pub fn test_unload_retained_thread(&mut self, id: ThreadId) -> bool {
+-        self.remove_retained_thread(&id).is_some()
++        self.take_retained_thread(&id).is_some()
+     }
+ 
+     /// Opens an external thread using an arbitrary AgentServer.
+@@ -14282,8 +14549,8 @@ mod tests {
+         // directly remove from retained_threads and drop the handle
+         // so on_release → close_all_sessions fires only on A.
+         drop(retained_conversation_a);
+-        panel.update(&mut cx, |panel, _cx| {
+-            panel.remove_retained_thread(&_thread_id_a);
++        panel.update(&mut cx, |panel, cx| {
++            panel.remove_retained_thread(&_thread_id_a, cx);
+         });
+         cx.run_until_parked();
+ 
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 79614ae..42b7a51 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -25,6 +25,7 @@ mod model_selector;
+ mod model_selector_popover;
+ mod profile_selector;
+ mod set_as_default;
++mod tasks_card;
+ mod terminal_codegen;
+ mod terminal_inline_assistant;
+ pub mod terminal_thread_metadata_store;
+@@ -1025,6 +1026,10 @@ mod tests {
+             sandbox_permissions: Default::default(),
+             show_turn_stats: false,
+             elicitation_placement: settings::ElicitationPlacement::default(),
++            tasks_card: agent_settings::TasksCardSettings {
++                enabled: true,
++                position: settings::TasksCardPosition::default(),
++            },
+             show_merge_conflict_indicator: true,
+             max_idle_retained_threads: 5,
+             threads_sidebar: agent_settings::ThreadsSidebarSettings {
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index 36d1dda..050082d 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -1858,21 +1858,30 @@ impl ConversationView {
+             }
+             AcpThreadEvent::NewEntry => {
+                 let len = thread.read(cx).entries().len();
+-                let index = len - 1;
+                 if let Some(active) = self.thread_view(&session_id) {
+                     let entry_view_state = active.read(cx).entry_view_state.clone();
+                     let list_state = active.read(cx).list_state.clone();
++                    // Entries pushed within one update reach the view as one event
++                    // each, all flushed after the last push: the first event syncs
++                    // every entry the view has not synced yet, the others find none.
++                    // Counted on the entry state, not the list, which may also hold
++                    // the generating indicator.
++                    let new_entries = entry_view_state.read(cx).synced_entry_count()..len;
+                     entry_view_state.update(cx, |view_state, cx| {
+-                        view_state.sync_entry(index, thread, window, cx);
+-                        list_state.splice_focusable(
+-                            index..index,
+-                            [view_state
+-                                .entry(index)
+-                                .and_then(|entry| entry.focus_handle(cx))],
+-                        );
++                        for index in new_entries.clone() {
++                            view_state.sync_entry(index, thread, window, cx);
++                            list_state.splice_focusable(
++                                index..index,
++                                [view_state
++                                    .entry(index)
++                                    .and_then(|entry| entry.focus_handle(cx))],
++                            );
++                        }
+                     });
+                     active.update(cx, |active, cx| {
+-                        active.sync_elicitation_state_for_entry(index, window, cx);
++                        for index in new_entries {
++                            active.sync_elicitation_state_for_entry(index, window, cx);
++                        }
+                         active.sync_editor_mode(cx);
+                         active.sync_generating_indicator(cx);
+                     });
+diff --git a/crates/agent_ui/src/entry_view_state.rs b/crates/agent_ui/src/entry_view_state.rs
+index afdb13d..3131bd1 100644
+--- a/crates/agent_ui/src/entry_view_state.rs
++++ b/crates/agent_ui/src/entry_view_state.rs
+@@ -229,6 +229,11 @@ impl EntryViewState {
+         self.entries.get(index)
+     }
+ 
++    /// How many of the thread's entries have been synced into this state.
++    pub fn synced_entry_count(&self) -> usize {
++        self.entries.len()
++    }
++
+     pub fn sync_entry(
+         &mut self,
+         index: usize,
+diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
+new file mode 100644
+index 0000000..698e941
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card.rs
+@@ -0,0 +1,1621 @@
++//! The tasks card: one floating list of the live tasks of every conversation the
++//! agent panel holds (story 013, patch `0037`).
++//!
++//! The card owns only the state that belongs to no thread — minimized, watched,
++//! ended rows still on show, per-row errors. The tasks themselves are read live
++//! from each root `AcpThread` (story 012's feed), so the card never holds a copy
++//! that could drift, except for an ended task, which the adapter may drop from its
++//! next snapshot while the card still has to show it for `ENDED_ROW_TTL`.
++//!
++//! Disabled, hidden or minimized only stops painting: the card keeps syncing
++//! threads and receiving their events in every state.
++
++use std::{
++    cmp::Reverse,
++    time::{Duration, Instant, SystemTime},
++};
++
++use acp_thread::{AcpThread, AcpThreadEvent, AgentTask, AgentTaskId, AgentTaskStatus};
++use agent_client_protocol::schema::v1 as acp;
++use agent_settings::AgentSettings;
++use collections::{HashMap, HashSet};
++use gpui::{
++    AnyElement, AnyView, App, AvailableSpace, Bounds, Context, Element, Entity, EntityId,
++    EventEmitter, FocusHandle, GlobalElementId, InspectorElementId, LayoutId, Pixels, PromptLevel,
++    Render, SharedString, Style, Subscription, Task, WeakEntity, Window, point, size,
++};
++use settings::{Settings as _, SettingsStore, TasksCardPosition};
++use ui::{ButtonLike, Chip, CommonAnimationExt as _, Tooltip, prelude::*};
++
++use crate::DEFAULT_THREAD_TITLE;
++use crate::conversation_view::ConversationView;
++
++#[cfg(test)]
++mod test_helpers;
++
++#[cfg(test)]
++#[path = "tasks_card/model_tests.rs"]
++mod model;
++
++#[cfg(test)]
++#[path = "tasks_card/panel_close_tests.rs"]
++mod panel_close;
++
++#[cfg(test)]
++#[path = "tasks_card/render_tests.rs"]
++mod render;
++
++#[cfg(test)]
++#[path = "tasks_card/placement_tests.rs"]
++mod placement;
++
++#[cfg(test)]
++#[path = "tasks_card/accessibility_tests.rs"]
++mod accessibility;
++
++#[cfg(test)]
++#[path = "tasks_card/live_tests.rs"]
++mod live;
++
++#[cfg(test)]
++#[path = "tasks_card/stop_tests.rs"]
++mod stop;
++
++#[cfg(test)]
++#[path = "tasks_card/background_tests.rs"]
++mod background;
++
++#[cfg(test)]
++#[path = "tasks_card/row_error_tests.rs"]
++mod row_error;
++
++#[cfg(test)]
++#[path = "tasks_card/open_tests.rs"]
++mod open;
++
++/// How long an ended task's final status stays on the card (R1.6).
++pub(crate) const ENDED_ROW_TTL: Duration = Duration::from_secs(10);
++
++/// How often a running row's elapsed time is repainted (R1.4).
++const ELAPSED_TICK: Duration = Duration::from_secs(1);
++
++/// A task is named by its thread and its id: two threads may run tasks with the
++/// same id, and the adapter only promises uniqueness within a session.
++pub(crate) type TaskKey = (acp::SessionId, AgentTaskId);
++
++/// What the card asks of the agent panel that hosts it. The card holds no handle
++/// to the panel — the panel owns the card — so it asks through an event the panel
++/// subscribes to, which also reaches exactly the panel that owns this card.
++#[derive(Clone, Debug)]
++pub enum TasksCardEvent {
++    /// Bring the task's thread forward and, when `tool_call_id` is given and the
++    /// root thread holds that tool call, scroll to it (R4.6). A failure comes back
++    /// through `set_row_error` on the task's row.
++    OpenTask {
++        session_id: acp::SessionId,
++        task_id: AgentTaskId,
++        tool_call_id: Option<acp::ToolCallId>,
++    },
++}
++
++impl EventEmitter<TasksCardEvent> for TasksCard {}
++
++/// The rows of one thread, as the card lists them.
++#[derive(Clone, Debug)]
++pub struct ThreadGroup {
++    pub session_id: acp::SessionId,
++    pub title: SharedString,
++    /// The last component of the thread's first work directory, or empty.
++    pub project: SharedString,
++    pub rows: Vec<TaskRow>,
++}
++
++/// One task on the card: a running task, or an ended one still on show.
++#[derive(Clone, Debug)]
++pub struct TaskRow {
++    pub task: AgentTask,
++    pub watched: bool,
++    pub error: Option<SharedString>,
++}
++
++pub struct TasksCard {
++    /// One entry per conversation the panel holds, in the order it handed them over.
++    views: Vec<HeldView>,
++    /// Kept for the whole Zeo session, never persisted (R2.5).
++    minimized: bool,
++    /// In memory only, so a restart starts with nothing watched (R3.3).
++    watched: HashSet<TaskKey>,
++    /// The final copy of each task whose ending reached the card, until it expires.
++    ended: HashMap<TaskKey, EndedRow>,
++    /// The last stop or background error of a row (R4.3, R4.7).
++    row_errors: HashMap<TaskKey, RowError>,
++    /// Counts endings as they reach the card, to order ended-only groups.
++    endings_seen: u64,
++    /// The single wake scheduled at the earliest expiry of `ended`.
++    _expiry: Option<Task<()>>,
++    /// Repaints the elapsed times every second; only exists while the card is
++    /// expanded and enabled with a task running, so an idle card never wakes.
++    _tick: Option<Task<()>>,
++    /// Re-evaluates the tick when the card is enabled or disabled in settings.
++    _settings_observation: Subscription,
++    minimize_focus_handle: FocusHandle,
++    pill_focus_handle: FocusHandle,
++    /// One per control of each row on show, kept across renders so keyboard focus
++    /// survives a repaint (Q14); a row's handles go when the row does.
++    row_focus_handles: HashMap<(TaskKey, RowControl), FocusHandle>,
++    /// The same for each group header's Open control; it goes with its group.
++    group_focus_handles: HashMap<acp::SessionId, FocusHandle>,
++}
++
++/// A per-row control that takes keyboard focus.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++enum RowControl {
++    Watch,
++    Stop,
++    Background,
++    Open,
++}
++
++/// An error shown on a row, with the task as it was when the error arrived: the
++/// error lasts until a snapshot changes that task.
++#[derive(Clone, Debug)]
++struct RowError {
++    message: SharedString,
++    task: Option<AgentTask>,
++}
++
++/// A conversation the panel holds. Its root thread may arrive after the view
++/// itself (a thread still loading), so the view is observed until it does.
++struct HeldView {
++    view_id: EntityId,
++    thread: Option<HeldThread>,
++    _observation: Subscription,
++}
++
++struct HeldThread {
++    thread: WeakEntity<AcpThread>,
++    thread_id: EntityId,
++    session_id: acp::SessionId,
++    _subscription: Subscription,
++}
++
++#[derive(Clone, Debug)]
++struct EndedRow {
++    task: AgentTask,
++    expires_at: Instant,
++    /// Higher means the ending reached the card more recently.
++    sequence: u64,
++}
++
++/// Groups with a running task come first, oldest running task first; then the
++/// groups holding only ended rows, most recent ending first (R1.3).
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++enum GroupOrder {
++    Running(SystemTime),
++    EndedOnly(Reverse<u64>),
++}
++
++impl TasksCard {
++    pub fn new(cx: &mut Context<Self>) -> Self {
++        Self {
++            views: Vec::new(),
++            minimized: false,
++            watched: HashSet::default(),
++            ended: HashMap::default(),
++            row_errors: HashMap::default(),
++            endings_seen: 0,
++            _expiry: None,
++            _tick: None,
++            _settings_observation: cx
++                .observe_global::<SettingsStore>(|card, cx| card.update_tick(cx)),
++            minimize_focus_handle: control_focus_handle(cx),
++            pill_focus_handle: control_focus_handle(cx),
++            row_focus_handles: HashMap::default(),
++            group_focus_handles: HashMap::default(),
++        }
++    }
++
++    /// Makes the card follow exactly `views`: new conversations are subscribed to,
++    /// conversations no longer held are dropped with their rows (R1.8).
++    pub fn sync_threads<'a>(
++        &mut self,
++        views: impl Iterator<Item = &'a Entity<ConversationView>>,
++        cx: &mut Context<Self>,
++    ) {
++        let mut previous = std::mem::take(&mut self.views);
++        let mut held = Vec::new();
++        let mut seen = HashSet::default();
++        for view in views {
++            let view_id = view.entity_id();
++            if !seen.insert(view_id) {
++                continue;
++            }
++            match previous.iter().position(|held| held.view_id == view_id) {
++                Some(ix) => held.push(previous.swap_remove(ix)),
++                None => held.push(Self::hold_view(view, cx)),
++            }
++        }
++        // Dropping what is left of `previous` drops its subscriptions.
++        self.views = held;
++        self.forget_unheld_sessions(cx);
++        self.update_tick(cx);
++        cx.notify();
++    }
++
++    /// The card's projection: the running tasks of every held thread plus the
++    /// unexpired ended rows, grouped by thread and ordered per R1.3.
++    pub fn rows(&self, cx: &App) -> Vec<ThreadGroup> {
++        let now = cx.background_executor().now();
++        let mut seen_sessions = HashSet::default();
++        let mut groups = Vec::new();
++
++        for thread in self.held_threads().filter_map(|held| held.thread.upgrade()) {
++            let thread = thread.read(cx);
++            let session_id = thread.session_id();
++            // One thread held through two views is still one group.
++            if !seen_sessions.insert(session_id.clone()) {
++                continue;
++            }
++
++            let running: Vec<&AgentTask> = thread
++                .tasks()
++                .iter()
++                .filter(|task| task.status.is_running())
++                .collect();
++            // A task running again under an ended id is listed once, as running.
++            let ended: Vec<&EndedRow> = self
++                .ended
++                .iter()
++                .filter(|((ended_session, task_id), ended)| {
++                    ended_session == session_id
++                        && ended.expires_at > now
++                        && !running.iter().any(|task| &task.id == task_id)
++                })
++                .map(|(_, ended)| ended)
++                .collect();
++
++            let oldest_running = running.iter().map(|task| task.started_at).min();
++            let latest_ending = ended.iter().map(|ended| ended.sequence).max();
++            let mut rows: Vec<TaskRow> = running
++                .into_iter()
++                .chain(ended.into_iter().map(|ended| &ended.task))
++                .map(|task| self.row(session_id, task.clone()))
++                .collect();
++
++            let order = match (oldest_running, latest_ending) {
++                (Some(oldest), _) => GroupOrder::Running(oldest),
++                (None, Some(latest)) => GroupOrder::EndedOnly(Reverse(latest)),
++                (None, None) => continue,
++            };
++            rows.sort_by_key(|row| row.task.started_at);
++            groups.push((
++                order,
++                ThreadGroup {
++                    session_id: session_id.clone(),
++                    title: thread
++                        .title()
++                        .unwrap_or_else(|| SharedString::new_static(DEFAULT_THREAD_TITLE)),
++                    project: project_name(thread),
++                    rows,
++                },
++            ));
++        }
++
++        // The session id only breaks ties, so equal start times list the same way
++        // on every render.
++        groups.sort_by(|(a_order, a), (b_order, b)| {
++            a_order
++                .cmp(b_order)
++                .then_with(|| a.session_id.0.cmp(&b.session_id.0))
++        });
++        groups.into_iter().map(|(_, group)| group).collect()
++    }
++
++    /// Whether the card (or its pill) is on screen: enabled, and something is
++    /// running or an ended row is still on show (R1.1, R1.7, R2.4).
++    pub fn is_visible(&self, cx: &App) -> bool {
++        AgentSettings::get_global(cx).tasks_card.enabled && !self.rows(cx).is_empty()
++    }
++
++    pub fn is_minimized(&self) -> bool {
++        self.minimized
++    }
++
++    pub fn toggle_minimized(&mut self, cx: &mut Context<Self>) {
++        self.minimized = !self.minimized;
++        self.update_tick(cx);
++        cx.notify();
++    }
++
++    /// The Minimize button and the pill replace each other, so whichever of them
++    /// held keyboard focus hands it to the other instead of dropping it (Q14).
++    fn toggle_minimized_keeping_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let (source, target) = if self.minimized {
++            (&self.pill_focus_handle, &self.minimize_focus_handle)
++        } else {
++            (&self.minimize_focus_handle, &self.pill_focus_handle)
++        };
++        let target = source.is_focused(window).then(|| target.clone());
++        self.toggle_minimized(cx);
++        if let Some(target) = target {
++            window.focus(&target, cx);
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) fn minimize_focus_handle(&self) -> &FocusHandle {
++        &self.minimize_focus_handle
++    }
++
++    #[cfg(test)]
++    pub(crate) fn pill_focus_handle(&self) -> &FocusHandle {
++        &self.pill_focus_handle
++    }
++
++    #[cfg(test)]
++    pub(crate) fn watch_focus_handle(
++        &self,
++        session_id: &acp::SessionId,
++        task_id: &AgentTaskId,
++    ) -> Option<FocusHandle> {
++        self.row_focus_handles
++            .get(&((session_id.clone(), task_id.clone()), RowControl::Watch))
++            .cloned()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn stop_focus_handle(
++        &self,
++        session_id: &acp::SessionId,
++        task_id: &AgentTaskId,
++    ) -> Option<FocusHandle> {
++        self.row_focus_handles
++            .get(&((session_id.clone(), task_id.clone()), RowControl::Stop))
++            .cloned()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn background_focus_handle(
++        &self,
++        session_id: &acp::SessionId,
++        task_id: &AgentTaskId,
++    ) -> Option<FocusHandle> {
++        self.row_focus_handles
++            .get(&(
++                (session_id.clone(), task_id.clone()),
++                RowControl::Background,
++            ))
++            .cloned()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn open_focus_handle(
++        &self,
++        session_id: &acp::SessionId,
++        task_id: &AgentTaskId,
++    ) -> Option<FocusHandle> {
++        self.row_focus_handles
++            .get(&((session_id.clone(), task_id.clone()), RowControl::Open))
++            .cloned()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn group_open_focus_handle(
++        &self,
++        session_id: &acp::SessionId,
++    ) -> Option<FocusHandle> {
++        self.group_focus_handles.get(session_id).cloned()
++    }
++
++    /// Marks or unmarks one thread's task as watched (R3.1).
++    pub fn toggle_watch(
++        &mut self,
++        session_id: acp::SessionId,
++        task_id: AgentTaskId,
++        cx: &mut Context<Self>,
++    ) {
++        let key = (session_id, task_id);
++        if !self.watched.remove(&key) {
++            self.watched.insert(key);
++        }
++        cx.notify();
++    }
++
++    /// Asks before stopping one thread's running task, naming it, and stops it only
++    /// on an explicit Stop (R4.1, R4.2). A prompt dropped unanswered — its window
++    /// closed — is a Cancel, never a Stop.
++    pub fn request_stop(
++        &mut self,
++        session_id: acp::SessionId,
++        task_id: AgentTaskId,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let key = (session_id, task_id);
++        let Some(description) = self
++            .running_task(&key, cx)
++            .map(|task| task.description.clone())
++        else {
++            log::debug!(
++                "tasks card: stop requested for task {} of session {}, which is not running",
++                key.1,
++                key.0
++            );
++            return;
++        };
++        let answer = window.prompt(
++            PromptLevel::Warning,
++            "Stop this task?",
++            Some(description.as_ref()),
++            &["Stop", "Cancel"],
++            cx,
++        );
++        cx.spawn(async move |card, cx| {
++            // Index 0 is "Stop"; `Err` is a prompt whose sender was dropped.
++            if !matches!(answer.await, Ok(0)) {
++                return;
++            }
++            card.update(cx, |card, cx| card.stop(key, cx)).ok();
++        })
++        .detach();
++    }
++
++    /// Sends the stop for a confirmed task, unless it ended while the prompt was
++    /// open: that race is not the user's error, so it sends nothing and shows none.
++    fn stop(&mut self, key: TaskKey, cx: &mut Context<Self>) {
++        let Some(thread) = self.thread_running(&key, cx) else {
++            log::debug!(
++                "tasks card: task {} of session {} ended before its stop was confirmed; \
++                 nothing sent",
++                key.1,
++                key.0
++            );
++            return;
++        };
++        let request = thread.update(cx, |thread, cx| thread.stop_task(key.1.as_ref(), cx));
++        cx.spawn(async move |card, cx| {
++            let Err(error) = request.await else {
++                return;
++            };
++            // The agent's own text sits under the connection's context, so the
++            // whole chain is what both the check and the row read.
++            let message = format!("{error:#}");
++            let (session_id, task_id) = &key;
++            if message.contains("is not running") {
++                log::debug!(
++                    "tasks card: task {task_id} of session {session_id} was no longer \
++                     running when its stop arrived: {message}"
++                );
++                return;
++            }
++            log::error!(
++                "tasks card: stopping task {task_id} of session {session_id} failed: {message}"
++            );
++            card.update(cx, |card, cx| card.set_row_error(key, message.into(), cx))
++                .ok();
++        })
++        .detach();
++    }
++
++    /// Moves one thread's foreground task to the background (R4.5). It asks
++    /// nothing first: the task keeps running, so no work is lost. An error, or an
++    /// answer that nothing moved, is shown on the row (R4.7).
++    pub fn send_to_background(
++        &mut self,
++        session_id: acp::SessionId,
++        task_id: AgentTaskId,
++        cx: &mut Context<Self>,
++    ) {
++        let key = (session_id, task_id);
++        let tool_call_id = self
++            .running_task(&key, cx)
++            .and_then(background_target)
++            .cloned();
++        let (Some(tool_call_id), Some(thread)) = (tool_call_id, self.thread_running(&key, cx))
++        else {
++            log::debug!(
++                "tasks card: background requested for task {} of session {}, which is not \
++                 a running foreground task with a tool call; nothing sent",
++                key.1,
++                key.0
++            );
++            return;
++        };
++        let request = thread.update(cx, |thread, cx| {
++            thread.background_task(tool_call_id.0.as_ref(), cx)
++        });
++        cx.spawn(async move |card, cx| {
++            let (session_id, task_id) = &key;
++            let message: SharedString = match request.await {
++                Ok(true) => return,
++                Ok(false) => {
++                    log::warn!(
++                        "tasks card: sending task {task_id} of session {session_id} \
++                         (tool call {tool_call_id}) to the background moved nothing"
++                    );
++                    "Nothing was moved to the background".into()
++                }
++                Err(error) => {
++                    // As for a stop: the agent's own text sits under the
++                    // connection's context, so the row shows the whole chain.
++                    let message = format!("{error:#}");
++                    log::error!(
++                        "tasks card: sending task {task_id} of session {session_id} \
++                         (tool call {tool_call_id}) to the background failed: {message}"
++                    );
++                    message.into()
++                }
++            };
++            card.update(cx, |card, cx| card.set_row_error(key, message, cx))
++                .ok();
++        })
++        .detach();
++    }
++
++    /// Asks the hosting panel to open one thread's task at the tool call that
++    /// started it (R4.6). An ended row still on show opens the same way.
++    pub fn open_task(
++        &mut self,
++        session_id: acp::SessionId,
++        task_id: AgentTaskId,
++        _window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let key = (session_id, task_id);
++        let tool_call_id = self
++            .task_on_show(&key, cx)
++            .and_then(|task| task.tool_call_id.clone());
++        self.emit_open(key, tool_call_id, cx);
++    }
++
++    /// Opens a group's thread at its oldest running task's tool call, or just
++    /// opens it when no running task has one. A failure shows on the row whose
++    /// task was targeted — the oldest running, else the oldest on show.
++    fn open_group(
++        &mut self,
++        session_id: acp::SessionId,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let rows = self
++            .rows(cx)
++            .into_iter()
++            .find(|group| group.session_id == session_id)
++            .map(|group| group.rows)
++            .unwrap_or_default();
++        let running = || rows.iter().filter(|row| row.task.status.is_running());
++        if let Some(row) = running().find(|row| row.task.tool_call_id.is_some()) {
++            let task_id = row.task.id.clone();
++            self.open_task(session_id, task_id, window, cx);
++            return;
++        }
++        let Some(row) = running().next().or_else(|| rows.first()) else {
++            log::debug!(
++                "tasks card: open requested for the group of session {session_id}, which \
++                 has no row on show"
++            );
++            return;
++        };
++        let key = (session_id, row.task.id.clone());
++        self.emit_open(key, None, cx);
++    }
++
++    fn emit_open(
++        &mut self,
++        (session_id, task_id): TaskKey,
++        tool_call_id: Option<acp::ToolCallId>,
++        cx: &mut Context<Self>,
++    ) {
++        cx.emit(TasksCardEvent::OpenTask {
++            session_id,
++            task_id,
++            tool_call_id,
++        });
++    }
++
++    /// Shows `message` on a row until a snapshot changes its task (R4.3, R4.7).
++    pub(crate) fn set_row_error(
++        &mut self,
++        key: TaskKey,
++        message: SharedString,
++        cx: &mut Context<Self>,
++    ) {
++        let task = self.current_task(&key, cx).cloned();
++        self.row_errors.insert(key, RowError { message, task });
++        cx.notify();
++    }
++
++    fn row(&self, session_id: &acp::SessionId, task: AgentTask) -> TaskRow {
++        let key = (session_id.clone(), task.id.clone());
++        TaskRow {
++            watched: self.watched.contains(&key),
++            error: self.row_errors.get(&key).map(|error| error.message.clone()),
++            task,
++        }
++    }
++
++    fn hold_view(view: &Entity<ConversationView>, cx: &mut Context<Self>) -> HeldView {
++        let view_id = view.entity_id();
++        let thread = view
++            .read(cx)
++            .root_thread(cx)
++            .map(|thread| Self::hold_thread(&thread, cx));
++        let _observation = cx.observe(view, move |card, view, cx| {
++            card.refresh_view(view_id, &view, cx);
++        });
++        HeldView {
++            view_id,
++            thread,
++            _observation,
++        }
++    }
++
++    fn hold_thread(thread: &Entity<AcpThread>, cx: &mut Context<Self>) -> HeldThread {
++        let _subscription = cx.subscribe(thread, |card, thread, event, cx| match event {
++            AcpThreadEvent::TasksUpdated => card.handle_tasks_updated(&thread, cx),
++            AcpThreadEvent::TaskEnded { task_id, .. } => {
++                card.handle_task_ended(&thread, task_id, cx)
++            }
++            AcpThreadEvent::TitleUpdated => cx.notify(),
++            _ => {}
++        });
++        HeldThread {
++            thread: thread.downgrade(),
++            thread_id: thread.entity_id(),
++            session_id: thread.read(cx).session_id().clone(),
++            _subscription,
++        }
++    }
++
++    /// A held view changed: subscribe to its root thread if it now has a new one.
++    fn refresh_view(
++        &mut self,
++        view_id: EntityId,
++        view: &Entity<ConversationView>,
++        cx: &mut Context<Self>,
++    ) {
++        // A view between threads (loading again) keeps the last one: its weak
++        // handle tells whether it is still alive.
++        let Some(root) = view.read(cx).root_thread(cx) else {
++            return;
++        };
++        let Some(held) = self.views.iter_mut().find(|held| held.view_id == view_id) else {
++            return;
++        };
++        if held
++            .thread
++            .as_ref()
++            .is_some_and(|held| held.thread_id == root.entity_id())
++        {
++            return;
++        }
++        held.thread = Some(Self::hold_thread(&root, cx));
++        self.forget_unheld_sessions(cx);
++        self.update_tick(cx);
++        cx.notify();
++    }
++
++    fn handle_tasks_updated(&mut self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) {
++        let thread = thread.read(cx);
++        let session_id = thread.session_id();
++        let tasks = thread.tasks();
++        // A task that runs again under its old id (a resumed subagent) is no longer
++        // ended; one the adapter still lists ended keeps its newest copy.
++        self.ended.retain(|(ended_session, task_id), ended| {
++            if ended_session != session_id {
++                return true;
++            }
++            match tasks.iter().find(|task| &task.id == task_id) {
++                Some(task) if task.status.is_running() => false,
++                Some(task) => {
++                    ended.task = task.clone();
++                    true
++                }
++                None => true,
++            }
++        });
++        // A snapshot that changes a task with an error on its row — a new status,
++        // new progress, or the task gone — clears that error.
++        self.row_errors.retain(|(error_session, task_id), error| {
++            error_session != session_id
++                || tasks.iter().find(|task| &task.id == task_id) == error.task.as_ref()
++        });
++        // A background task can run for minutes between snapshots, so a snapshot
++        // re-arms the tick as well as expanding the card does.
++        self.update_tick(cx);
++        cx.notify();
++    }
++
++    fn handle_task_ended(
++        &mut self,
++        thread: &Entity<AcpThread>,
++        task_id: &AgentTaskId,
++        cx: &mut Context<Self>,
++    ) {
++        let thread = thread.read(cx);
++        let session_id = thread.session_id().clone();
++        let Some(task) = thread
++            .tasks()
++            .iter()
++            .find(|task| &task.id == task_id)
++            .cloned()
++        else {
++            log::debug!(
++                "tasks card: ended task {task_id} is not in the snapshot of session {session_id}; \
++                 no ended row shown"
++            );
++            return;
++        };
++        let now = cx.background_executor().now();
++        self.endings_seen += 1;
++        self.ended.insert(
++            (session_id, task.id.clone()),
++            EndedRow {
++                task,
++                expires_at: now.checked_add(ENDED_ROW_TTL).unwrap_or(now),
++                sequence: self.endings_seen,
++            },
++        );
++        self.schedule_expiry(cx);
++        cx.notify();
++    }
++
++    /// Keeps one wake pending, at the earliest expiry; none when nothing is ended.
++    fn schedule_expiry(&mut self, cx: &mut Context<Self>) {
++        let Some(earliest) = self.ended.values().map(|ended| ended.expires_at).min() else {
++            self._expiry = None;
++            return;
++        };
++        let delay = earliest.saturating_duration_since(cx.background_executor().now());
++        self._expiry = Some(cx.spawn(async move |card, cx| {
++            cx.background_executor().timer(delay).await;
++            card.update(cx, |card, cx| card.expire_ended_rows(cx)).ok();
++        }));
++    }
++
++    fn expire_ended_rows(&mut self, cx: &mut Context<Self>) {
++        let now = cx.background_executor().now();
++        let expired: Vec<TaskKey> = self
++            .ended
++            .iter()
++            .filter(|(_, ended)| ended.expires_at <= now)
++            .map(|(key, _)| key.clone())
++            .collect();
++        for key in expired {
++            self.ended.remove(&key);
++            // A task that went back to running keeps its watch and its error.
++            if !self.is_running(&key, cx) {
++                self.watched.remove(&key);
++                self.row_errors.remove(&key);
++            }
++        }
++        self.schedule_expiry(cx);
++        cx.notify();
++    }
++
++    /// Arms the elapsed-time tick when it should run and is not running yet, and
++    /// drops it when it should not run.
++    fn update_tick(&mut self, cx: &mut Context<Self>) {
++        if !self.should_tick(cx) {
++            self._tick = None;
++            return;
++        }
++        if self._tick.is_some() {
++            return;
++        }
++        self._tick = Some(cx.spawn(async move |card, cx| {
++            loop {
++                cx.background_executor().timer(ELAPSED_TICK).await;
++                let ticking = card.update(cx, |card, cx| {
++                    if card.should_tick(cx) {
++                        cx.notify();
++                        true
++                    } else {
++                        // Minimized, disabled or idle since the last wake: stop, and
++                        // leave the slot empty so the next expand or snapshot re-arms.
++                        card._tick = None;
++                        false
++                    }
++                });
++                if !matches!(ticking, Ok(true)) {
++                    break;
++                }
++            }
++        }));
++    }
++
++    fn should_tick(&self, cx: &App) -> bool {
++        !self.minimized && AgentSettings::get_global(cx).tasks_card.enabled && self.any_running(cx)
++    }
++
++    fn any_running(&self, cx: &App) -> bool {
++        self.held_threads()
++            .filter_map(|held| held.thread.upgrade())
++            .any(|thread| {
++                thread
++                    .read(cx)
++                    .tasks()
++                    .iter()
++                    .any(|task| task.status.is_running())
++            })
++    }
++
++    fn held_threads(&self) -> impl Iterator<Item = &HeldThread> {
++        self.views.iter().filter_map(|held| held.thread.as_ref())
++    }
++
++    fn is_running(&self, key: &TaskKey, cx: &App) -> bool {
++        self.thread_running(key, cx).is_some()
++    }
++
++    /// The held thread in which the task is running, if it is.
++    fn thread_running(
++        &self,
++        (session_id, task_id): &TaskKey,
++        cx: &App,
++    ) -> Option<Entity<AcpThread>> {
++        self.held_threads()
++            .filter(|held| &held.session_id == session_id)
++            .filter_map(|held| held.thread.upgrade())
++            .find(|thread| {
++                thread
++                    .read(cx)
++                    .tasks()
++                    .iter()
++                    .any(|task| &task.id == task_id && task.status.is_running())
++            })
++    }
++
++    fn running_task<'a>(&self, key: &TaskKey, cx: &'a App) -> Option<&'a AgentTask> {
++        self.current_task(key, cx)
++            .filter(|task| task.status.is_running())
++    }
++
++    /// The task as its thread holds it now, else the final copy of an ended row
++    /// the adapter has already dropped from its snapshot.
++    fn task_on_show<'a>(&'a self, key: &TaskKey, cx: &'a App) -> Option<&'a AgentTask> {
++        self.current_task(key, cx)
++            .or_else(|| self.ended.get(key).map(|ended| &ended.task))
++    }
++
++    /// The task as its thread holds it now, whatever its status.
++    fn current_task<'a>(
++        &self,
++        (session_id, task_id): &TaskKey,
++        cx: &'a App,
++    ) -> Option<&'a AgentTask> {
++        self.held_threads()
++            .filter(|held| &held.session_id == session_id)
++            .filter_map(|held| held.thread.upgrade())
++            .find_map(|thread| {
++                thread
++                    .read(cx)
++                    .tasks()
++                    .iter()
++                    .find(|task| &task.id == task_id)
++            })
++    }
++
++    /// Drops every piece of state that belongs to a thread the card no longer holds.
++    fn forget_unheld_sessions(&mut self, cx: &mut Context<Self>) {
++        let held: HashSet<acp::SessionId> = self
++            .held_threads()
++            .map(|held| held.session_id.clone())
++            .collect();
++        self.ended
++            .retain(|(session_id, _), _| held.contains(session_id));
++        self.watched
++            .retain(|(session_id, _)| held.contains(session_id));
++        self.row_errors
++            .retain(|(session_id, _), _| held.contains(session_id));
++        self.schedule_expiry(cx);
++    }
++}
++
++impl Render for TasksCard {
++    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let groups = self.rows(cx);
++        self.forget_focus_of_rows_gone(&groups);
++        // `AgentPanel` only hosts the card while it is visible; this keeps a stray
++        // render of a hidden or disabled card from painting anything either.
++        if !AgentSettings::get_global(cx).tasks_card.enabled || groups.is_empty() {
++            return gpui::Empty.into_any_element();
++        }
++        if self.is_minimized() {
++            return self.render_pill(running_count(&groups), cx);
++        }
++        self.render_expanded(groups, cx)
++    }
++}
++
++impl TasksCard {
++    fn render_pill(&self, running: usize, cx: &mut Context<Self>) -> AnyElement {
++        let label = match running {
++            1 => "1 task running".to_string(),
++            count => format!("{count} tasks running"),
++        };
++        div()
++            .debug_selector(|| "tasks-card-pill".into())
++            .occlude()
++            .max_w_full()
++            .rounded_md()
++            .border_1()
++            .border_color(cx.theme().colors().border)
++            .bg(cx.theme().colors().elevated_surface_background)
++            .shadow_md()
++            .child(
++                ButtonLike::new("tasks-card-pill")
++                    .size(ButtonSize::Medium)
++                    .child(
++                        h_flex()
++                            .gap_1()
++                            .child(
++                                Icon::new(IconName::LoadCircle)
++                                    .size(IconSize::Small)
++                                    .color(Color::Muted)
++                                    .with_rotate_animation(2),
++                            )
++                            .child(Label::new(running.to_string()).size(LabelSize::Small)),
++                    )
++                    .aria_label(format!("Expand the tasks card: {label}"))
++                    .tooltip(card_tooltip(
++                        "pill".into(),
++                        format!("Expand Tasks Card ({label})").into(),
++                    ))
++                    .track_focus(&self.pill_focus_handle)
++                    .on_click(cx.listener(|card, _, window, cx| {
++                        card.toggle_minimized_keeping_focus(window, cx)
++                    })),
++            )
++            .into_any_element()
++    }
++
++    fn render_expanded(&mut self, groups: Vec<ThreadGroup>, cx: &mut Context<Self>) -> AnyElement {
++        let running = running_count(&groups);
++        let now = SystemTime::now();
++
++        let header = h_flex()
++            .flex_none()
++            .justify_between()
++            .gap_2()
++            .px_2()
++            .py_1()
++            .border_b_1()
++            .border_color(cx.theme().colors().border_variant)
++            .child(
++                h_flex()
++                    .gap_1()
++                    .child(Label::new("Tasks").size(LabelSize::Small))
++                    .child(
++                        Label::new(format!("{running} running"))
++                            .size(LabelSize::Small)
++                            .color(Color::Muted),
++                    ),
++            )
++            .child(
++                div().debug_selector(|| "tasks-card-minimize".into()).child(
++                    IconButton::new("tasks-card-minimize", IconName::Minimize)
++                        .icon_size(IconSize::Small)
++                        .icon_color(Color::Muted)
++                        .aria_label("Minimize the tasks card")
++                        .tooltip(card_tooltip(
++                            "minimize".into(),
++                            "Minimize Tasks Card".into(),
++                        ))
++                        .track_focus(&self.minimize_focus_handle)
++                        .on_click(cx.listener(|card, _, window, cx| {
++                            card.toggle_minimized_keeping_focus(window, cx)
++                        })),
++                ),
++            );
++
++        // The list is what gives way when the panel is short: it shrinks and scrolls
++        // so the card stays inside the area `TasksCardOverlay` hands it.
++        let list = v_flex()
++            .id("tasks-card-list")
++            .min_h_0()
++            .flex_shrink(1.)
++            .max_h(rems(24.))
++            .overflow_y_scroll()
++            .children(
++                groups
++                    .into_iter()
++                    .map(|group| self.render_group(group, now, cx)),
++            );
++
++        v_flex()
++            .id("tasks-card")
++            .debug_selector(|| "tasks-card".into())
++            .occlude()
++            .w(rems(22.))
++            .max_w_full()
++            .max_h_full()
++            .min_h_0()
++            .rounded_md()
++            .border_1()
++            .border_color(cx.theme().colors().border)
++            .bg(cx.theme().colors().elevated_surface_background)
++            .shadow_md()
++            .child(header)
++            .child(list)
++            .into_any_element()
++    }
++
++    fn render_group(
++        &mut self,
++        group: ThreadGroup,
++        now: SystemTime,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let ThreadGroup {
++            session_id,
++            title,
++            project,
++            rows,
++        } = group;
++        let open_focus_handle = self
++            .group_focus_handles
++            .entry(session_id.clone())
++            .or_insert_with(|| control_focus_handle(cx))
++            .clone();
++        // The thread's title is the group's Open control: a click opens the thread
++        // at its oldest running task (R4.6), as each row's own Open does for its task.
++        let header = ButtonLike::new(SharedString::from(format!(
++            "tasks-card-open-group-{}",
++            session_id.0
++        )))
++        .full_width()
++        .child(
++            h_flex()
++                .gap_1()
++                .min_w_0()
++                .child(Label::new(title.clone()).size(LabelSize::Small).truncate())
++                .when(!project.is_empty(), |this| {
++                    this.child(
++                        Label::new(project)
++                            .size(LabelSize::XSmall)
++                            .color(Color::Muted)
++                            .truncate(),
++                    )
++                }),
++        )
++        .aria_label(format!("Open thread: {title}"))
++        .tooltip(card_tooltip(
++            format!("open-group-{}", session_id.0).into(),
++            "Open Thread".into(),
++        ))
++        .track_focus(&open_focus_handle)
++        .on_click(cx.listener({
++            let session_id = session_id.clone();
++            move |card, _, window, cx| card.open_group(session_id.clone(), window, cx)
++        }));
++        let header = div()
++            .debug_selector({
++                let session_id = session_id.clone();
++                move || format!("tasks-card-open-group-{}", session_id.0)
++            })
++            .min_w_0()
++            .child(header);
++        v_flex()
++            .px_2()
++            .py_1()
++            .gap_0p5()
++            .child(header)
++            .children(
++                rows.into_iter()
++                    .map(|row| self.render_row(&session_id, row, now, cx)),
++            )
++            .into_any_element()
++    }
++
++    fn render_row(
++        &mut self,
++        session_id: &acp::SessionId,
++        row: TaskRow,
++        now: SystemTime,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let TaskRow {
++            task,
++            watched,
++            error,
++        } = row;
++        let task_id = task.id.clone();
++        let key: TaskKey = (session_id.clone(), task_id.clone());
++        let element_key = format!("{}-{}", session_id.0, task_id);
++
++        let (chip_label, chip_tooltip) = if task.background {
++            ("Background", "Running in the Background")
++        } else {
++            ("Foreground", "Running in the Foreground")
++        };
++
++        let timing = if task.status.is_running() {
++            let elapsed = now.duration_since(task.started_at).unwrap_or_default();
++            div()
++                .debug_selector({
++                    let task_id = task_id.clone();
++                    move || format!("tasks-card-elapsed-{task_id}")
++                })
++                .flex_none()
++                .child(
++                    Label::new(format_duration(elapsed))
++                        .size(LabelSize::XSmall)
++                        .color(Color::Muted),
++                )
++        } else {
++            let status = status_label(task.status);
++            let text = match ended_duration(&task) {
++                Some(duration) => format!("{status} · {}", format_duration(duration)),
++                None => status.to_string(),
++            };
++            div()
++                .debug_selector({
++                    let task_id = task_id.clone();
++                    move || format!("tasks-card-ended-{task_id}")
++                })
++                .flex_none()
++                .child(
++                    Label::new(text)
++                        .size(LabelSize::XSmall)
++                        .color(status_color(task.status)),
++                )
++        };
++
++        let watch_focus_handle = self.row_focus_handle(&key, RowControl::Watch, cx);
++        let (watch_tooltip, watch_aria) = if watched {
++            ("Stop Watching This Task", "Stop watching")
++        } else {
++            ("Watch This Task", "Watch")
++        };
++        let watch_button = IconButton::new(
++            SharedString::from(format!("tasks-card-watch-{element_key}")),
++            IconName::Eye,
++        )
++        .icon_size(IconSize::Small)
++        .icon_color(Color::Muted)
++        .selected_icon(IconName::EyeOff)
++        .toggle_state(watched)
++        .aria_label(format!("{watch_aria}: {}", task.description))
++        .tooltip(card_tooltip(
++            format!("watch-{task_id}").into(),
++            watch_tooltip.into(),
++        ))
++        .track_focus(&watch_focus_handle)
++        .on_click(cx.listener({
++            let session_id = session_id.clone();
++            let task_id = task_id.clone();
++            move |card, _, _, cx| card.toggle_watch(session_id.clone(), task_id.clone(), cx)
++        }));
++        let watch_button = div()
++            .debug_selector({
++                let task_id = task_id.clone();
++                move || format!("tasks-card-watch-{task_id}")
++            })
++            .flex_none()
++            .child(watch_button);
++
++        let stop_button = task.status.is_running().then(|| {
++            let stop_focus_handle = self.row_focus_handle(&key, RowControl::Stop, cx);
++            let button = IconButton::new(
++                SharedString::from(format!("tasks-card-stop-{element_key}")),
++                IconName::Stop,
++            )
++            .icon_size(IconSize::Small)
++            .icon_color(Color::Muted)
++            .aria_label(format!("Stop: {}", task.description))
++            .tooltip(card_tooltip(
++                format!("stop-{task_id}").into(),
++                "Stop This Task".into(),
++            ))
++            .track_focus(&stop_focus_handle)
++            .on_click(cx.listener({
++                let session_id = session_id.clone();
++                let task_id = task_id.clone();
++                move |card, _, window, cx| {
++                    card.request_stop(session_id.clone(), task_id.clone(), window, cx)
++                }
++            }));
++            div()
++                .debug_selector({
++                    let task_id = task_id.clone();
++                    move || format!("tasks-card-stop-{task_id}")
++                })
++                .flex_none()
++                .child(button)
++        });
++
++        let open_focus_handle = self.row_focus_handle(&key, RowControl::Open, cx);
++        let open_button = IconButton::new(
++            SharedString::from(format!("tasks-card-open-{element_key}")),
++            IconName::ArrowUpRight,
++        )
++        .icon_size(IconSize::Small)
++        .icon_color(Color::Muted)
++        .aria_label(format!("Open in thread: {}", task.description))
++        .tooltip(card_tooltip(
++            format!("open-{task_id}").into(),
++            "Open Thread at This Task".into(),
++        ))
++        .track_focus(&open_focus_handle)
++        .on_click(cx.listener({
++            let session_id = session_id.clone();
++            let task_id = task_id.clone();
++            move |card, _, window, cx| {
++                card.open_task(session_id.clone(), task_id.clone(), window, cx)
++            }
++        }));
++        let open_button = div()
++            .debug_selector({
++                let task_id = task_id.clone();
++                move || format!("tasks-card-open-{task_id}")
++            })
++            .flex_none()
++            .child(open_button);
++
++        let offers_background = task.status.is_running() && background_target(&task).is_some();
++        let background_button = offers_background.then(|| {
++            let background_focus_handle = self.row_focus_handle(&key, RowControl::Background, cx);
++            let button = IconButton::new(
++                SharedString::from(format!("tasks-card-background-{element_key}")),
++                IconName::ArrowDown,
++            )
++            .icon_size(IconSize::Small)
++            .icon_color(Color::Muted)
++            .aria_label(format!("Send to background: {}", task.description))
++            .tooltip(card_tooltip(
++                format!("background-{task_id}").into(),
++                "Send to Background".into(),
++            ))
++            .track_focus(&background_focus_handle)
++            .on_click(cx.listener({
++                let session_id = session_id.clone();
++                let task_id = task_id.clone();
++                move |card, _, _, cx| {
++                    card.send_to_background(session_id.clone(), task_id.clone(), cx)
++                }
++            }));
++            div()
++                .debug_selector({
++                    let task_id = task_id.clone();
++                    move || format!("tasks-card-background-{task_id}")
++                })
++                .flex_none()
++                .child(button)
++        });
++
++        let line = h_flex()
++            .gap_1()
++            .min_w_0()
++            .child(
++                Label::new(task.kind.clone())
++                    .size(LabelSize::XSmall)
++                    .color(Color::Muted),
++            )
++            .child(
++                div().flex_1().min_w_0().child(
++                    Label::new(task.description.clone())
++                        .size(LabelSize::Small)
++                        .truncate(),
++                ),
++            )
++            .child(
++                // Not a control — it does nothing when clicked — so it takes no focus;
++                // the tooltip spells out what the one-word chip means.
++                div()
++                    .id(SharedString::from(format!("tasks-card-mode-{element_key}")))
++                    .debug_selector({
++                        let task_id = task_id.clone();
++                        move || format!("tasks-card-mode-{task_id}")
++                    })
++                    .flex_none()
++                    .tooltip(card_tooltip(
++                        format!("mode-{task_id}").into(),
++                        chip_tooltip.into(),
++                    ))
++                    .child(Chip::new(chip_label).label_size(LabelSize::XSmall)),
++            )
++            .child(timing)
++            .child(open_button)
++            .child(watch_button)
++            .children(background_button)
++            .children(stop_button);
++
++        v_flex()
++            .id(SharedString::from(format!("tasks-card-row-{element_key}")))
++            .debug_selector({
++                let task_id = task_id.clone();
++                move || format!("tasks-card-row-{task_id}")
++            })
++            .pl_2()
++            .py_0p5()
++            .child(line)
++            .when(watched, |this| this.child(render_details(&task, &task_id)))
++            .when_some(error, |this, error| {
++                this.child(
++                    Label::new(error)
++                        .size(LabelSize::XSmall)
++                        .color(Color::Error),
++                )
++            })
++            .into_any_element()
++    }
++
++    fn row_focus_handle(
++        &mut self,
++        key: &TaskKey,
++        control: RowControl,
++        cx: &mut Context<Self>,
++    ) -> FocusHandle {
++        self.row_focus_handles
++            .entry((key.clone(), control))
++            .or_insert_with(|| control_focus_handle(cx))
++            .clone()
++    }
++
++    fn forget_focus_of_rows_gone(&mut self, groups: &[ThreadGroup]) {
++        let on_show: HashSet<TaskKey> = groups
++            .iter()
++            .flat_map(|group| {
++                group
++                    .rows
++                    .iter()
++                    .map(|row| (group.session_id.clone(), row.task.id.clone()))
++            })
++            .collect();
++        self.row_focus_handles
++            .retain(|(key, _), _| on_show.contains(key));
++        self.group_focus_handles
++            .retain(|session_id, _| groups.iter().any(|group| &group.session_id == session_id));
++    }
++}
++
++/// The tool call a "Send to Background" for `task` is addressed to; `None` when
++/// the task is already in the background or has no tool call to address (R4.4).
++fn background_target(task: &AgentTask) -> Option<&acp::ToolCallId> {
++    task.tool_call_id.as_ref().filter(|_| !task.background)
++}
++
++/// A focus handle for one of the card's controls. An element given its own handle
++/// ignores its `tab_index` / `tab_stop` styling — GPUI applies those only to a
++/// handle it creates itself — so the handle carries them, or Tab never reaches it.
++fn control_focus_handle(cx: &mut App) -> FocusHandle {
++    cx.focus_handle().tab_stop(true).tab_index(0)
++}
++
++/// A text tooltip like `Tooltip::text`, whose text carries the debug selector
++/// `tasks-card-tooltip-{name}`, so tests can tell which control raised it (Q14).
++fn card_tooltip(
++    name: SharedString,
++    text: SharedString,
++) -> impl Fn(&mut Window, &mut App) -> AnyView {
++    move |_, cx| {
++        let name = name.clone();
++        let text = text.clone();
++        cx.new(|_| {
++            Tooltip::new_element(move |_, _| {
++                div()
++                    .debug_selector({
++                        let name = name.clone();
++                        move || format!("tasks-card-tooltip-{name}")
++                    })
++                    .child(text.clone())
++                    .into_any_element()
++            })
++        })
++        .into()
++    }
++}
++
++/// Places the tasks card in its corner of the free area of the agent panel.
++///
++/// The free area is only known once the panel's content has been laid out — the
++/// message editor grows as the user types, callouts come and go above it — so
++/// the card is laid out here, at prepaint, inside a frame the size of that area.
++/// Wrapped in `deferred`, this prepaint runs after the rest of the window's, so
++/// the bounds it measures belong to the frame being drawn, not the previous one.
++pub(crate) struct TasksCardOverlay {
++    card: AnyView,
++    position: TasksCardPosition,
++    /// The gap kept between the card and the edges of the free area.
++    inset: Pixels,
++    /// The free area in window coordinates, given the panel content's bounds.
++    free_area: Box<dyn Fn(Bounds<Pixels>, &App) -> Bounds<Pixels>>,
++}
++
++impl TasksCardOverlay {
++    pub(crate) fn new(
++        card: Entity<TasksCard>,
++        position: TasksCardPosition,
++        inset: Pixels,
++        free_area: impl Fn(Bounds<Pixels>, &App) -> Bounds<Pixels> + 'static,
++    ) -> Self {
++        Self {
++            card: card.into(),
++            position,
++            inset,
++            free_area: Box::new(free_area),
++        }
++    }
++}
++
++impl Element for TasksCardOverlay {
++    type RequestLayoutState = ();
++    type PrepaintState = Option<AnyElement>;
++
++    fn id(&self) -> Option<ElementId> {
++        None
++    }
++
++    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
++        None
++    }
++
++    fn request_layout(
++        &mut self,
++        _id: Option<&GlobalElementId>,
++        _inspector_id: Option<&InspectorElementId>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> (LayoutId, ()) {
++        // Covers the panel's content without taking part in its flow.
++        let mut style = Style::default();
++        style.position = gpui::Position::Absolute;
++        style.inset.top = px(0.).into();
++        style.inset.right = px(0.).into();
++        style.inset.bottom = px(0.).into();
++        style.inset.left = px(0.).into();
++        (window.request_layout(style, None, cx), ())
++    }
++
++    fn prepaint(
++        &mut self,
++        _id: Option<&GlobalElementId>,
++        _inspector_id: Option<&InspectorElementId>,
++        bounds: Bounds<Pixels>,
++        _request_layout: &mut (),
++        window: &mut Window,
++        cx: &mut App,
++    ) -> Option<AnyElement> {
++        // Never outside the panel, whatever the free area claims.
++        let area = (self.free_area)(bounds, cx).intersect(&bounds);
++        let frame_size = size(
++            (area.size.width - self.inset * 2.).max(px(0.)),
++            (area.size.height - self.inset * 2.).max(px(0.)),
++        );
++        let frame_origin = point(area.left() + self.inset, area.top() + self.inset);
++
++        // A frame of exactly the free area's size, so the card's `max_w_full` /
++        // `max_h_full` bound it there, and its alignment picks the corner.
++        let frame = div()
++            .flex()
++            .flex_col()
++            .w(frame_size.width)
++            .h(frame_size.height)
++            .map(|frame| match self.position {
++                TasksCardPosition::TopRight => frame.justify_start().items_end(),
++                TasksCardPosition::TopLeft => frame.justify_start().items_start(),
++                TasksCardPosition::BottomRight => frame.justify_end().items_end(),
++                TasksCardPosition::BottomLeft => frame.justify_end().items_start(),
++            })
++            .child(self.card.clone());
++        let mut frame = frame.into_any_element();
++        frame.layout_as_root(frame_size.map(AvailableSpace::Definite), window, cx);
++        frame.prepaint_at(frame_origin, window, cx);
++        Some(frame)
++    }
++
++    fn paint(
++        &mut self,
++        _id: Option<&GlobalElementId>,
++        _inspector_id: Option<&InspectorElementId>,
++        _bounds: Bounds<Pixels>,
++        _request_layout: &mut (),
++        frame: &mut Option<AnyElement>,
++        window: &mut Window,
++        cx: &mut App,
++    ) {
++        if let Some(frame) = frame {
++            frame.paint(window, cx);
++        }
++    }
++}
++
++impl IntoElement for TasksCardOverlay {
++    type Element = Self;
++
++    fn into_element(self) -> Self::Element {
++        self
++    }
++}
++
++/// The count the pill and the card's header show: ended rows on show excluded.
++fn running_count(groups: &[ThreadGroup]) -> usize {
++    groups
++        .iter()
++        .flat_map(|group| &group.rows)
++        .filter(|row| row.task.status.is_running())
++        .count()
++}
++
++/// A watched row's progress details (R3.2): tokens, tool uses, last tool, summary.
++fn render_details(task: &AgentTask, task_id: &AgentTaskId) -> AnyElement {
++    let usage = match &task.usage {
++        Some(usage) => format!("{} tokens · {} tool uses", usage.tokens, usage.tool_uses),
++        None => "No usage reported yet".to_string(),
++    };
++    v_flex()
++        .debug_selector({
++            let task_id = task_id.clone();
++            move || format!("tasks-card-details-{task_id}")
++        })
++        .pl_1()
++        .gap_0p5()
++        .child(
++            Label::new(usage)
++                .size(LabelSize::XSmall)
++                .color(Color::Muted),
++        )
++        .when_some(task.last_tool.clone(), |this, last_tool| {
++            this.child(
++                Label::new(format!("Last tool: {last_tool}"))
++                    .size(LabelSize::XSmall)
++                    .color(Color::Muted),
++            )
++        })
++        .when_some(task.summary.clone(), |this, summary| {
++            this.child(Label::new(summary).size(LabelSize::XSmall))
++        })
++        .into_any_element()
++}
++
++/// How long an ended task ran: its own end time, else the adapter's measured
++/// duration; `None` when the adapter reported neither.
++fn ended_duration(task: &AgentTask) -> Option<Duration> {
++    task.ended_at
++        .and_then(|ended_at| ended_at.duration_since(task.started_at).ok())
++        .or_else(|| task.usage.as_ref().map(|usage| usage.duration))
++}
++
++fn status_label(status: AgentTaskStatus) -> &'static str {
++    match status {
++        AgentTaskStatus::Running => "Running",
++        AgentTaskStatus::Completed => "Completed",
++        AgentTaskStatus::Failed => "Failed",
++        AgentTaskStatus::Stopped => "Stopped",
++        AgentTaskStatus::Interrupted => "Interrupted",
++    }
++}
++
++fn status_color(status: AgentTaskStatus) -> Color {
++    match status {
++        AgentTaskStatus::Running => Color::Muted,
++        AgentTaskStatus::Completed => Color::Success,
++        AgentTaskStatus::Failed => Color::Error,
++        AgentTaskStatus::Stopped | AgentTaskStatus::Interrupted => Color::Warning,
++    }
++}
++
++/// `42s`, `3m 07s`, `2h 05m`.
++fn format_duration(duration: Duration) -> String {
++    let seconds = duration.as_secs();
++    let (hours, minutes) = (seconds / 3600, (seconds % 3600) / 60);
++    if hours > 0 {
++        format!("{hours}h {minutes:02}m")
++    } else if minutes > 0 {
++        format!("{minutes}m {:02}s", seconds % 60)
++    } else {
++        format!("{seconds}s")
++    }
++}
++
++/// The last component of the thread's first work directory, or empty for a thread
++/// opened outside a project.
++fn project_name(thread: &AcpThread) -> SharedString {
++    thread
++        .work_dirs()
++        .and_then(|dirs| dirs.paths().first())
++        .and_then(|path| path.file_name())
++        .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
++        .unwrap_or_default()
++}
+diff --git a/crates/agent_ui/src/tasks_card/accessibility_tests.rs b/crates/agent_ui/src/tasks_card/accessibility_tests.rs
+new file mode 100644
+index 0000000..3ee252b
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/accessibility_tests.rs
+@@ -0,0 +1,310 @@
++// Story 013 / task 4.1, Q14 — every card control carries a tooltip naming its
++// action and is reachable by keyboard, and minimizing or expanding the card does
++// not drop keyboard focus. Filter: `tasks_card::accessibility`.
++
++use std::time::Duration;
++
++use gpui::{FocusHandle, Modifiers, Point, TestAppContext, VisualTestContext, px};
++
++use super::test_helpers::*;
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Hovers the element painted under `selector` long enough for a tooltip, and
++/// returns whether the tooltip painted under `tooltip` showed.
++fn tooltip_shows(
++    selector: &'static str,
++    tooltip: &'static str,
++    cx: &mut VisualTestContext,
++) -> bool {
++    // Off every control first, so the previous tooltip is gone.
++    cx.simulate_mouse_move(Point::new(px(1.), px(1.)), None, Modifiers::none());
++    advance(cx, Duration::from_millis(100));
++    draw(cx);
++    let bounds = cx
++        .debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"));
++    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
++    advance(cx, Duration::from_secs(1));
++    draw(cx);
++    cx.debug_bounds(tooltip).is_some()
++}
++
++fn is_focused(handle: &FocusHandle, cx: &mut VisualTestContext) -> bool {
++    cx.update(|window, _| handle.is_focused(window))
++}
++
++/// Walks the window's tab order, one stop at a time, until `handle` has focus.
++fn reachable_by_tab(handle: &FocusHandle, cx: &mut VisualTestContext) -> bool {
++    for _ in 0..200 {
++        cx.update(|window, cx| window.focus_next(cx));
++        draw(cx);
++        if is_focused(handle, cx) {
++            return true;
++        }
++    }
++    false
++}
++
++#[gpui::test]
++async fn test_every_card_control_has_a_tooltip(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    assert!(tooltip_shows(
++        "tasks-card-minimize",
++        "tasks-card-tooltip-minimize",
++        &mut cx
++    ));
++    assert!(tooltip_shows(
++        "tasks-card-watch-t1",
++        "tasks-card-tooltip-watch-t1",
++        &mut cx
++    ));
++    // Not a control, but a one-word chip whose meaning the tooltip spells out.
++    assert!(tooltip_shows(
++        "tasks-card-mode-t1",
++        "tasks-card-tooltip-mode-t1",
++        &mut cx
++    ));
++
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    draw(&mut cx);
++    assert!(tooltip_shows(
++        "tasks-card-pill",
++        "tasks-card-tooltip-pill",
++        &mut cx
++    ));
++}
++
++#[gpui::test]
++async fn test_every_card_control_is_reachable_by_keyboard(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    let session = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let (minimize, pill, watch) = card.read_with(&cx, |card, _| {
++        (
++            card.minimize_focus_handle().clone(),
++            card.pill_focus_handle().clone(),
++            card.watch_focus_handle(&session, &"t1".into()),
++        )
++    });
++    let watch = watch.expect("the painted row has a focus handle for its watch toggle");
++
++    assert!(
++        reachable_by_tab(&minimize, &mut cx),
++        "Minimize is a tab stop"
++    );
++    assert!(
++        reachable_by_tab(&watch, &mut cx),
++        "the watch toggle is a tab stop"
++    );
++
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    draw(&mut cx);
++    assert!(reachable_by_tab(&pill, &mut cx), "the pill is a tab stop");
++}
++
++/// Minimize and the pill replace each other on screen; focus moves with them.
++#[gpui::test]
++async fn test_minimize_and_expand_hand_focus_over(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    let card = card(&panel, &cx);
++    let (minimize, pill) = card.read_with(&cx, |card, _| {
++        (
++            card.minimize_focus_handle().clone(),
++            card.pill_focus_handle().clone(),
++        )
++    });
++
++    cx.update(|window, cx| window.focus(&minimize, cx));
++    draw(&mut cx);
++    let button = cx
++        .debug_bounds("tasks-card-minimize")
++        .expect("Minimize is painted");
++    cx.simulate_click(button.center(), Modifiers::none());
++    draw(&mut cx);
++    assert!(card.read_with(&cx, |card, _| card.is_minimized()));
++    assert!(
++        is_focused(&pill, &mut cx),
++        "minimizing hands focus to the pill"
++    );
++
++    let pill_bounds = cx
++        .debug_bounds("tasks-card-pill")
++        .expect("the pill is painted");
++    cx.simulate_click(pill_bounds.center(), Modifiers::none());
++    draw(&mut cx);
++    assert!(!card.read_with(&cx, |card, _| card.is_minimized()));
++    assert!(
++        is_focused(&minimize, &mut cx),
++        "expanding hands focus back to Minimize"
++    );
++}
++
++/// The converse: focus that is not on the card stays where it is.
++#[gpui::test]
++async fn test_toggling_does_not_take_focus_it_did_not_have(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    let card = card(&panel, &cx);
++    let (minimize, pill) = card.read_with(&cx, |card, _| {
++        (
++            card.minimize_focus_handle().clone(),
++            card.pill_focus_handle().clone(),
++        )
++    });
++    assert!(!is_focused(&minimize, &mut cx));
++
++    card.update_in(&mut cx, |card, window, cx| {
++        card.toggle_minimized_keeping_focus(window, cx)
++    });
++    draw(&mut cx);
++    assert!(!is_focused(&pill, &mut cx), "the pill does not grab focus");
++
++    card.update_in(&mut cx, |card, window, cx| {
++        card.toggle_minimized_keeping_focus(window, cx)
++    });
++    draw(&mut cx);
++    assert!(
++        !is_focused(&minimize, &mut cx),
++        "Minimize does not grab focus"
++    );
++}
++
++/// Task 5.1: the Stop button a running row gains meets the same bar (Q14).
++#[gpui::test]
++async fn test_the_stop_button_has_a_tooltip_and_is_reachable_by_keyboard(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    assert!(tooltip_shows(
++        "tasks-card-stop-t1",
++        "tasks-card-tooltip-stop-t1",
++        &mut cx
++    ));
++
++    let session = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let stop = card
++        .read_with(&cx, |card, _| {
++            card.stop_focus_handle(&session, &"t1".into())
++        })
++        .expect("the painted running row has a focus handle for its Stop button");
++    assert!(
++        reachable_by_tab(&stop, &mut cx),
++        "the Stop button is a tab stop"
++    );
++
++    // An ended row offers nothing to stop.
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-row-t1").is_some());
++    assert!(cx.debug_bounds("tasks-card-stop-t1").is_none());
++}
++
++/// Task 5.2: the Send to Background button a foreground row gains meets the same
++/// bar (Q14).
++#[gpui::test]
++async fn test_the_background_button_has_a_tooltip_and_is_reachable_by_keyboard(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", false, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    assert!(tooltip_shows(
++        "tasks-card-background-t1",
++        "tasks-card-tooltip-background-t1",
++        &mut cx
++    ));
++
++    let session = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let background = card
++        .read_with(&cx, |card, _| {
++            card.background_focus_handle(&session, &"t1".into())
++        })
++        .expect("the painted foreground row has a focus handle for its button");
++    assert!(
++        reachable_by_tab(&background, &mut cx),
++        "the Send to Background button is a tab stop"
++    );
++}
++
++/// Task 5.3: each row's Open button, and the group header that opens its thread,
++/// meet the same bar (Q14).
++#[gpui::test]
++async fn test_the_open_controls_have_a_tooltip_and_are_reachable_by_keyboard(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    let session = session_of(&a, &cx);
++    // The group's selectors carry its session id, which this connection numbers.
++    assert_eq!(session.0.as_ref(), "tasks-card-session-1");
++
++    assert!(tooltip_shows(
++        "tasks-card-open-t1",
++        "tasks-card-tooltip-open-t1",
++        &mut cx
++    ));
++    assert!(tooltip_shows(
++        "tasks-card-open-group-tasks-card-session-1",
++        "tasks-card-tooltip-open-group-tasks-card-session-1",
++        &mut cx
++    ));
++
++    let card = card(&panel, &cx);
++    let open = card
++        .read_with(&cx, |card, _| {
++            card.open_focus_handle(&session, &"t1".into())
++        })
++        .expect("the painted row has a focus handle for its Open button");
++    assert!(
++        reachable_by_tab(&open, &mut cx),
++        "the Open button is a tab stop"
++    );
++    let open_group = card
++        .read_with(&cx, |card, _| card.group_open_focus_handle(&session))
++        .expect("the painted group has a focus handle for its header");
++    assert!(
++        reachable_by_tab(&open_group, &mut cx),
++        "the group header is a tab stop"
++    );
++
++    // An ended row still opens its thread.
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-open-t1").is_some());
++}
+diff --git a/crates/agent_ui/src/tasks_card/background_tests.rs b/crates/agent_ui/src/tasks_card/background_tests.rs
+new file mode 100644
+index 0000000..c8b1a88
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/background_tests.rs
+@@ -0,0 +1,99 @@
++// Story 013 / task 5.2 — Send to Background (R4.4, R4.5, R4.7).
++// Filter: `tasks_card::background`.
++
++use gpui::{TestAppContext, VisualTestContext};
++
++use super::test_helpers::*;
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Offered on a foreground row, and only there — a background row has nothing to
++/// move.
++#[gpui::test]
++async fn test_send_to_background_is_offered_only_on_foreground_rows(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            wire_task("bg", "running", true, 1_000),
++            wire_task("fg", "running", false, 2_000),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-row-bg").is_some());
++    assert!(cx.debug_bounds("tasks-card-background-bg").is_none());
++    assert!(cx.debug_bounds("tasks-card-background-fg").is_some());
++}
++
++/// Foreground is not enough: a foreground task with no tool call id has nothing to
++/// address the action to, so it offers no button either.
++#[gpui::test]
++async fn test_send_to_background_needs_a_tool_call_id(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let mut no_call = wire_task("nocall", "running", false, 1_000);
++    no_call["toolCallId"] = serde_json::Value::Null;
++    send_tasks(
++        &a,
++        vec![no_call, wire_task("fg", "running", false, 2_000)],
++        &mut cx,
++    );
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-row-nocall").is_some());
++    assert!(cx.debug_bounds("tasks-card-background-nocall").is_none());
++    assert!(cx.debug_bounds("tasks-card-background-fg").is_some());
++}
++
++#[gpui::test]
++async fn test_send_to_background_sends_without_a_prompt(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("fg", "running", false, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "fg", &mut cx).unwrap().task.id;
++
++    card.update(&mut cx, |card, cx| card.send_to_background(sa.clone(), id, cx));
++    cx.run_until_parked();
++    assert!(!cx.has_pending_prompt(), "moving to the background loses no work: no prompt");
++    // The action is addressed by the task's tool call.
++    assert_eq!(
++        connection.backgrounds(),
++        vec![(sa.to_string(), "toolu_fg".to_string())]
++    );
++    assert!(find_row(&card, &sa, "fg", &mut cx).unwrap().error.is_none());
++}
++
++#[gpui::test]
++async fn test_background_error_and_nothing_moved_show_on_the_row(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("fg", "running", false, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "fg", &mut cx).unwrap().task.id;
++
++    // An error from the action.
++    *connection.background_answer.lock().unwrap() =
++        BackgroundAnswer::Err("background failed for task toolu_fg: busy");
++    card.update(&mut cx, |card, cx| card.send_to_background(sa.clone(), id.clone(), cx));
++    cx.run_until_parked();
++    let error = find_row(&card, &sa, "fg", &mut cx).unwrap().error.expect("error on the row");
++    assert!(error.contains("busy"), "row error was {error:?}");
++
++    // `Ok(false)`: the call succeeded and moved nothing — that is not silent success.
++    *connection.background_answer.lock().unwrap() = BackgroundAnswer::NothingMoved;
++    card.update(&mut cx, |card, cx| card.send_to_background(sa.clone(), id, cx));
++    cx.run_until_parked();
++    let error = find_row(&card, &sa, "fg", &mut cx).unwrap().error.expect("error on the row");
++    assert_eq!(error.to_string(), "Nothing was moved to the background");
++}
+diff --git a/crates/agent_ui/src/tasks_card/live_tests.rs b/crates/agent_ui/src/tasks_card/live_tests.rs
+new file mode 100644
+index 0000000..773bb29
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/live_tests.rs
+@@ -0,0 +1,91 @@
++// Story 013 / task 4.2 — live progress and the elapsed-time tick (R1.4, R1.5).
++// Filter: `tasks_card::live`.
++
++use std::{cell::Cell, rc::Rc, time::Duration};
++
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use serde_json::json;
++
++use super::TasksCard;
++use super::test_helpers::*;
++
++/// Counts the card's `cx.notify()` calls — each one is a repaint request.
++fn count_notifies(card: &Entity<TasksCard>, cx: &mut VisualTestContext) -> Rc<Cell<usize>> {
++    let count = Rc::new(Cell::new(0));
++    let sink = count.clone();
++    cx.update(|_, cx| {
++        cx.observe(card, move |_, _| sink.set(sink.get() + 1)).detach();
++    });
++    count
++}
++
++fn progress_task(tokens: u64, tool_uses: u64, last_tool: &str, summary: &str) -> serde_json::Value {
++    let mut task = wire_task("t1", "running", true, 1_000);
++    task["usage"] = json!({ "tokens": tokens, "toolUses": tool_uses, "durationMs": 1_000 });
++    task["lastTool"] = json!(last_tool);
++    task["summary"] = json!(summary);
++    task
++}
++
++#[gpui::test]
++async fn test_a_progress_snapshot_updates_the_row_without_user_action(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let sa = session_of(&a, &cx);
++    send_tasks(&a, vec![progress_task(10, 1, "Read", "Reading")], &mut cx);
++    let card = card(&panel, &cx);
++    let notifies = count_notifies(&card, &mut cx);
++
++    send_tasks(&a, vec![progress_task(250, 4, "Grep", "Searching the tree")], &mut cx);
++    assert!(notifies.get() >= 1, "a changed snapshot repaints the card");
++    let row = find_row(&card, &sa, "t1", &mut cx).unwrap();
++    assert_eq!(row.task.last_tool.as_ref().map(|s| s.to_string()), Some("Grep".into()));
++    assert_eq!(
++        row.task.summary.as_ref().map(|s| s.to_string()),
++        Some("Searching the tree".into())
++    );
++    let usage = format!("{:?}", row.task.usage);
++    assert!(usage.contains("250"), "tokens reach the row: {usage}");
++}
++
++/// The tick runs only while the card is expanded AND a task runs — a timer that
++/// never sleeps is the failure this guards against, in both directions.
++#[gpui::test]
++async fn test_elapsed_tick_runs_only_while_expanded_with_a_running_task(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let card = card(&panel, &cx);
++    let notifies = count_notifies(&card, &mut cx);
++
++    // Expanded and running: one repaint per second, with no snapshot arriving.
++    for _ in 0..3 {
++        advance(&mut cx, Duration::from_secs(1));
++    }
++    assert!(notifies.get() >= 3, "ticked {} times in 3 s", notifies.get());
++
++    // Minimized: the timer is gone.
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    cx.run_until_parked();
++    notifies.set(0);
++    advance(&mut cx, Duration::from_secs(5));
++    assert_eq!(notifies.get(), 0, "no tick while minimized");
++
++    // Expanded again: it comes back.
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    cx.run_until_parked();
++    notifies.set(0);
++    advance(&mut cx, Duration::from_secs(2));
++    assert!(notifies.get() >= 2);
++
++    // Idle (the task ended and its row expired): the timer stops.
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    advance(&mut cx, Duration::from_secs(11));
++    notifies.set(0);
++    advance(&mut cx, Duration::from_secs(5));
++    assert_eq!(notifies.get(), 0, "no tick with nothing running");
++}
+diff --git a/crates/agent_ui/src/tasks_card/model_tests.rs b/crates/agent_ui/src/tasks_card/model_tests.rs
+new file mode 100644
+index 0000000..ec5d283
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/model_tests.rs
+@@ -0,0 +1,356 @@
++// Story 013 / task 3.2 — the TasksCard state and its `rows()` projection
++// (R1.2, R1.3, R1.6, R1.7, R1.8, R2.5, R3.1, R3.3). Filter: `tasks_card::model`.
++
++use std::time::Duration;
++
++use acp_thread::AgentTaskStatus;
++use agent_settings::{AgentSettings, TasksCardSettings};
++use gpui::{AppContext as _, TestAppContext};
++use settings::{Settings as _, TasksCardPosition};
++
++use super::TasksCard;
++use super::test_helpers::*;
++
++// ---- R1.3 — grouping, hostile halves first --------------------------------------
++
++/// Wrongly collapse: two threads with the SAME title, each running a task with the
++/// SAME id and description, are two groups — a thread is its session, not its title.
++#[gpui::test]
++async fn test_rows_two_threads_with_same_titled_tasks_stay_apart(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "Same title", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "Same title", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++
++    let card = card(&panel, &cx);
++    let groups = rows(&card, &mut cx);
++    assert_eq!(groups.len(), 2, "one group per thread, even with equal titles");
++    let sessions: Vec<_> = groups.iter().map(|g| g.session_id.clone()).collect();
++    assert!(sessions.contains(&session_of(&a, &cx)));
++    assert!(sessions.contains(&session_of(&b, &cx)));
++    for group in &groups {
++        assert_eq!(row_ids(&group.rows), vec!["t1".to_string()]);
++    }
++}
++
++/// Wrongly split: two tasks of ONE thread are one group with two rows.
++#[gpui::test]
++async fn test_rows_two_tasks_of_one_thread_share_one_group(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "Only thread", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            wire_task("fg", "running", false, 1_000),
++            wire_task("bg", "running", true, 2_000),
++        ],
++        &mut cx,
++    );
++
++    let card = card(&panel, &cx);
++    let groups = rows(&card, &mut cx);
++    assert_eq!(groups.len(), 1);
++    let mut ids = row_ids(&groups[0].rows);
++    ids.sort();
++    assert_eq!(ids, vec!["bg".to_string(), "fg".to_string()]);
++}
++
++/// Groups are ordered by the start time of their oldest RUNNING task — not by
++/// thread open order, and not by an ended task that started earlier.
++#[gpui::test]
++async fn test_rows_order_threads_by_oldest_running_task(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let first_opened = open_titled_thread(&panel, &connection, "First opened", &mut cx);
++    // Its only running task started late; an ended task started earliest of all.
++    send_tasks(
++        &first_opened,
++        vec![
++            wire_task("old-ended", "completed", true, 100),
++            wire_task("late", "running", true, 5_000),
++        ],
++        &mut cx,
++    );
++    let second_opened = open_titled_thread(&panel, &connection, "Second opened", &mut cx);
++    send_tasks(
++        &second_opened,
++        vec![wire_task("early", "running", true, 1_000)],
++        &mut cx,
++    );
++
++    let card = card(&panel, &cx);
++    let order: Vec<_> = rows(&card, &mut cx)
++        .into_iter()
++        .map(|group| group.session_id)
++        .collect();
++    assert_eq!(
++        order,
++        vec![session_of(&second_opened, &cx), session_of(&first_opened, &cx)]
++    );
++}
++
++/// Threads holding only ended rows go AFTER every thread with a running task —
++/// even when their tasks started earlier — and among themselves the most recent
++/// ending comes first.
++#[gpui::test]
++async fn test_rows_put_ended_only_threads_last_most_recent_ending_first(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    // Ended early, started earliest of all.
++    let ended_first = open_titled_thread(&panel, &connection, "Ended first", &mut cx);
++    send_tasks(&ended_first, vec![wire_task("e1", "running", true, 100)], &mut cx);
++    send_tasks(&ended_first, vec![wire_task("e1", "completed", true, 100)], &mut cx);
++    // Running, started latest of all.
++    let running = open_titled_thread(&panel, &connection, "Running", &mut cx);
++    send_tasks(&running, vec![wire_task("r1", "running", true, 90_000)], &mut cx);
++    // Ended later than `ended_first`.
++    let ended_last = open_titled_thread(&panel, &connection, "Ended last", &mut cx);
++    send_tasks(&ended_last, vec![wire_task("e2", "running", true, 200)], &mut cx);
++    send_tasks(&ended_last, vec![wire_task("e2", "failed", true, 200)], &mut cx);
++
++    let card = card(&panel, &cx);
++    let order: Vec<_> = rows(&card, &mut cx)
++        .into_iter()
++        .map(|group| group.session_id)
++        .collect();
++    assert_eq!(
++        order,
++        vec![
++            session_of(&running, &cx),
++            session_of(&ended_last, &cx),
++            session_of(&ended_first, &cx),
++        ]
++    );
++}
++
++// ---- R1.2 -------------------------------------------------------------------------
++
++#[gpui::test]
++async fn test_rows_carry_thread_title_project_and_task_fields(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "Bump the series", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            wire_task("fg", "running", false, 1_000),
++            wire_task("bg", "running", true, 2_000),
++        ],
++        &mut cx,
++    );
++
++    let card = card(&panel, &cx);
++    let groups = rows(&card, &mut cx);
++    let group = &groups[0];
++    assert_eq!(group.title.as_ref(), "Bump the series");
++    assert_eq!(group.project.as_ref(), "project");
++    let fg = group.rows.iter().find(|r| r.task.id.as_ref() == "fg").unwrap();
++    let bg = group.rows.iter().find(|r| r.task.id.as_ref() == "bg").unwrap();
++    assert_eq!(fg.task.kind.to_string(), "shell");
++    assert_eq!(fg.task.description.to_string(), "Task fg");
++    assert!(!fg.task.background);
++    assert!(bg.task.background);
++    assert_eq!(fg.task.status, AgentTaskStatus::Running);
++}
++
++// ---- R1.1 / R1.7 / R1.6 -------------------------------------------------------------
++
++#[gpui::test]
++async fn test_card_visible_only_while_a_task_runs_or_an_ended_row_shows(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let card = card(&panel, &cx);
++    assert!(!visible(&card, &mut cx), "no task, no card");
++
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    assert!(visible(&card, &mut cx));
++
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    assert!(visible(&card, &mut cx), "an ended row keeps the card up");
++
++    advance(&mut cx, Duration::from_secs(11));
++    assert!(!visible(&card, &mut cx), "nothing running and nothing on show");
++}
++
++#[gpui::test]
++async fn test_ended_row_shows_its_final_status_for_ten_seconds_then_goes(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let sid = session_of(&a, &cx);
++    send_tasks(
++        &a,
++        vec![
++            wire_task("t1", "running", true, 1_000),
++            wire_task("t2", "running", true, 2_000),
++        ],
++        &mut cx,
++    );
++    send_tasks(
++        &a,
++        vec![
++            wire_task("t1", "failed", true, 1_000),
++            wire_task("t2", "running", true, 2_000),
++        ],
++        &mut cx,
++    );
++    let card = card(&panel, &cx);
++    let ended = find_row(&card, &sid, "t1", &mut cx).expect("the ended row is still listed");
++    assert_eq!(ended.task.status, AgentTaskStatus::Failed);
++
++    // Hostile half: the adapter drops the ended task from the next snapshot; the
++    // row must not vanish before its 10 s are up.
++    send_tasks(&a, vec![wire_task("t2", "running", true, 2_000)], &mut cx);
++    advance(&mut cx, Duration::from_secs(9));
++    assert!(find_row(&card, &sid, "t1", &mut cx).is_some(), "still on show at 9 s");
++
++    advance(&mut cx, Duration::from_secs(2));
++    assert!(find_row(&card, &sid, "t1", &mut cx).is_none(), "gone after 10 s");
++    // The running neighbour is untouched by the expiry.
++    assert!(find_row(&card, &sid, "t2", &mut cx).is_some());
++}
++
++// ---- R1.8 -------------------------------------------------------------------------
++
++#[gpui::test]
++async fn test_closing_a_thread_removes_its_rows(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++    let card = card(&panel, &cx);
++    assert_eq!(rows(&card, &mut cx).len(), 2);
++
++    // The panel now holds only B.
++    let b_view = panel.read_with(&cx, |panel, _| panel.active_conversation_view().cloned().unwrap());
++    card.update(&mut cx, |card, cx| card.sync_threads([&b_view].into_iter(), cx));
++    cx.run_until_parked();
++
++    let groups = rows(&card, &mut cx);
++    assert_eq!(groups.len(), 1);
++    assert_eq!(groups[0].session_id, session_of(&b, &cx));
++
++    // And A's later snapshots no longer reach the card.
++    send_tasks(&a, vec![wire_task("t9", "running", true, 3_000)], &mut cx);
++    assert_eq!(rows(&card, &mut cx).len(), 1);
++}
++
++// ---- R3.1 / R3.3 ------------------------------------------------------------------
++
++/// Hostile half first: watching task `t1` of thread A must not watch task `t1` of
++/// thread B — the watch key is the pair (session, task), not the task id.
++#[gpui::test]
++async fn test_watch_is_keyed_by_thread_and_task(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "Same title", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "Same title", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++    let (sa, sb) = (session_of(&a, &cx), session_of(&b, &cx));
++    let card = card(&panel, &cx);
++
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id.clone(), cx));
++    assert!(find_row(&card, &sa, "t1", &mut cx).unwrap().watched);
++    assert!(!find_row(&card, &sb, "t1", &mut cx).unwrap().watched);
++
++    // Toggling again unmarks it.
++    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id.clone(), cx));
++    assert!(!find_row(&card, &sa, "t1", &mut cx).unwrap().watched);
++}
++
++#[gpui::test]
++async fn test_a_new_card_starts_with_nothing_watched(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let old = card(&panel, &cx);
++    let id = find_row(&old, &sa, "t1", &mut cx).unwrap().task.id;
++    old.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id, cx));
++
++    // A fresh card (what a Zeo restart builds) shares nothing with the old one.
++    let a_view = panel.read_with(&cx, |panel, _| panel.active_conversation_view().cloned().unwrap());
++    let fresh = cx.update(|_, cx| cx.new(|cx| TasksCard::new(cx)));
++    fresh.update(&mut cx, |card, cx| card.sync_threads([&a_view].into_iter(), cx));
++    cx.run_until_parked();
++    let row = find_row(&fresh, &sa, "t1", &mut cx).expect("the fresh card lists the task");
++    assert!(!row.watched);
++    assert!(!fresh.read_with(&cx, |card, _| card.is_minimized()));
++}
++
++// ---- R2.5 -------------------------------------------------------------------------
++
++/// The minimized state is the session's, not the visibility's: the card hiding
++/// (nothing running) and showing again must not reset it.
++#[gpui::test]
++async fn test_minimized_state_survives_the_card_hiding_and_showing(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    assert!(card.read_with(&cx, |card, _| card.is_minimized()));
++
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    advance(&mut cx, Duration::from_secs(11));
++    assert!(!visible(&card, &mut cx));
++
++    send_tasks(&a, vec![wire_task("t2", "running", true, 20_000)], &mut cx);
++    assert!(visible(&card, &mut cx));
++    assert!(card.read_with(&cx, |card, _| card.is_minimized()), "still minimized");
++}
++
++// ---- the card keeps its model while not painting -------------------------------------
++
++/// Disabled, hidden or minimized only stops painting: threads keep syncing and
++/// endings keep landing, so the moment the card shows again (and story 014's
++/// history) it is current.
++#[gpui::test]
++async fn test_card_keeps_syncing_while_disabled_or_minimized(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    // The card exists before any thread, created with the panel.
++    let card = card(&panel, &cx);
++    assert!(rows(&card, &mut cx).is_empty());
++
++    cx.update(|_, cx| {
++        AgentSettings::override_global(
++            AgentSettings {
++                tasks_card: TasksCardSettings {
++                    enabled: false,
++                    position: TasksCardPosition::TopRight,
++                },
++                ..AgentSettings::get_global(cx).clone()
++            },
++            cx,
++        );
++    });
++    let connection = TaskActionsConnection::new();
++    // A thread opened while disabled is still synced.
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    assert!(!visible(&card, &mut cx), "disabled: nothing is shown");
++    assert!(find_row(&card, &sa, "t1", &mut cx).is_some(), "but the row is known");
++
++    // Minimized: an ending still lands as an ended row.
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    send_tasks(&a, vec![wire_task("t1", "failed", true, 1_000)], &mut cx);
++    let row = find_row(&card, &sa, "t1", &mut cx).expect("the ending was received");
++    assert_eq!(row.task.status, AgentTaskStatus::Failed);
++}
+diff --git a/crates/agent_ui/src/tasks_card/open_tests.rs b/crates/agent_ui/src/tasks_card/open_tests.rs
+new file mode 100644
+index 0000000..4240fb7
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/open_tests.rs
+@@ -0,0 +1,148 @@
++// Story 013 / task 5.3 — open the thread at the task's tool call (R4.6).
++// Filter: `tasks_card::open`.
++
++use agent_client_protocol::schema::v1 as acp;
++use acp_thread::{AcpThread, AgentThreadEntry};
++use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
++use serde_json::json;
++
++use super::test_helpers::*;
++use crate::test_support::active_session_id;
++
++/// Fills `thread` with alternating user/agent messages around the tool call
++/// `toolu_t1`, so scrolling to it moves the list.
++fn fill_with_entries(thread: &Entity<AcpThread>, cx: &mut VisualTestContext) {
++    thread.update(cx, |thread, cx| {
++        let mut push = |update: acp::SessionUpdate| {
++            thread.handle_session_update(update, cx).expect("entry applies");
++        };
++        for i in 0..20 {
++            push(acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
++                format!("question {i}").into(),
++            )));
++            push(acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
++                format!("answer {i}").into(),
++            )));
++        }
++        push(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
++            "toolu_t1",
++            "Run the suite",
++        )));
++        for i in 20..40 {
++            push(acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
++                format!("question {i}").into(),
++            )));
++            push(acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
++                format!("answer {i}").into(),
++            )));
++        }
++    });
++    cx.run_until_parked();
++}
++
++fn tool_call_index(thread: &Entity<AcpThread>, id: &str, cx: &VisualTestContext) -> usize {
++    thread.read_with(cx, |thread, _| {
++        thread
++            .entries()
++            .iter()
++            .position(|entry| matches!(entry, AgentThreadEntry::ToolCall(call) if call.id.to_string() == id))
++            .expect("the tool call is an entry")
++    })
++}
++
++fn scroll_top(panel: &Entity<crate::AgentPanel>, cx: &mut VisualTestContext) -> usize {
++    let view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
++    view.read_with(cx, |view, _| view.list_state.logical_scroll_top().item_ix)
++}
++
++/// Hostile half first: with another thread in front, opening A's task must bring
++/// A forward — not leave the active thread in place.
++#[gpui::test]
++async fn test_open_task_brings_its_thread_forward(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++    let (sa, sb) = (session_of(&a, &cx), session_of(&b, &cx));
++    assert_eq!(active_session_id(&panel, &cx), sb);
++
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update_in(&mut cx, |card, window, cx| card.open_task(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    assert_eq!(active_session_id(&panel, &cx), sa);
++}
++
++#[gpui::test]
++async fn test_open_task_scrolls_to_the_tool_call_that_started_it(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    fill_with_entries(&a, &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let expected = tool_call_index(&a, "toolu_t1", &cx);
++    assert!(expected > 0);
++
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update_in(&mut cx, |card, window, cx| card.open_task(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    assert_eq!(scroll_top(&panel, &mut cx), expected);
++}
++
++/// A nested subagent's task whose tool call is not among the root thread's
++/// entries opens the thread only — no scroll to a wrong entry, no panic.
++#[gpui::test]
++async fn test_open_task_without_a_root_tool_call_opens_the_thread_only(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    fill_with_entries(&a, &mut cx);
++    let mut nested = wire_task("n1", "running", true, 1_000);
++    nested["toolCallId"] = json!("toolu_not_in_root");
++    nested["type"] = json!("subagent");
++    nested["depth"] = json!(1);
++    send_tasks(&a, vec![nested], &mut cx);
++    let sa = session_of(&a, &cx);
++    let _b = open_titled_thread(&panel, &connection, "B", &mut cx);
++
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "n1", &mut cx).unwrap().task.id;
++    card.update_in(&mut cx, |card, window, cx| card.open_task(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    assert_eq!(active_session_id(&panel, &cx), sa);
++    let toolu_t1 = tool_call_index(&a, "toolu_t1", &cx);
++    assert_ne!(scroll_top(&panel, &mut cx), toolu_t1, "no scroll to an unrelated tool call");
++}
++
++/// A failed open shows its error on the row. Injection: the row belongs to a thread
++/// held by a SECOND panel (same workspace, never docked) that this panel's card was
++/// synced to; this panel cannot open that session (its agent is not registered
++/// here), so `open_task` fails. If the implementation makes this injection succeed,
++/// change the injection, not the assertion.
++#[gpui::test]
++async fn test_a_failed_open_shows_its_error_on_the_row(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_card_panel_in_workspace(cx).await;
++    let other = workspace.update_in(&mut cx, |workspace, window, cx| {
++        cx.new(|cx| crate::AgentPanel::new(workspace, window, cx))
++    });
++    let connection = TaskActionsConnection::new();
++    let foreign = open_titled_thread(&other, &connection, "Elsewhere", &mut cx);
++    send_tasks(&foreign, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sf = session_of(&foreign, &cx);
++    let foreign_view =
++        other.read_with(&cx, |other, _| other.active_conversation_view().cloned().unwrap());
++
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| card.sync_threads([&foreign_view].into_iter(), cx));
++    cx.run_until_parked();
++    let id = find_row(&card, &sf, "t1", &mut cx).unwrap().task.id;
++    card.update_in(&mut cx, |card, window, cx| card.open_task(sf.clone(), id, window, cx));
++    cx.run_until_parked();
++
++    let row = find_row(&card, &sf, "t1", &mut cx).expect("the row stays listed");
++    assert!(row.error.is_some(), "the failed open reaches the row");
++}
+diff --git a/crates/agent_ui/src/tasks_card/panel_close_tests.rs b/crates/agent_ui/src/tasks_card/panel_close_tests.rs
+new file mode 100644
+index 0000000..ed8af59
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/panel_close_tests.rs
+@@ -0,0 +1,86 @@
++// Story 013 / task 3.2 review — R1.8 through the panel's own close paths, not a
++// hand-made `sync_threads` call. Filter: `tasks_card::panel_close`.
++
++use gpui::TestAppContext;
++
++use super::test_helpers::*;
++use crate::thread_metadata_store::ThreadMetadataStore;
++
++/// Opens A then B, each with a running task; B ends up active and A retained.
++///
++/// The threads are returned strong and must be held to the end of the test: a
++/// released thread already drops out of `rows()` through its dead weak handle,
++/// which would let a missing sync pass unnoticed. Something else holding a closed
++/// thread (its connection's session map) is the case the sync exists for.
++async fn two_threads_with_tasks(
++    cx: &mut TestAppContext,
++) -> (
++    gpui::Entity<crate::AgentPanel>,
++    gpui::VisualTestContext,
++    crate::thread_metadata_store::ThreadId,
++    [gpui::Entity<acp_thread::AcpThread>; 2],
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let a_thread_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++    let card = card(&panel, &cx);
++    assert_eq!(rows(&card, &mut cx).len(), 2, "both threads listed first");
++    (panel, cx, a_thread_id, [a, b])
++}
++
++fn sessions(
++    panel: &gpui::Entity<crate::AgentPanel>,
++    cx: &mut gpui::VisualTestContext,
++) -> Vec<agent_client_protocol::schema::v1::SessionId> {
++    let card = card(panel, cx);
++    rows(&card, cx)
++        .into_iter()
++        .map(|group| group.session_id)
++        .collect()
++}
++
++#[gpui::test]
++async fn test_removing_a_retained_thread_from_the_panel_removes_its_rows(cx: &mut TestAppContext) {
++    let (panel, mut cx, a_thread_id, [a, b]) = two_threads_with_tasks(cx).await;
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.remove_thread(a_thread_id, window, cx)
++    });
++    cx.run_until_parked();
++
++    assert_eq!(sessions(&panel, &mut cx), vec![session_of(&b, &cx)]);
++    // And A's later snapshots no longer reach the card.
++    send_tasks(&a, vec![wire_task("t9", "running", true, 3_000)], &mut cx);
++    assert_eq!(sessions(&panel, &mut cx), vec![session_of(&b, &cx)]);
++}
++
++#[gpui::test]
++async fn test_archiving_a_retained_thread_removes_its_rows(cx: &mut TestAppContext) {
++    let (panel, mut cx, a_thread_id, [a, b]) = two_threads_with_tasks(cx).await;
++
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.archive(a_thread_id, None, cx))
++    });
++    cx.run_until_parked();
++
++    assert_eq!(sessions(&panel, &mut cx), vec![session_of(&b, &cx)]);
++    drop(a);
++}
++
++#[gpui::test]
++async fn test_removing_the_active_thread_from_the_panel_removes_its_rows(cx: &mut TestAppContext) {
++    let (panel, mut cx, _a_thread_id, [a, b]) = two_threads_with_tasks(cx).await;
++    let b_thread_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.remove_thread(b_thread_id, window, cx)
++    });
++    cx.run_until_parked();
++
++    assert_eq!(sessions(&panel, &mut cx), vec![session_of(&a, &cx)]);
++    drop(b);
++}
+diff --git a/crates/agent_ui/src/tasks_card/placement_tests.rs b/crates/agent_ui/src/tasks_card/placement_tests.rs
+new file mode 100644
+index 0000000..96d03f4
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/placement_tests.rs
+@@ -0,0 +1,167 @@
++// Story 013 / task 4.1, review fixes — where the card may sit: inside the agent
++// panel however small it is, and clear of the toolbar above and the message
++// editor below. Filter: `tasks_card::placement`.
++
++use agent_client_protocol::schema::v1 as acp;
++use agent_settings::{AgentSettings, TasksCardSettings};
++use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, px, size};
++use settings::{Settings as _, TasksCardPosition};
++use workspace::dock::PanelSizeState;
++
++use super::test_helpers::*;
++use crate::AgentPanel;
++
++const ALL_CORNERS: [TasksCardPosition; 4] = [
++    TasksCardPosition::TopRight,
++    TasksCardPosition::TopLeft,
++    TasksCardPosition::BottomRight,
++    TasksCardPosition::BottomLeft,
++];
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn set_position(position: TasksCardPosition, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        AgentSettings::override_global(
++            AgentSettings {
++                tasks_card: TasksCardSettings {
++                    enabled: true,
++                    position,
++                },
++                ..AgentSettings::get_global(cx).clone()
++            },
++            cx,
++        );
++    });
++    draw(cx);
++}
++
++fn contains(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {
++    inner.left() >= outer.left()
++        && inner.right() <= outer.right()
++        && inner.top() >= outer.top()
++        && inner.bottom() <= outer.bottom()
++}
++
++fn many_running_tasks() -> Vec<serde_json::Value> {
++    (0..12)
++        .map(|ix| wire_task(&format!("t{ix}"), "running", true, 1_000 + ix))
++        .collect()
++}
++
++/// A narrow, short panel: the card shrinks to it — narrower than its usual width,
++/// its list scrolling — instead of spilling over the editor or the status bar.
++#[gpui::test]
++async fn test_the_card_stays_inside_a_small_panel(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_card_panel_in_workspace(cx).await;
++    // The dock keeps its width share of a wide window, so the window itself is
++    // made narrow as well as short.
++    cx.simulate_resize(size(px(300.), px(260.)));
++    workspace.update_in(&mut cx, |workspace, window, cx| {
++        workspace.set_panel_size_state::<AgentPanel>(
++            PanelSizeState {
++                size: Some(px(240.)),
++                flex: None,
++            },
++            window,
++            cx,
++        );
++    });
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, many_running_tasks(), &mut cx);
++    draw(&mut cx);
++
++    let panel_bounds = cx.debug_bounds("agent-panel").expect("panel painted");
++    assert!(
++        panel_bounds.size.width < px(300.),
++        "the panel is narrower than the card's usual width: {panel_bounds:?}"
++    );
++    for position in ALL_CORNERS {
++        set_position(position, &mut cx);
++        let card = cx.debug_bounds("tasks-card").expect("card painted");
++        assert!(
++            contains(panel_bounds, card),
++            "{position:?}: card {card:?} outside the panel {panel_bounds:?}"
++        );
++    }
++}
++
++/// The free area of an empty thread is the editor's text area: the bottom
++/// corners stay above the editor's controls, the top corners below the toolbar.
++#[gpui::test]
++async fn test_the_card_keeps_clear_of_the_toolbar_and_the_message_editor(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    let panel_bounds = cx.debug_bounds("agent-panel").expect("panel painted");
++    let toolbar_height = cx.update(|_, cx| ui::Tab::container_height(cx));
++    let editor = panel.read_with(&cx, |panel, cx| {
++        panel
++            .active_thread_view(cx)
++            .and_then(|view| {
++                view.read(cx)
++                    .message_editor
++                    .read(cx)
++                    .editor()
++                    .read(cx)
++                    .last_bounds()
++                    .copied()
++            })
++            .expect("the message editor was painted")
++    });
++    for position in ALL_CORNERS {
++        set_position(position, &mut cx);
++        let card = cx.debug_bounds("tasks-card").expect("card painted");
++        assert!(
++            card.bottom() <= editor.bottom(),
++            "{position:?}: card {card:?} reaches below the editor's text {editor:?}"
++        );
++        assert!(
++            card.top() >= panel_bounds.top() + toolbar_height,
++            "{position:?}: card {card:?} covers the toolbar"
++        );
++    }
++}
++
++/// With a conversation on screen, the card sits over the conversation's entries
++/// only — not over the editor or the callouts under them.
++#[gpui::test]
++async fn test_the_card_sits_over_the_conversation(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    a.update(&mut cx, |thread, cx| {
++        thread.handle_session_update(
++            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
++                "a response long enough to be an entry".into(),
++            )),
++            cx,
++        )
++    })
++    .expect("the agent message applies");
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++
++    let viewport = panel.read_with(&cx, |panel, cx| {
++        let view = panel.active_thread_view(cx).expect("a thread view");
++        let view = view.read(cx);
++        assert!(view.list_state.item_count() > 0, "the thread has an entry");
++        view.list_state.viewport_bounds()
++    });
++    assert!(!viewport.is_empty(), "the conversation was laid out");
++    for position in ALL_CORNERS {
++        set_position(position, &mut cx);
++        let card = cx.debug_bounds("tasks-card").expect("card painted");
++        assert!(
++            contains(viewport, card),
++            "{position:?}: card {card:?} outside the conversation {viewport:?}"
++        );
++    }
++}
+diff --git a/crates/agent_ui/src/tasks_card/render_tests.rs b/crates/agent_ui/src/tasks_card/render_tests.rs
+new file mode 100644
+index 0000000..8e8882d
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/render_tests.rs
+@@ -0,0 +1,176 @@
++// Story 013 / task 4.1 — the card painted over the agent panel
++// (R1.1, R1.2, R1.7, R2.1, R2.2, R2.3, R2.4, R3.2). Filter: `tasks_card::render`.
++//
++// Elements are found through debug selectors (see test_helpers.rs for the list).
++
++use std::time::Duration;
++
++use agent_settings::{AgentSettings, TasksCardSettings};
++use gpui::{Modifiers, TestAppContext, VisualTestContext};
++use settings::{Settings as _, TasksCardPosition};
++
++use super::test_helpers::*;
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn set_card_settings(enabled: bool, position: TasksCardPosition, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        AgentSettings::override_global(
++            AgentSettings {
++                tasks_card: TasksCardSettings { enabled, position },
++                ..AgentSettings::get_global(cx).clone()
++            },
++            cx,
++        );
++    });
++    draw(cx);
++}
++
++#[gpui::test]
++async fn test_nothing_is_painted_while_no_task_runs(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card").is_none());
++    assert!(cx.debug_bounds("tasks-card-pill").is_none());
++
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card").is_some(), "a running task shows the card");
++    assert!(cx.debug_bounds("tasks-card-row-t1").is_some());
++
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    advance(&mut cx, Duration::from_secs(11));
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card").is_none(), "hidden once idle (R1.7)");
++}
++
++#[gpui::test]
++async fn test_card_sits_in_the_configured_corner(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++
++    // The default corner is top_right.
++    draw(&mut cx);
++    let default = cx.debug_bounds("tasks-card").expect("card painted");
++
++    set_card_settings(true, TasksCardPosition::BottomLeft, &mut cx);
++    let bottom_left = cx.debug_bounds("tasks-card").expect("card painted");
++    set_card_settings(true, TasksCardPosition::TopRight, &mut cx);
++    let top_right = cx.debug_bounds("tasks-card").expect("card painted");
++    set_card_settings(true, TasksCardPosition::TopLeft, &mut cx);
++    let top_left = cx.debug_bounds("tasks-card").expect("card painted");
++    set_card_settings(true, TasksCardPosition::BottomRight, &mut cx);
++    let bottom_right = cx.debug_bounds("tasks-card").expect("card painted");
++
++    assert_eq!(default, top_right, "top_right is the default corner");
++    assert!(top_right.origin.x > top_left.origin.x, "right is right of left");
++    assert!(bottom_right.origin.x > bottom_left.origin.x);
++    assert!(bottom_left.origin.y > top_left.origin.y, "bottom is below top");
++    assert!(bottom_right.origin.y > top_right.origin.y);
++}
++
++#[gpui::test]
++async fn test_disabled_setting_paints_neither_card_nor_pill(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    set_card_settings(false, TasksCardPosition::TopRight, &mut cx);
++    assert!(cx.debug_bounds("tasks-card").is_none());
++    assert!(cx.debug_bounds("tasks-card-pill").is_none());
++
++    // Minimized and disabled: still nothing.
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-pill").is_none());
++    assert!(!visible(&card, &mut cx));
++}
++
++#[gpui::test]
++async fn test_minimize_collapses_to_a_pill_and_clicking_it_expands(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    let expanded = cx.debug_bounds("tasks-card").expect("card painted");
++
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| card.toggle_minimized(cx));
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card").is_none(), "the card is collapsed");
++    let pill = cx.debug_bounds("tasks-card-pill").expect("the pill is painted");
++    // Same corner (top_right): the pill hugs the card's right and top edges.
++    assert!((pill.right() - expanded.right()).abs() < gpui::px(1.));
++    assert!((pill.top() - expanded.top()).abs() < gpui::px(1.));
++
++    cx.simulate_click(pill.center(), Modifiers::none());
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card").is_some(), "clicking the pill expands");
++    assert!(cx.debug_bounds("tasks-card-pill").is_none());
++}
++
++/// A watched row is expanded with its progress details; every other row is one line.
++#[gpui::test]
++async fn test_only_watched_rows_show_their_details(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            wire_task("t1", "running", true, 1_000),
++            wire_task("t2", "running", true, 2_000),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-details-t1").is_none());
++    assert!(cx.debug_bounds("tasks-card-details-t2").is_none());
++
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id, cx));
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-details-t1").is_some());
++    assert!(cx.debug_bounds("tasks-card-details-t2").is_none());
++    let watched = cx.debug_bounds("tasks-card-row-t1").unwrap();
++    let plain = cx.debug_bounds("tasks-card-row-t2").unwrap();
++    assert!(watched.size.height > plain.size.height, "the watched row is taller");
++}
++
++/// A running row paints its elapsed time; once ended, the row paints its final
++/// status and duration instead — until it expires.
++#[gpui::test]
++async fn test_an_ended_row_paints_its_final_status_until_it_expires(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-elapsed-t1").is_some());
++    assert!(cx.debug_bounds("tasks-card-ended-t1").is_none());
++
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-ended-t1").is_some(), "final status on show");
++    assert!(cx.debug_bounds("tasks-card-elapsed-t1").is_none(), "no ticking clock once ended");
++
++    advance(&mut cx, Duration::from_secs(9));
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-ended-t1").is_some(), "still on show at 9 s");
++
++    advance(&mut cx, Duration::from_secs(2));
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-ended-t1").is_none());
++    assert!(cx.debug_bounds("tasks-card-row-t1").is_none());
++}
+diff --git a/crates/agent_ui/src/tasks_card/row_error_tests.rs b/crates/agent_ui/src/tasks_card/row_error_tests.rs
+new file mode 100644
+index 0000000..90ccf3e
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/row_error_tests.rs
+@@ -0,0 +1,181 @@
++// Story 013 / task 5.2 — the row-error lifecycle owed by 5.1 (R4.3, R4.7).
++// Filter: `tasks_card::row_error`.
++
++use std::{any::Any, rc::Rc};
++
++use acp_thread::{AcpThread, AgentConnection};
++use agent_client_protocol::schema::v1 as acp;
++use anyhow::{Context as _, Result, anyhow};
++use gpui::{App, AppContext as _, Entity, SharedString, Task, TestAppContext};
++use project::{AgentId, Project};
++use workspace::PathList;
++
++use super::test_helpers::*;
++use crate::test_support::open_thread_with_custom_connection;
++
++/// A row error lasts while snapshots leave its task unchanged, and goes with the
++/// first snapshot that changes it. A snapshot identical to the last one never
++/// reaches the card (`AcpThread` emits no `TasksUpdated` for it), so the step that
++/// reaches the card's own check is the one that changes only another task.
++#[gpui::test]
++async fn test_a_row_error_survives_an_identical_snapshot_and_clears_on_a_change(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    *connection.stop_answer.lock().unwrap() = StopAnswer::Err("stop failed for task t1: boom");
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let t1 = wire_task("t1", "running", true, 1_000);
++    let t2 = wire_task("t2", "running", true, 2_000);
++    send_tasks(&a, vec![t1.clone(), t2.clone()], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
++    cx.run_until_parked();
++    cx.simulate_prompt_answer("Stop");
++    cx.run_until_parked();
++    assert!(find_row(&card, &sa, "t1", &mut cx).unwrap().error.is_some());
++
++    send_tasks(&a, vec![t1.clone(), t2.clone()], &mut cx);
++    let error = find_row(&card, &sa, "t1", &mut cx).unwrap().error;
++    assert!(
++        error.is_some_and(|error| error.contains("boom")),
++        "an identical snapshot keeps the error"
++    );
++
++    let mut t2_progressed = t2;
++    t2_progressed["lastTool"] = "Read".into();
++    send_tasks(&a, vec![t1.clone(), t2_progressed.clone()], &mut cx);
++    let error = find_row(&card, &sa, "t1", &mut cx).unwrap().error;
++    assert!(
++        error.is_some_and(|error| error.contains("boom")),
++        "a snapshot that changes only another task keeps the error"
++    );
++
++    let mut t1_progressed = t1;
++    t1_progressed["lastTool"] = "Bash".into();
++    send_tasks(&a, vec![t1_progressed, t2_progressed], &mut cx);
++    assert!(
++        find_row(&card, &sa, "t1", &mut cx).unwrap().error.is_none(),
++        "a snapshot that changes the task clears the error"
++    );
++}
++
++/// The real connection wraps the agent's text under its own context, so "is not
++/// running" sits in the cause, not in the outer message.
++#[gpui::test]
++async fn test_a_stop_refused_as_not_running_leaves_no_row_error(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = NotRunningStopConnection {
++        inner: TaskActionsConnection::new(),
++    };
++    open_thread_with_custom_connection(&panel, connection.clone(), &mut cx);
++    let a = panel.read_with(&cx, |panel, cx| panel.active_agent_thread(cx).unwrap());
++    send_info(&a, acp::SessionInfoUpdate::new().title("A"), &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| {
++        card.request_stop(sa.clone(), id, window, cx)
++    });
++    cx.run_until_parked();
++    cx.simulate_prompt_answer("Stop");
++    cx.run_until_parked();
++
++    assert_eq!(
++        connection.inner.stops(),
++        vec![(sa.to_string(), "t1".to_string())]
++    );
++    let row = find_row(&card, &sa, "t1", &mut cx).unwrap();
++    assert!(
++        row.error.is_none(),
++        "a task that already ended is not the user's error: {:?}",
++        row.error
++    );
++}
++
++/// Answers every stop with `stop failed for task {id}` wrapping `task {id} is not
++/// running`; everything else is `TaskActionsConnection`'s.
++#[derive(Clone)]
++struct NotRunningStopConnection {
++    inner: TaskActionsConnection,
++}
++
++impl AgentConnection for NotRunningStopConnection {
++    fn agent_id(&self) -> AgentId {
++        self.inner.agent_id()
++    }
++
++    fn telemetry_id(&self) -> SharedString {
++        self.inner.telemetry_id()
++    }
++
++    // Builds the thread on this connection, so the thread's `stop_task` reaches it.
++    fn new_session(
++        self: Rc<Self>,
++        project: Entity<Project>,
++        work_dirs: PathList,
++        cx: &mut App,
++    ) -> Task<Result<Entity<AcpThread>>> {
++        let action_log = cx.new(|_| action_log::ActionLog::new(project.clone()));
++        let thread = cx.new(|cx| {
++            AcpThread::new(
++                None,
++                None,
++                Some(work_dirs),
++                self.clone(),
++                project,
++                action_log,
++                acp::SessionId::new("tasks-card-not-running-session"),
++                watch::Receiver::constant(acp::PromptCapabilities::new()),
++                cx,
++            )
++        });
++        Task::ready(Ok(thread))
++    }
++
++    fn auth_methods(&self) -> &[acp::AuthMethod] {
++        self.inner.auth_methods()
++    }
++
++    fn authenticate(&self, method: acp::AuthMethodId, cx: &mut App) -> Task<Result<()>> {
++        self.inner.authenticate(method, cx)
++    }
++
++    fn prompt(
++        &self,
++        params: acp::PromptRequest,
++        cx: &mut App,
++    ) -> Task<Result<acp::PromptResponse>> {
++        self.inner.prompt(params, cx)
++    }
++
++    fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
++        self.inner.cancel(session_id, cx)
++    }
++
++    fn stop_task(
++        self: Rc<Self>,
++        session_id: &acp::SessionId,
++        task_id: &str,
++        _cx: &mut App,
++    ) -> Task<Result<()>> {
++        self.inner
++            .stops
++            .lock()
++            .unwrap()
++            .push((session_id.to_string(), task_id.to_string()));
++        let refused: Result<()> = Err(anyhow!("task {task_id} is not running"));
++        Task::ready(refused.with_context(|| format!("stop failed for task {task_id}")))
++    }
++
++    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
++        self
++    }
++}
+diff --git a/crates/agent_ui/src/tasks_card/stop_tests.rs b/crates/agent_ui/src/tasks_card/stop_tests.rs
+new file mode 100644
+index 0000000..7ab3520
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/stop_tests.rs
+@@ -0,0 +1,128 @@
++// Story 013 / task 5.1 — Stop with confirmation (R4.1, R4.2, R4.3).
++// Filter: `tasks_card::stop`.
++
++use acp_thread::AgentTaskStatus;
++use gpui::TestAppContext;
++
++use super::test_helpers::*;
++
++/// Hostile half first: the prompt names the task, and Cancel sends nothing.
++#[gpui::test]
++async fn test_stop_asks_naming_the_task_and_cancel_sends_nothing(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    assert!(cx.has_pending_prompt(), "Stop asks before sending");
++    assert!(connection.stops().is_empty(), "nothing is sent while the prompt is open");
++    let (message, detail) = cx.pending_prompt().unwrap();
++    assert!(
++        format!("{message} {detail}").contains("Task t1"),
++        "the prompt names the task's description: {message:?} / {detail:?}"
++    );
++
++    cx.simulate_prompt_answer("Cancel");
++    cx.run_until_parked();
++    assert!(connection.stops().is_empty(), "Cancel sends nothing");
++    let row = find_row(&card, &sa, "t1", &mut cx).unwrap();
++    assert_eq!(row.task.status, AgentTaskStatus::Running);
++    assert!(row.error.is_none());
++}
++
++/// Confirmed: the stop goes to THAT task of THAT thread — two threads holding a
++/// task with the same id must not both be stopped, nor the wrong one.
++#[gpui::test]
++async fn test_confirmed_stop_sends_only_for_that_threads_task(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "Same title", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "Same title", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    cx.simulate_prompt_answer("Stop");
++    cx.run_until_parked();
++
++    assert_eq!(connection.stops(), vec![(sa.to_string(), "t1".to_string())]);
++}
++
++#[gpui::test]
++async fn test_a_failed_stop_shows_on_the_row_and_the_task_stays_running(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    *connection.stop_answer.lock().unwrap() = StopAnswer::Err("stop failed for task t1: boom");
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    cx.simulate_prompt_answer("Stop");
++    cx.run_until_parked();
++
++    assert_eq!(connection.stops().len(), 1);
++    let row = find_row(&card, &sa, "t1", &mut cx).expect("the task is still listed");
++    assert_eq!(row.task.status, AgentTaskStatus::Running);
++    let error = row.error.expect("the error reaches the row");
++    assert!(error.contains("boom"), "row error was {error:?}");
++}
++
++/// A prompt whose receiver is dropped (its window closed) is a Cancel. The hostile
++/// reading is "no answer = the first button", and the first button is Stop.
++#[gpui::test]
++async fn test_a_dropped_prompt_counts_as_cancel(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    use_silent_prompts(&mut cx);
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    assert!(connection.stops().is_empty());
++
++    // The window goes, and the prompt view and its sender with it.
++    cx.update(|window, _| window.remove_window());
++    cx.executor().run_until_parked();
++    assert!(connection.stops().is_empty(), "a dropped prompt must not stop the task");
++}
++
++/// The task ends while the prompt is open; answering Stop afterwards sends nothing
++/// and leaves no error on the (ended) row.
++#[gpui::test]
++async fn test_a_task_that_ends_while_the_prompt_is_open_is_not_stopped(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++
++    card.update_in(&mut cx, |card, window, cx| card.request_stop(sa.clone(), id, window, cx));
++    cx.run_until_parked();
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    cx.simulate_prompt_answer("Stop");
++    cx.run_until_parked();
++
++    assert!(connection.stops().is_empty(), "an ended task is not stopped");
++    let row = find_row(&card, &sa, "t1", &mut cx).expect("the ended row is on show");
++    assert_eq!(row.task.status, AgentTaskStatus::Completed);
++    assert!(row.error.is_none(), "no error for a race the user did not cause");
++}
+diff --git a/crates/agent_ui/src/tasks_card/test_helpers.rs b/crates/agent_ui/src/tasks_card/test_helpers.rs
+new file mode 100644
+index 0000000..07d5444
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/test_helpers.rs
+@@ -0,0 +1,416 @@
++// Story 013 — shared fixtures for the tasks card tests (patch 0033/0034).
++//
++// Declared in `src/tasks_card.rs` as:
++//
++//     #[cfg(test)]
++//     mod test_helpers;
++//
++//     #[cfg(test)]
++//     #[path = "tasks_card/model_tests.rs"]
++//     mod model;
++//     #[cfg(test)]
++//     #[path = "tasks_card/render_tests.rs"]
++//     mod render;
++//     #[cfg(test)]
++//     #[path = "tasks_card/live_tests.rs"]
++//     mod live;
++//     #[cfg(test)]
++//     #[path = "tasks_card/stop_tests.rs"]
++//     mod stop;
++//     #[cfg(test)]
++//     #[path = "tasks_card/background_tests.rs"]
++//     mod background;
++//     #[cfg(test)]
++//     #[path = "tasks_card/open_tests.rs"]
++//     mod open;
++//
++// and in `src/tasks_card/tray.rs`:
++//
++//     #[cfg(test)]
++//     #[path = "tray/decision_tests.rs"]
++//     mod decision;
++//     #[cfg(test)]
++//     #[path = "tray/send_tests.rs"]
++//     mod send_tests;
++//
++// so each test's path carries its Validation filter (`tasks_card::model`, ...,
++// `tasks_card::tray::send` — matched as a substring of `tasks_card::tray::send_tests`,
++// a name chosen so the module does not shadow `tray::send` the function).
++//
++// Contract assumed beyond design.md's signatures (the card's projection types):
++//   - the card is created in `AgentPanel::new`; `AgentPanel::tasks_card(&self) -> &Entity<TasksCard>`
++//   - `ThreadGroup { session_id: acp::SessionId, title: SharedString, project: SharedString, rows: Vec<TaskRow> }`
++//   - `TaskRow { task: AgentTask, watched: bool, error: Option<SharedString> }`
++//   - `TasksCard::is_minimized(&self) -> bool`
++//   - actions keyed by `(acp::SessionId, AgentTaskId)` (012: `pub type AgentTaskId = SharedString`):
++//     `toggle_watch(sid, id, cx)`, `toggle_minimized(cx)`, `request_stop(sid, id, window, cx)`,
++//     `send_to_background(sid, id, cx)`, `open_task(sid, id, window, cx)`
++//   - debug selectors: `tasks-card`, `tasks-card-pill`, `tasks-card-row-{task_id}`,
++//     `tasks-card-details-{task_id}`, `tasks-card-background-{task_id}`,
++//     `tasks-card-elapsed-{task_id}` (running row), `tasks-card-ended-{task_id}` (an ended
++//     row's final status and duration)
++//   - tray: `datagram_for(task: &AgentTask, session_id: &acp::SessionId, work_dir: Option<&Path>,
++//     thread_title: Option<&str>, now: SystemTime) -> Option<TaskOutcomeDatagram>`
++
++#![allow(dead_code)]
++
++use std::{
++    any::Any,
++    path::Path,
++    rc::Rc,
++    sync::{Arc, Mutex},
++    time::Duration,
++};
++
++use acp_thread::{AcpThread, AgentConnection, StubAgentConnection};
++use agent_client_protocol::schema::v1 as acp;
++use anyhow::{Result, anyhow};
++use fs::FakeFs;
++use gpui::{
++    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
++    PromptResponse, Render, SharedString, Task, TestAppContext, VisualTestContext, Window,
++};
++use project::{AgentId, Project};
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use super::{TaskRow, TasksCard, ThreadGroup};
++use crate::AgentPanel;
++use crate::conversation_view::tests::init_test;
++use crate::test_support::open_thread_with_custom_connection;
++
++pub(crate) const TASKS_KEY: &str = "_claude/tasks";
++
++/// What a scripted task action answers.
++#[derive(Clone, Debug)]
++pub(crate) enum StopAnswer {
++    Ok,
++    Err(&'static str),
++}
++
++#[derive(Clone, Debug)]
++pub(crate) enum BackgroundAnswer {
++    Moved,
++    NothingMoved,
++    Err(&'static str),
++}
++
++/// An agent connection that records the task actions it is asked for, and answers
++/// them as scripted. Everything else delegates to `StubAgentConnection`, except
++/// `new_session`, which builds the thread on *this* connection so the thread's
++/// `stop_task` / `background_task` reach it.
++#[derive(Clone)]
++pub(crate) struct TaskActionsConnection {
++    stub: StubAgentConnection,
++    /// Threads created without a work directory (a thread opened outside a project).
++    without_work_dirs: bool,
++    next_session: Arc<Mutex<usize>>,
++    pub stops: Arc<Mutex<Vec<(String, String)>>>,
++    pub backgrounds: Arc<Mutex<Vec<(String, String)>>>,
++    pub stop_answer: Arc<Mutex<StopAnswer>>,
++    pub background_answer: Arc<Mutex<BackgroundAnswer>>,
++}
++
++impl TaskActionsConnection {
++    pub(crate) fn new() -> Self {
++        Self {
++            stub: StubAgentConnection::new(),
++            without_work_dirs: false,
++            next_session: Arc::new(Mutex::new(0)),
++            stops: Arc::default(),
++            backgrounds: Arc::default(),
++            stop_answer: Arc::new(Mutex::new(StopAnswer::Ok)),
++            background_answer: Arc::new(Mutex::new(BackgroundAnswer::Moved)),
++        }
++    }
++
++    pub(crate) fn without_work_dirs() -> Self {
++        Self {
++            without_work_dirs: true,
++            ..Self::new()
++        }
++    }
++
++    pub(crate) fn stops(&self) -> Vec<(String, String)> {
++        self.stops.lock().unwrap().clone()
++    }
++
++    pub(crate) fn backgrounds(&self) -> Vec<(String, String)> {
++        self.backgrounds.lock().unwrap().clone()
++    }
++}
++
++impl AgentConnection for TaskActionsConnection {
++    fn agent_id(&self) -> AgentId {
++        self.stub.agent_id()
++    }
++
++    fn telemetry_id(&self) -> SharedString {
++        "tasks-card-test".into()
++    }
++
++    fn new_session(
++        self: Rc<Self>,
++        project: Entity<Project>,
++        work_dirs: PathList,
++        cx: &mut App,
++    ) -> Task<Result<Entity<AcpThread>>> {
++        let session_id = {
++            let mut next = self.next_session.lock().unwrap();
++            *next += 1;
++            acp::SessionId::new(format!("tasks-card-session-{}", *next))
++        };
++        let action_log = cx.new(|_| action_log::ActionLog::new(project.clone()));
++        let thread = cx.new(|cx| {
++            AcpThread::new(
++                None,
++                None,
++                (!self.without_work_dirs).then_some(work_dirs),
++                self.clone(),
++                project,
++                action_log,
++                session_id,
++                watch::Receiver::constant(acp::PromptCapabilities::new()),
++                cx,
++            )
++        });
++        Task::ready(Ok(thread))
++    }
++
++    fn auth_methods(&self) -> &[acp::AuthMethod] {
++        &[]
++    }
++
++    fn authenticate(&self, _method: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
++        Task::ready(Ok(()))
++    }
++
++    fn prompt(
++        &self,
++        _params: acp::PromptRequest,
++        _cx: &mut App,
++    ) -> Task<Result<acp::PromptResponse>> {
++        Task::ready(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
++    }
++
++    fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {}
++
++    // Story 012's task actions (AgentConnection, design.md of 012).
++    fn stop_task(
++        self: Rc<Self>,
++        session_id: &acp::SessionId,
++        task_id: &str,
++        _cx: &mut App,
++    ) -> Task<Result<()>> {
++        self.stops
++            .lock()
++            .unwrap()
++            .push((session_id.to_string(), task_id.to_string()));
++        match self.stop_answer.lock().unwrap().clone() {
++            StopAnswer::Ok => Task::ready(Ok(())),
++            StopAnswer::Err(message) => Task::ready(Err(anyhow!(message))),
++        }
++    }
++
++    fn background_task(
++        self: Rc<Self>,
++        session_id: &acp::SessionId,
++        tool_call_id: &str,
++        _cx: &mut App,
++    ) -> Task<Result<bool>> {
++        self.backgrounds
++            .lock()
++            .unwrap()
++            .push((session_id.to_string(), tool_call_id.to_string()));
++        match self.background_answer.lock().unwrap().clone() {
++            BackgroundAnswer::Moved => Task::ready(Ok(true)),
++            BackgroundAnswer::NothingMoved => Task::ready(Ok(false)),
++            BackgroundAnswer::Err(message) => Task::ready(Err(anyhow!(message))),
++        }
++    }
++
++    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
++        self
++    }
++}
++
++/// A visible agent panel in a workspace window, as the user sees it.
++pub(crate) async fn setup_card_panel(
++    cx: &mut TestAppContext,
++) -> (Entity<AgentPanel>, VisualTestContext) {
++    let (panel, _workspace, cx) = setup_card_panel_in_workspace(cx).await;
++    (panel, cx)
++}
++
++/// Same, also returning the workspace (to build a second, undocked panel).
++pub(crate) async fn setup_card_panel_in_workspace(
++    cx: &mut TestAppContext,
++) -> (Entity<AgentPanel>, Entity<Workspace>, VisualTestContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    fs.insert_tree("/project", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
++    let multi_workspace =
++        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace
++        .read_with(cx, |multi_workspace, _cx| multi_workspace.workspace().clone())
++        .unwrap();
++    let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
++    cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
++    let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
++        let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
++        workspace.add_panel(panel.clone(), window, cx);
++        workspace.focus_panel::<AgentPanel>(window, cx);
++        panel
++    });
++    cx.run_until_parked();
++    (panel, workspace, cx)
++}
++
++/// Opens a new thread on `connection`, titles it, and returns its root thread.
++pub(crate) fn open_titled_thread(
++    panel: &Entity<AgentPanel>,
++    connection: &TaskActionsConnection,
++    title: &str,
++    cx: &mut VisualTestContext,
++) -> Entity<AcpThread> {
++    open_thread_with_custom_connection(panel, connection.clone(), cx);
++    let thread = panel.read_with(cx, |panel, cx| panel.active_agent_thread(cx).unwrap());
++    send_info(&thread, acp::SessionInfoUpdate::new().title(title), cx);
++    thread
++}
++
++pub(crate) fn session_of(thread: &Entity<AcpThread>, cx: &VisualTestContext) -> acp::SessionId {
++    thread.read_with(cx, |thread, _| thread.session_id().clone())
++}
++
++/// One `_claude/tasks` wire task, in the adapter's camelCase shape (story 012).
++pub(crate) fn wire_task(
++    id: &str,
++    status: &str,
++    background: bool,
++    started_at_ms: u64,
++) -> serde_json::Value {
++    let ended = status != "running";
++    json!({
++        "id": id,
++        "toolCallId": format!("toolu_{id}"),
++        "type": "shell",
++        "description": format!("Task {id}"),
++        "background": background,
++        "depth": 0,
++        "status": status,
++        "startedAt": started_at_ms,
++        "endedAt": if ended { Some(started_at_ms + 1_000) } else { None },
++        "usage": null,
++        "lastTool": null,
++        "summary": null,
++    })
++}
++
++pub(crate) fn send_info(
++    thread: &Entity<AcpThread>,
++    update: acp::SessionInfoUpdate,
++    cx: &mut VisualTestContext,
++) {
++    thread
++        .update(cx, |thread, cx| {
++            thread.handle_session_update(acp::SessionUpdate::SessionInfoUpdate(update), cx)
++        })
++        .expect("session info update should apply");
++    cx.run_until_parked();
++}
++
++/// Feeds a `_claude/tasks` snapshot (a level, replacing the list) to `thread`.
++pub(crate) fn send_tasks(
++    thread: &Entity<AcpThread>,
++    tasks: Vec<serde_json::Value>,
++    cx: &mut VisualTestContext,
++) {
++    let mut meta = serde_json::Map::new();
++    meta.insert(TASKS_KEY.to_string(), json!({ "tasks": tasks }));
++    send_info(thread, acp::SessionInfoUpdate::new().meta(meta), cx);
++}
++
++pub(crate) fn card(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Entity<TasksCard> {
++    panel.read_with(cx, |panel, _| panel.tasks_card().clone())
++}
++
++pub(crate) fn rows(card: &Entity<TasksCard>, cx: &mut VisualTestContext) -> Vec<ThreadGroup> {
++    card.update(cx, |card, cx| card.rows(cx))
++}
++
++pub(crate) fn visible(card: &Entity<TasksCard>, cx: &mut VisualTestContext) -> bool {
++    card.update(cx, |card, cx| card.is_visible(cx))
++}
++
++/// The rows of the group for `session` (empty when the thread has no group).
++pub(crate) fn rows_of(
++    card: &Entity<TasksCard>,
++    session: &acp::SessionId,
++    cx: &mut VisualTestContext,
++) -> Vec<TaskRow> {
++    rows(card, cx)
++        .into_iter()
++        .find(|group| &group.session_id == session)
++        .map(|group| group.rows)
++        .unwrap_or_default()
++}
++
++pub(crate) fn row_ids(rows: &[TaskRow]) -> Vec<String> {
++    rows.iter().map(|row| row.task.id.to_string()).collect()
++}
++
++pub(crate) fn find_row(
++    card: &Entity<TasksCard>,
++    session: &acp::SessionId,
++    task_id: &str,
++    cx: &mut VisualTestContext,
++) -> Option<TaskRow> {
++    rows_of(card, session, cx)
++        .into_iter()
++        .find(|row| row.task.id.as_ref() == task_id)
++}
++
++/// A prompt view whose answer never comes: once its window goes, the view is
++/// released and the prompt's sender with it — the "dropped receiver" case.
++pub(crate) struct SilentPrompt {
++    focus_handle: FocusHandle,
++}
++
++impl EventEmitter<PromptResponse> for SilentPrompt {}
++
++impl Focusable for SilentPrompt {
++    fn focus_handle(&self, _cx: &App) -> FocusHandle {
++        self.focus_handle.clone()
++    }
++}
++
++impl Render for SilentPrompt {
++    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
++        gpui::div()
++    }
++}
++
++/// Routes every prompt of this app to a `SilentPrompt` instead of the test
++/// platform's queue (which keeps its sender alive for ever).
++pub(crate) fn use_silent_prompts(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        cx.set_prompt_builder(|_level, _message, _detail, _buttons, handle, window, cx| {
++            let view = cx.new(|cx| SilentPrompt {
++                focus_handle: cx.focus_handle(),
++            });
++            handle.with_view(view, window, cx)
++        });
++    });
++}
++
++pub(crate) fn advance(cx: &mut VisualTestContext, duration: Duration) {
++    cx.executor().advance_clock(duration);
++    cx.run_until_parked();
++}
+diff --git a/crates/settings_content/src/agent.rs b/crates/settings_content/src/agent.rs
+index 502f321..8993e8b 100644
+--- a/crates/settings_content/src/agent.rs
++++ b/crates/settings_content/src/agent.rs
+@@ -124,6 +124,49 @@ pub enum ElicitationPlacement {
+     Inline,
+ }
+ 
++/// The corner of the agent panel where the tasks card is anchored.
++#[derive(
++    Clone,
++    Copy,
++    Debug,
++    Default,
++    PartialEq,
++    Eq,
++    Serialize,
++    Deserialize,
++    JsonSchema,
++    MergeFrom,
++    strum::VariantArray,
++    strum::VariantNames,
++)]
++#[serde(rename_all = "snake_case")]
++pub enum TasksCardPosition {
++    /// The top-right corner of the agent panel.
++    #[default]
++    TopRight,
++    /// The top-left corner of the agent panel.
++    TopLeft,
++    /// The bottom-right corner of the agent panel.
++    BottomRight,
++    /// The bottom-left corner of the agent panel.
++    BottomLeft,
++}
++
++/// Settings for the tasks card: the floating card in the agent panel that
++/// lists the background tasks of the agent's threads.
++#[with_fallible_options]
++#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
++pub struct TasksCardSettingsContent {
++    /// Whether to show the tasks card and, when it is minimized, its pill.
++    ///
++    /// Default: true
++    pub enabled: Option<bool>,
++    /// The corner of the agent panel the tasks card is anchored to.
++    ///
++    /// Default: top_right
++    pub position: Option<TasksCardPosition>,
++}
++
+ /// Threshold at which agent auto-compaction runs. See
+ /// [`AutoCompactSettingsContent::threshold`] for the accepted formats.
+ ///
+@@ -419,6 +462,9 @@ pub struct AgentSettingsContent {
+     ///
+     /// Default: card
+     pub elicitation_placement: Option<ElicitationPlacement>,
++    /// Settings for the tasks card, which lists the background tasks of the
++    /// agent's threads in a corner of the agent panel.
++    pub tasks_card: Option<TasksCardSettingsContent>,
+     /// Whether to show the merge conflict indicator in the status bar
+     /// that offers to resolve conflicts using the agent.
+     ///
