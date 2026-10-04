@@ -1,0 +1,2114 @@
+From ad38844a5d334b0e83a991ab2ed70a5a89403590 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sat, 3 Oct 2026 22:56:05 -0300
+Subject: [PATCH] agent: hold the agent's task feed and let the thread stop or
+ background a task
+
+0029 taught the sidebar that work can outlive the turn that launched it, but
+it only ever learned a number: `_meta["_claude/backgroundTasks"].count`. A
+card or a history panel needs the tasks themselves -- what each one is, how
+long it has run, how it ended -- and a way to act on one without typing a
+prompt. This patch is the model and the actions; nothing renders them yet.
+Stories 013 (the card, the tray) and 014 (the history panel) consume it.
+
+The contract, carried by claude-agent-acp-plus since the release that added
+it (story 012):
+
+- `session_info_update._meta["_claude/tasks"]` = `{ tasks: [...] }`, each
+  entry `{ id, toolCallId, type, description, background, depth, status,
+  startedAt, endedAt, usage, lastTool, summary }`, status one of running,
+  completed, failed, stopped, interrupted. It is a SNAPSHOT, not a delta:
+  every update carries every live task, so a lost update is repaired by the
+  next one. An ended task appears in exactly one snapshot, then drops out.
+- `_claude/tasks/stop { sessionId, taskId } -> {}` and
+  `_claude/tasks/background { sessionId, toolCallId } -> { backgrounded }`,
+  two JSON-RPC requests sent through `UntypedMessage`.
+- The `initialize` response advertises both as
+  `agentCapabilities._meta["_claude/tasks"] = { version: 1 }`.
+
+What this adds:
+
+- `AcpThread::tasks()`, replaced wholesale on each snapshot, and two events:
+  `TasksUpdated` when the list differs, `TaskEnded { task_id, status }` once
+  per ending. The announced set forgets an id when it leaves the list or comes
+  back running, because a resumed subagent restarts under its agent id and its
+  second ending is news too.
+- A payload that does not parse logs a warning and leaves the list alone; an
+  update without the key (the adapter's title-only updates ride the same
+  notification) changes nothing; a PRESENT empty list clears it.
+- A running task missing from the next snapshot, never seen ending, is kept
+  once as `interrupted` and announced. When the agent process exits, or the
+  session is closed through `AgentConnection::close_session`, every running
+  task becomes `interrupted`, once. `AcpConnection` had no `close_session`
+  override; the one added waits for an in-flight load or release, closes once,
+  then interrupts. `supports_close_session()` stays false, so in practice only
+  the exit path is live today.
+- `AgentConnection::{stop_task, background_task}`, defaulting to "not
+  supported". `AcpConnection` sends them only when the capability above is
+  advertised -- never keyed on the entry id or the agent's name, which differ
+  between the published adapter and a local fork.
+- The retention clause: `is_idle_for_retention()` is false while any task is
+  running. A turn that ended with background work is idle by ThreadStatus, so
+  without it `cleanup_retained_threads` dropped exactly the threads a task
+  card exists to show. `TasksUpdated` also re-runs that cleanup, so a thread
+  kept for its tasks is released when the last one ends rather than at the
+  next unrelated event.
+
+What it deliberately does not do:
+
+- It leaves 0029's `background_task_count` and its key alone instead of
+  deriving the count from the new list. An adapter that sends only the old key
+  still lights the sidebar, and the two cannot disagree visibly because the
+  adapter publishes both from the same table.
+- It routes nothing through ThreadMetadataStore, for the reason 0029 gives.
+- It marks nothing on a thread that is being dropped: the thread is destroyed
+  with its tasks, so there is no observer to tell.
+
+The wire shape is pinned by a fixture shared byte for byte with the adapter
+(`crates/acp_thread/src/test_data/claude_tasks_snapshot.json`, parsed by
+`test_tasks_contract_fixture_parses`). No other agent sends the key or the
+capability, so for them nothing changes. Rides the claude-agent-acp-plus flag
+BY DEPENDENCY, like 0011, 0013 and 0029.
+---
+
+diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
+index e9612b9..1812307 100644
+--- a/crates/acp_thread/src/acp_thread.rs
++++ b/crates/acp_thread/src/acp_thread.rs
+@@ -43,7 +43,7 @@ use std::fmt::{Formatter, Write};
+ use std::ops::Range;
+ use std::process::ExitStatus;
+ use std::rc::Rc;
+-use std::time::{Duration, Instant};
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+ use std::{fmt::Display, mem, path::PathBuf, sync::Arc};
+ pub use submission::*;
+ use task::{Shell, ShellBuilder};
+@@ -3571,6 +3571,134 @@ const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
+ /// `background_tasks_changed` level here, as `{ "count": n, "tasks": [...] }`.
+ const CLAUDE_BACKGROUND_TASKS_META_KEY: &str = "_claude/backgroundTasks";
+ 
++/// The `_meta` key the ACP adapter writes the full task snapshot under, on a
++/// `session_info_update`: every running task plus each ended one until it has been
++/// published once. A level, not a stream — each snapshot replaces the previous one.
++///
++/// Kept apart from [`CLAUDE_BACKGROUND_TASKS_META_KEY`] so an adapter that only sends
++/// the count keeps patch `0029`'s background status working.
++const CLAUDE_TASKS_META_KEY: &str = "_claude/tasks";
++
++pub type AgentTaskId = SharedString;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AgentTaskStatus {
++    Running,
++    Completed,
++    Failed,
++    Stopped,
++    Interrupted,
++}
++
++impl AgentTaskStatus {
++    pub fn is_running(&self) -> bool {
++        matches!(self, AgentTaskStatus::Running)
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct AgentTaskUsage {
++    pub tokens: u64,
++    pub tool_uses: u64,
++    pub duration: Duration,
++}
++
++/// A unit of agent work that can outlive the turn that started it: a background shell,
++/// a subagent, a monitor.
++#[derive(Debug, Clone, PartialEq)]
++pub struct AgentTask {
++    pub id: AgentTaskId,
++    pub tool_call_id: Option<acp_v1::ToolCallId>,
++    pub kind: SharedString,
++    pub description: SharedString,
++    pub background: bool,
++    pub depth: u32,
++    pub status: AgentTaskStatus,
++    pub started_at: SystemTime,
++    pub ended_at: Option<SystemTime>,
++    pub usage: Option<AgentTaskUsage>,
++    pub last_tool: Option<SharedString>,
++    pub summary: Option<SharedString>,
++}
++
++#[derive(Deserialize)]
++struct WireTasksSnapshot {
++    tasks: Vec<WireTask>,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct WireTask {
++    id: String,
++    tool_call_id: Option<String>,
++    #[serde(rename = "type")]
++    kind: String,
++    description: String,
++    background: bool,
++    depth: u32,
++    status: WireTaskStatus,
++    started_at: u64,
++    ended_at: Option<u64>,
++    usage: Option<WireTaskUsage>,
++    last_tool: Option<String>,
++    summary: Option<String>,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "lowercase")]
++enum WireTaskStatus {
++    Running,
++    Completed,
++    Failed,
++    Stopped,
++    Interrupted,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct WireTaskUsage {
++    tokens: u64,
++    tool_uses: u64,
++    duration_ms: u64,
++}
++
++/// `SystemTime + Duration` panics on overflow (reachable on Windows with a
++/// garbage timestamp), so an unrepresentable time falls back to the epoch.
++fn system_time_from_millis(millis: u64) -> SystemTime {
++    UNIX_EPOCH
++        .checked_add(Duration::from_millis(millis))
++        .unwrap_or(UNIX_EPOCH)
++}
++
++impl From<WireTask> for AgentTask {
++    fn from(task: WireTask) -> Self {
++        AgentTask {
++            id: task.id.into(),
++            tool_call_id: task.tool_call_id.map(acp_v1::ToolCallId::new),
++            kind: task.kind.into(),
++            description: task.description.into(),
++            background: task.background,
++            depth: task.depth,
++            status: match task.status {
++                WireTaskStatus::Running => AgentTaskStatus::Running,
++                WireTaskStatus::Completed => AgentTaskStatus::Completed,
++                WireTaskStatus::Failed => AgentTaskStatus::Failed,
++                WireTaskStatus::Stopped => AgentTaskStatus::Stopped,
++                WireTaskStatus::Interrupted => AgentTaskStatus::Interrupted,
++            },
++            started_at: system_time_from_millis(task.started_at),
++            ended_at: task.ended_at.map(system_time_from_millis),
++            usage: task.usage.map(|usage| AgentTaskUsage {
++                tokens: usage.tokens,
++                tool_uses: usage.tool_uses,
++                duration: Duration::from_millis(usage.duration_ms),
++            }),
++            last_tool: task.last_tool.map(SharedString::from),
++            summary: task.summary.map(SharedString::from),
++        }
++    }
++}
++
+ pub const TOKEN_USAGE_WARNING_THRESHOLD: f32 = 0.8;
+ 
+ impl TokenUsage {
+@@ -3671,6 +3799,10 @@ pub struct AcpThread {
+     token_usage: Option<TokenUsage>,
+     account_usage: AccountUsage,
+     background_task_count: usize,
++    tasks: Vec<AgentTask>,
++    // Ids whose ending has been announced with `TaskEnded`, so a repeated snapshot does
++    // not announce it again. An id is forgotten once it leaves `tasks`.
++    announced_task_endings: HashSet<AgentTaskId>,
+     cost: Option<SessionCost>,
+     prompt_capabilities: acp_v1::PromptCapabilities,
+     available_commands: Vec<acp_v1::AvailableCommand>,
+@@ -3797,6 +3929,11 @@ pub enum AcpThreadEvent {
+     TokenUsageUpdated,
+     AccountUsageUpdated,
+     BackgroundTasksUpdated,
++    TasksUpdated,
++    TaskEnded {
++        task_id: AgentTaskId,
++        status: AgentTaskStatus,
++    },
+     EntryUpdated(usize),
+     EntriesRemoved(Range<usize>),
+     ToolAuthorizationRequested(PermissionRequestId),
+@@ -3949,6 +4086,8 @@ impl AcpThread {
+                 | AcpThreadEvent::TokenUsageUpdated
+                 | AcpThreadEvent::AccountUsageUpdated
+                 | AcpThreadEvent::BackgroundTasksUpdated
++                | AcpThreadEvent::TasksUpdated
++                | AcpThreadEvent::TaskEnded { .. }
+                 | AcpThreadEvent::EntryUpdated(_)
+                 | AcpThreadEvent::Retry(_)
+                 | AcpThreadEvent::SubagentSpawned(_)
+@@ -4005,6 +4144,8 @@ impl AcpThread {
+             token_usage: None,
+             account_usage: AccountUsage::default(),
+             background_task_count: 0,
++            tasks: Vec::new(),
++            announced_task_endings: HashSet::default(),
+             cost: None,
+             prompt_capabilities,
+             available_commands: Vec::new(),
+@@ -4261,6 +4402,9 @@ impl AcpThread {
+                 }
+                 _ => false,
+             })
++            // A turn that left background work running reads `Idle`, yet releasing the
++            // thread would drop the only view of that work.
++            && !self.tasks.iter().any(|task| task.status.is_running())
+     }
+ 
+     pub fn forget_submission(&mut self, id: SubmissionId, cx: &mut Context<Self>) {
+@@ -4431,6 +4575,89 @@ impl AcpThread {
+         self.background_task_count
+     }
+ 
++    /// The agent's tasks as of its last `_claude/tasks` snapshot, in start order. Empty
++    /// for an agent that does not publish them.
++    pub fn tasks(&self) -> &[AgentTask] {
++        &self.tasks
++    }
++
++    pub fn stop_task(&self, task_id: &str, cx: &mut App) -> Task<Result<()>> {
++        self.connection
++            .clone()
++            .stop_task(&self.session_id, task_id, cx)
++    }
++
++    /// Resolves to `false` when the agent had nothing to move to the background.
++    pub fn background_task(&self, tool_call_id: &str, cx: &mut App) -> Task<Result<bool>> {
++        self.connection
++            .clone()
++            .background_task(&self.session_id, tool_call_id, cx)
++    }
++
++    fn apply_tasks_snapshot(&mut self, snapshot: WireTasksSnapshot, cx: &mut Context<Self>) {
++        let mut tasks: Vec<AgentTask> = snapshot.tasks.into_iter().map(AgentTask::from).collect();
++
++        // A running task whose ending never reached us is gone without a word: keep it
++        // once, as interrupted, so its ending is still shown and announced.
++        let now = SystemTime::now();
++        for previous in &self.tasks {
++            if previous.status.is_running()
++                && !self.announced_task_endings.contains(&previous.id)
++                && !tasks.iter().any(|task| task.id == previous.id)
++            {
++                let mut interrupted = previous.clone();
++                interrupted.status = AgentTaskStatus::Interrupted;
++                interrupted.ended_at = Some(now);
++                tasks.push(interrupted);
++            }
++        }
++        tasks.sort_by_key(|task| task.started_at);
++
++        // Forget an ending once its id leaves the list, or comes back running:
++        // a resumed subagent restarts under the same id, and its next ending
++        // is news again.
++        self.announced_task_endings.retain(|id| {
++            tasks
++                .iter()
++                .any(|task| &task.id == id && !task.status.is_running())
++        });
++        if tasks != self.tasks {
++            self.tasks = tasks;
++            cx.emit(AcpThreadEvent::TasksUpdated);
++        }
++        self.announce_task_endings(cx);
++    }
++
++    fn announce_task_endings(&mut self, cx: &mut Context<Self>) {
++        for task in &self.tasks {
++            if !task.status.is_running() && self.announced_task_endings.insert(task.id.clone()) {
++                cx.emit(AcpThreadEvent::TaskEnded {
++                    task_id: task.id.clone(),
++                    status: task.status,
++                });
++            }
++        }
++    }
++
++    /// Marks every running task interrupted and announces each ending once. For the
++    /// paths where the agent can no longer report on its tasks: its process exited, or
++    /// the session was closed.
++    pub fn interrupt_running_tasks(&mut self, cx: &mut Context<Self>) {
++        let now = SystemTime::now();
++        let mut changed = false;
++        for task in &mut self.tasks {
++            if task.status.is_running() {
++                task.status = AgentTaskStatus::Interrupted;
++                task.ended_at = Some(now);
++                changed = true;
++            }
++        }
++        if changed {
++            cx.emit(AcpThreadEvent::TasksUpdated);
++            self.announce_task_endings(cx);
++        }
++    }
++
+     pub fn cost(&self) -> Option<&SessionCost> {
+         self.cost.as_ref()
+     }
+@@ -4622,6 +4849,22 @@ impl AcpThread {
+                     self.background_task_count = count;
+                     cx.emit(AcpThreadEvent::BackgroundTasksUpdated);
+                 }
++                // Absent from the adapter's title-only and count-only updates: a missing
++                // key is "no change", never "no tasks", or the list would blank.
++                if let Some(payload) = info_update
++                    .meta
++                    .as_ref()
++                    .and_then(|meta| meta.get(CLAUDE_TASKS_META_KEY))
++                {
++                    match serde_json::from_value::<WireTasksSnapshot>(payload.clone()) {
++                        Ok(snapshot) => self.apply_tasks_snapshot(snapshot, cx),
++                        Err(err) => log::warn!(
++                            "malformed _claude/tasks for session {}: {}",
++                            self.session_id,
++                            err
++                        ),
++                    }
++                }
+             }
+             acp_v1::SessionUpdate::AvailableCommandsUpdate(acp_v1::AvailableCommandsUpdate {
+                 available_commands,
+@@ -7526,6 +7769,9 @@ impl AcpThread {
+     }
+ 
+     pub fn emit_load_error(&mut self, error: LoadError, cx: &mut Context<Self>) {
++        // Every caller reports the agent process exiting, so no task can end normally
++        // from here on.
++        self.interrupt_running_tasks(cx);
+         cx.emit(AcpThreadEvent::LoadError(error));
+     }
+ 
+@@ -22654,4 +22900,7 @@ mod tests {
+         request.await.expect("turn should complete");
+         assert_eq!(cx.active_idle_sleep_preventions(), 0);
+     }
++
++    include!("acp_thread_tasks_tests.rs");
++    include!("acp_thread_tasks_review_tests.rs");
+ }
+diff --git a/crates/acp_thread/src/acp_thread_tasks_review_tests.rs b/crates/acp_thread/src/acp_thread_tasks_review_tests.rs
+new file mode 100644
+index 0000000..253e2c4
+--- /dev/null
++++ b/crates/acp_thread/src/acp_thread_tasks_review_tests.rs
+@@ -0,0 +1,52 @@
++// Story 012 — regressions found by the tech review of the task model, beyond the
++// pre-authored tests. Included after `acp_thread_tasks_tests.rs` (it reuses that
++// file's helpers).
++
++#[gpui::test]
++async fn test_claude_tasks_restarted_task_is_announced_again(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    for status in ["running", "completed", "running", "completed"] {
++        tasks_send(
++            &thread,
++            tasks_snapshot(vec![tasks_wire_task("x", status, 1_000)]),
++            cx,
++        );
++    }
++
++    assert_eq!(
++        events.borrow().ended,
++        vec![
++            ("x".to_string(), "completed"),
++            ("x".to_string(), "completed")
++        ]
++    );
++}
++
++#[gpui::test]
++async fn test_claude_tasks_restarted_task_that_vanishes_ends_as_interrupted(
++    cx: &mut TestAppContext,
++) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    for status in ["running", "completed", "running"] {
++        tasks_send(
++            &thread,
++            tasks_snapshot(vec![tasks_wire_task("x", status, 1_000)]),
++            cx,
++        );
++    }
++    tasks_send(&thread, tasks_snapshot(vec![]), cx);
++
++    assert_eq!(
++        events.borrow().ended,
++        vec![
++            ("x".to_string(), "completed"),
++            ("x".to_string(), "interrupted")
++        ]
++    );
++    assert_eq!(
++        tasks_ids(&thread, cx),
++        vec![("x".to_string(), "interrupted")]
++    );
++}
+diff --git a/crates/acp_thread/src/acp_thread_tasks_tests.rs b/crates/acp_thread/src/acp_thread_tasks_tests.rs
+new file mode 100644
+index 0000000..848f464
+--- /dev/null
++++ b/crates/acp_thread/src/acp_thread_tasks_tests.rs
+@@ -0,0 +1,781 @@
++// Story 012 / patch 0032 — the agent task model in `AcpThread` (R4.1–R4.9) and the
++// `_claude/tasks` contract fixture (Q12).
++//
++// Included at the end of `mod tests` in `acp_thread.rs`:
++//
++//     include!("acp_thread_tasks_tests.rs");
++//
++// so it shares that module's imports and `FakeAgentConnection`. Every test name
++// carries `tasks` (filter `cargo test -p acp_thread tasks`), the connection actions
++// carry `task_actions`, and the fixture test carries `contract`.
++
++const TASKS_KEY: &str = "_claude/tasks";
++const CONTRACT_FIXTURE: &str = include_str!("test_data/claude_tasks_snapshot.json");
++
++fn tasks_ms(ms: u64) -> std::time::SystemTime {
++    std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms)
++}
++
++/// The wire word for a status: exhaustive, so a sixth variant fails to compile here.
++fn tasks_status_word(status: &AgentTaskStatus) -> &'static str {
++    match status {
++        AgentTaskStatus::Running => "running",
++        AgentTaskStatus::Completed => "completed",
++        AgentTaskStatus::Failed => "failed",
++        AgentTaskStatus::Stopped => "stopped",
++        AgentTaskStatus::Interrupted => "interrupted",
++    }
++}
++
++/// One wire task. `status` is the wire word; `ended_at` is set for ended statuses.
++fn tasks_wire_task(id: &str, status: &str, started_at: u64) -> serde_json::Value {
++    let ended = status != "running";
++    serde_json::json!({
++        "id": id,
++        "toolCallId": format!("toolu_{id}"),
++        "type": "shell",
++        "description": format!("Task {id}"),
++        "background": true,
++        "depth": 0,
++        "status": status,
++        "startedAt": started_at,
++        "endedAt": if ended { Some(started_at + 1_000) } else { None },
++        "usage": null,
++        "lastTool": null,
++        "summary": null,
++    })
++}
++
++fn tasks_update(payload: serde_json::Value) -> acp_v1::SessionInfoUpdate {
++    let mut meta = serde_json::Map::new();
++    meta.insert(TASKS_KEY.to_string(), payload);
++    acp_v1::SessionInfoUpdate::new().meta(meta)
++}
++
++fn tasks_snapshot(tasks: Vec<serde_json::Value>) -> acp_v1::SessionInfoUpdate {
++    tasks_update(serde_json::json!({ "tasks": tasks }))
++}
++
++#[derive(Default)]
++struct TasksEvents {
++    updated: usize,
++    ended: Vec<(String, &'static str)>,
++}
++
++async fn tasks_thread(
++    connection: Rc<dyn AgentConnection>,
++    cx: &mut TestAppContext,
++) -> (Entity<AcpThread>, Rc<RefCell<TasksEvents>>) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    let project = Project::test(fs, [], cx).await;
++    let thread = cx
++        .update(|cx| {
++            connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
++        })
++        .await
++        .unwrap();
++
++    let events = Rc::new(RefCell::new(TasksEvents::default()));
++    let sink = events.clone();
++    thread.update(cx, |_thread, cx| {
++        cx.subscribe(
++            &thread,
++            move |_thread, _event_thread, event: &AcpThreadEvent, _cx| match event {
++                AcpThreadEvent::TasksUpdated => sink.borrow_mut().updated += 1,
++                AcpThreadEvent::TaskEnded { task_id, status } => sink
++                    .borrow_mut()
++                    .ended
++                    .push((task_id.to_string(), tasks_status_word(status))),
++                _ => {}
++            },
++        )
++        .detach();
++    });
++    (thread, events)
++}
++
++fn tasks_send(thread: &Entity<AcpThread>, update: acp_v1::SessionInfoUpdate, cx: &mut TestAppContext) {
++    thread
++        .update(cx, |thread, cx| {
++            thread.handle_session_update(acp_v1::SessionUpdate::SessionInfoUpdate(update), cx)
++        })
++        .expect("session info update should succeed");
++}
++
++fn tasks_ids(thread: &Entity<AcpThread>, cx: &mut TestAppContext) -> Vec<(String, &'static str)> {
++    thread.read_with(cx, |thread, _| {
++        thread
++            .tasks()
++            .iter()
++            .map(|task| (task.id.to_string(), tasks_status_word(&task.status)))
++            .collect()
++    })
++}
++
++// ---- R4.1 -------------------------------------------------------------------------
++
++#[gpui::test]
++async fn test_claude_tasks_snapshot_replaces_the_list_and_notifies(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("t1", "running", 1_000),
++            tasks_wire_task("done", "completed", 2_000),
++        ]),
++        cx,
++    );
++    assert_eq!(
++        tasks_ids(&thread, cx),
++        vec![("t1".to_string(), "running"), ("done".to_string(), "completed")]
++    );
++    assert_eq!(events.borrow().updated, 1);
++
++    // A level, not a stream: the next snapshot replaces the list, it does not merge.
++    // The ended task the adapter no longer sends is gone; t1's fields are the new ones.
++    let mut t1 = tasks_wire_task("t1", "running", 1_000);
++    t1["description"] = serde_json::json!("Renamed task");
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![t1, tasks_wire_task("t3", "running", 3_000)]),
++        cx,
++    );
++    assert_eq!(
++        tasks_ids(&thread, cx),
++        vec![("t1".to_string(), "running"), ("t3".to_string(), "running")]
++    );
++    thread.read_with(cx, |thread, _| {
++        assert_eq!(thread.tasks()[0].description.to_string(), "Renamed task")
++    });
++    assert_eq!(events.borrow().updated, 2);
++}
++
++#[gpui::test]
++async fn test_claude_tasks_fields_reach_the_model(cx: &mut TestAppContext) {
++    let (thread, _events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![serde_json::json!({
++            "id": "a1",
++            "toolCallId": null,
++            "type": "subagent",
++            "description": "Explore",
++            "background": false,
++            "depth": 2,
++            "status": "running",
++            "startedAt": 1_759_500_000_000u64,
++            "endedAt": null,
++            "usage": { "tokens": 10, "toolUses": 1, "durationMs": 500 },
++            "lastTool": "Read",
++            "summary": "Reading",
++        })]),
++        cx,
++    );
++
++    thread.read_with(cx, |thread, _| {
++        let task = &thread.tasks()[0];
++        assert_eq!(task.tool_call_id, None);
++        assert_eq!(task.kind.to_string(), "subagent");
++        assert_eq!(task.description.to_string(), "Explore");
++        assert!(!task.background);
++        assert_eq!(task.depth, 2);
++        assert_eq!(task.started_at, tasks_ms(1_759_500_000_000));
++        assert_eq!(task.ended_at, None);
++        assert!(task.usage.is_some());
++        assert_eq!(task.last_tool.as_ref().map(|s| s.to_string()), Some("Read".to_string()));
++        assert_eq!(task.summary.as_ref().map(|s| s.to_string()), Some("Reading".to_string()));
++    });
++}
++
++// ---- R4.2 — hostile half first: an absent key must not read as "no tasks" ----------
++
++#[gpui::test]
++async fn test_claude_tasks_absent_key_leaves_the_list_and_present_empty_clears_it(
++    cx: &mut TestAppContext,
++) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("r1", "running", 1_000),
++            tasks_wire_task("d1", "completed", 2_000),
++        ]),
++        cx,
++    );
++    assert_eq!(events.borrow().updated, 1);
++    assert_eq!(events.borrow().ended, vec![("d1".to_string(), "completed")]);
++
++    // A title-only update rides the same notification.
++    tasks_send(&thread, acp_v1::SessionInfoUpdate::new().title("Renamed"), cx);
++    // So does an update carrying only patch 0029's key.
++    let mut only_background = serde_json::Map::new();
++    only_background.insert(
++        CLAUDE_BACKGROUND_TASKS_META_KEY.to_string(),
++        serde_json::json!({ "count": 0, "tasks": [] }),
++    );
++    tasks_send(&thread, acp_v1::SessionInfoUpdate::new().meta(only_background), cx);
++    // And an update with unrelated meta.
++    let mut unrelated = serde_json::Map::new();
++    unrelated.insert("_claude/other".to_string(), serde_json::json!({ "tasks": [] }));
++    tasks_send(&thread, acp_v1::SessionInfoUpdate::new().meta(unrelated), cx);
++
++    // Nothing changed: the running task did not "vanish" (no R4.10 interrupt either).
++    assert_eq!(
++        tasks_ids(&thread, cx),
++        vec![("r1".to_string(), "running"), ("d1".to_string(), "completed")]
++    );
++    assert_eq!(events.borrow().updated, 1, "no change, no notification");
++    assert_eq!(events.borrow().ended, vec![("d1".to_string(), "completed")]);
++
++    // The converse: a PRESENT empty list is real news and clears the list.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("r1", "completed", 1_000)]),
++        cx,
++    );
++    tasks_send(&thread, tasks_snapshot(vec![]), cx);
++    assert_eq!(tasks_ids(&thread, cx), vec![]);
++    assert_eq!(events.borrow().updated, 3);
++}
++
++// ---- R4.3 -------------------------------------------------------------------------
++
++#[gpui::test]
++async fn test_claude_tasks_malformed_payload_keeps_the_previous_list(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("t1", "running", 1_000)]),
++        cx,
++    );
++
++    for payload in [
++        serde_json::json!("not an object"),
++        serde_json::json!({ "tasks": "not a list" }),
++        serde_json::json!({ "tasks": [{ "id": 5 }] }),
++        serde_json::json!({ "tasks": [{ "id": "t9", "status": "running" }] }),
++    ] {
++        tasks_send(&thread, tasks_update(payload), cx);
++        assert_eq!(tasks_ids(&thread, cx), vec![("t1".to_string(), "running")]);
++    }
++    assert_eq!(events.borrow().updated, 1);
++    assert!(events.borrow().ended.is_empty());
++}
++
++// ---- R4.4 — once per task, in both directions -------------------------------------
++
++#[gpui::test]
++async fn test_claude_tasks_ended_is_announced_once_per_task(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("t1", "running", 1_000)]),
++        cx,
++    );
++    assert!(events.borrow().ended.is_empty(), "a running task has not ended");
++
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("t1", "completed", 1_000)]),
++        cx,
++    );
++    // Hostile half: the same ending seen again (a repeated level) must not split
++    // into a second announcement.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("t1", "completed", 1_000)]),
++        cx,
++    );
++    assert_eq!(events.borrow().ended, vec![("t1".to_string(), "completed")]);
++}
++
++#[gpui::test]
++async fn test_claude_tasks_two_endings_are_two_announcements(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("t1", "running", 1_000),
++            tasks_wire_task("t2", "running", 2_000),
++            tasks_wire_task("t3", "running", 3_000),
++        ]),
++        cx,
++    );
++    // Converse hostile half: two DIFFERENT tasks ending in one snapshot must not
++    // collapse into one announcement.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("t1", "completed", 1_000),
++            tasks_wire_task("t2", "stopped", 2_000),
++            tasks_wire_task("t3", "running", 3_000),
++        ]),
++        cx,
++    );
++    // A third, later ending is still news after the first two were announced.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("t3", "interrupted", 3_000)]),
++        cx,
++    );
++
++    let mut ended = events.borrow().ended.clone();
++    ended.sort();
++    assert_eq!(
++        ended,
++        vec![
++            ("t1".to_string(), "completed"),
++            ("t2".to_string(), "stopped"),
++            ("t3".to_string(), "interrupted"),
++        ]
++    );
++}
++
++#[gpui::test]
++async fn test_claude_tasks_first_seen_ended_is_announced_and_forgotten_once_gone(
++    cx: &mut TestAppContext,
++) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    // Started and ended between two snapshots: first seen already ended.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("quick", "failed", 1_000)]),
++        cx,
++    );
++    assert_eq!(events.borrow().ended, vec![("quick".to_string(), "failed")]);
++
++    // The adapter omits it from the next snapshot; the announced set forgets it, so
++    // an id that comes back ended later is a new ending, not a duplicate.
++    tasks_send(&thread, tasks_snapshot(vec![]), cx);
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("quick", "completed", 5_000)]),
++        cx,
++    );
++    assert_eq!(
++        events.borrow().ended,
++        vec![("quick".to_string(), "failed"), ("quick".to_string(), "completed")]
++    );
++}
++
++// ---- R4.8 -------------------------------------------------------------------------
++
++#[gpui::test]
++async fn test_claude_tasks_and_background_count_keep_separate_keys(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    // An adapter that sends only 0029's key still lights the background status.
++    let mut only_background = serde_json::Map::new();
++    only_background.insert(
++        CLAUDE_BACKGROUND_TASKS_META_KEY.to_string(),
++        serde_json::json!({ "count": 2, "tasks": [] }),
++    );
++    tasks_send(&thread, acp_v1::SessionInfoUpdate::new().meta(only_background), cx);
++    thread.read_with(cx, |thread, _| {
++        assert_eq!(thread.background_task_count(), 2);
++        assert!(thread.tasks().is_empty());
++    });
++    assert_eq!(events.borrow().updated, 0);
++
++    // And a tasks-only update does not reset the count.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("t1", "running", 1_000)]),
++        cx,
++    );
++    thread.read_with(cx, |thread, _| assert_eq!(thread.background_task_count(), 2));
++}
++
++// ---- R4.9 — running tasks keep the thread; ended ones do not ----------------------
++
++#[gpui::test]
++async fn test_claude_tasks_running_task_keeps_the_thread_out_of_idle_retention(
++    cx: &mut TestAppContext,
++) {
++    let (thread, _events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    thread.read_with(cx, |thread, _| {
++        assert_eq!(thread.status(), ThreadStatus::Idle);
++        assert!(thread.is_idle_for_retention());
++    });
++
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("done", "completed", 1_000),
++            tasks_wire_task("live", "running", 2_000),
++        ]),
++        cx,
++    );
++    thread.read_with(cx, |thread, _| assert!(!thread.is_idle_for_retention()));
++
++    // Hostile half: ended tasks alone must not pin the thread — "has tasks" is not
++    // "has running tasks".
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("live", "completed", 2_000),
++            tasks_wire_task("other", "failed", 3_000),
++        ]),
++        cx,
++    );
++    thread.read_with(cx, |thread, _| assert!(thread.is_idle_for_retention()));
++}
++
++// ---- R4.10 — a running task that vanishes ends once as Interrupted -----------------
++
++#[gpui::test]
++async fn test_claude_tasks_vanished_running_task_ends_once_as_interrupted(
++    cx: &mut TestAppContext,
++) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("r1", "running", 1_000),
++            tasks_wire_task("r2", "running", 2_000),
++        ]),
++        cx,
++    );
++
++    // r1's ending snapshot never arrived: it is simply absent from the next one.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("r2", "running", 2_000)]),
++        cx,
++    );
++    thread.read_with(cx, |thread, _| {
++        let r1 = thread
++            .tasks()
++            .iter()
++            .find(|task| task.id.to_string() == "r1")
++            .expect("the vanished task is kept once, as interrupted");
++        assert_eq!(tasks_status_word(&r1.status), "interrupted");
++        assert!(r1.ended_at.is_some());
++    });
++    assert_eq!(events.borrow().ended, vec![("r1".to_string(), "interrupted")]);
++
++    // Once only: later snapshots without r1 announce nothing more and never revive it.
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("r2", "running", 2_000)]),
++        cx,
++    );
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("r2", "running", 2_000)]),
++        cx,
++    );
++    assert_eq!(events.borrow().ended, vec![("r1".to_string(), "interrupted")]);
++    let r1_running = tasks_ids(&thread, cx)
++        .into_iter()
++        .any(|(id, status)| id == "r1" && status == "running");
++    assert!(!r1_running);
++}
++
++#[gpui::test]
++async fn test_claude_tasks_published_ending_that_leaves_is_not_reannounced(
++    cx: &mut TestAppContext,
++) {
++    // Hostile half: the adapter omits an ended task after publishing it once (R1.6).
++    // That absence is NOT a vanished running task and must not become Interrupted.
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("a", "running", 1_000)]),
++        cx,
++    );
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_wire_task("a", "completed", 1_000)]),
++        cx,
++    );
++    tasks_send(&thread, tasks_snapshot(vec![]), cx);
++    tasks_send(&thread, tasks_snapshot(vec![]), cx);
++
++    assert_eq!(events.borrow().ended, vec![("a".to_string(), "completed")]);
++    assert_eq!(tasks_ids(&thread, cx), vec![]);
++}
++
++// ---- R4.11 — the agent process exits ---------------------------------------------
++
++#[gpui::test]
++async fn test_claude_tasks_agent_exit_interrupts_running_tasks_once(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![
++            tasks_wire_task("r1", "running", 1_000),
++            tasks_wire_task("r2", "running", 2_000),
++            tasks_wire_task("d1", "failed", 3_000),
++        ]),
++        cx,
++    );
++    assert_eq!(events.borrow().ended, vec![("d1".to_string(), "failed")]);
++
++    // The path agent_servers takes for every session when the agent process exits.
++    let exited = || LoadError::Exited {
++        status: std::process::ExitStatus::default(),
++        stderr: None,
++    };
++    thread.update(cx, |thread, cx| thread.emit_load_error(exited(), cx));
++    thread.update(cx, |thread, cx| thread.emit_load_error(exited(), cx));
++
++    assert_eq!(
++        tasks_ids(&thread, cx),
++        vec![
++            ("r1".to_string(), "interrupted"),
++            ("r2".to_string(), "interrupted"),
++            ("d1".to_string(), "failed"),
++        ]
++    );
++    let mut ended = events.borrow().ended.clone();
++    ended.sort();
++    assert_eq!(
++        ended,
++        vec![
++            ("d1".to_string(), "failed"),
++            ("r1".to_string(), "interrupted"),
++            ("r2".to_string(), "interrupted"),
++        ]
++    );
++    thread.read_with(cx, |thread, _| assert!(thread.is_idle_for_retention()));
++}
++
++// ---- Q12 — the shared fixture ------------------------------------------------------
++
++#[gpui::test]
++async fn test_tasks_contract_fixture_parses(cx: &mut TestAppContext) {
++    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++    let payload: serde_json::Value =
++        serde_json::from_str(CONTRACT_FIXTURE).expect("fixture is JSON");
++
++    tasks_send(&thread, tasks_update(payload), cx);
++
++    thread.read_with(cx, |thread, _| {
++        let tasks = thread.tasks();
++        assert_eq!(tasks.len(), 3, "every fixture task parses");
++
++        let shell = &tasks[0];
++        assert_eq!(shell.id.to_string(), "b7k2m9x1q");
++        assert_eq!(
++            shell.tool_call_id,
++            Some(acp_v1::ToolCallId::new("toolu_01ShellSleep20"))
++        );
++        assert_eq!(shell.kind.to_string(), "shell");
++        assert_eq!(shell.description.to_string(), "Run sleep 20 in the background");
++        assert!(shell.background);
++        assert_eq!(shell.depth, 0);
++        assert_eq!(tasks_status_word(&shell.status), "running");
++        assert_eq!(shell.started_at, tasks_ms(1_759_500_000_000));
++        assert_eq!(shell.ended_at, None);
++        assert!(shell.usage.is_none());
++        assert!(shell.last_tool.is_none());
++        assert!(shell.summary.is_none());
++
++        let subagent = &tasks[1];
++        assert_eq!(subagent.id.to_string(), "a3f8c2d4e5b6");
++        assert_eq!(subagent.kind.to_string(), "subagent");
++        assert!(!subagent.background);
++        assert_eq!(subagent.depth, 1);
++        assert!(subagent.usage.is_some());
++        assert_eq!(
++            subagent.last_tool.as_ref().map(|s| s.to_string()),
++            Some("Grep".to_string())
++        );
++        assert_eq!(
++            subagent.summary.as_ref().map(|s| s.to_string()),
++            Some("Reading the SDK task message types".to_string())
++        );
++
++        let ended = &tasks[2];
++        assert_eq!(ended.id.to_string(), "c9d1e2f3g");
++        assert_eq!(tasks_status_word(&ended.status), "completed");
++        assert_eq!(ended.started_at, tasks_ms(1_759_500_002_000));
++        assert_eq!(ended.ended_at, Some(tasks_ms(1_759_500_005_000)));
++        assert!(
++            ended
++                .summary
++                .as_ref()
++                .is_some_and(|s| s.to_string().contains("exit code 0"))
++        );
++    });
++    assert_eq!(events.borrow().updated, 1);
++    assert_eq!(events.borrow().ended, vec![("c9d1e2f3g".to_string(), "completed")]);
++}
++
++// ---- R4.5, R4.6, R4.7 — the thread's task actions ---------------------------------
++
++/// A connection that overrides the two task actions and records what it was asked.
++struct TaskActionsConnection {
++    sessions: Arc<parking_lot::Mutex<HashMap<acp_v1::SessionId, WeakEntity<AcpThread>>>>,
++    stop_calls: Rc<RefCell<Vec<(acp_v1::SessionId, String)>>>,
++    background_calls: Rc<RefCell<Vec<(acp_v1::SessionId, String)>>>,
++    stop_error: Option<&'static str>,
++    backgrounded: bool,
++}
++
++impl TaskActionsConnection {
++    fn new() -> Self {
++        Self {
++            sessions: Arc::default(),
++            stop_calls: Rc::default(),
++            background_calls: Rc::default(),
++            stop_error: None,
++            backgrounded: true,
++        }
++    }
++}
++
++impl AgentConnection for TaskActionsConnection {
++    fn agent_id(&self) -> AgentId {
++        AgentId::new("task-actions")
++    }
++
++    fn telemetry_id(&self) -> SharedString {
++        "task-actions".into()
++    }
++
++    fn auth_methods(&self) -> &[acp_v1::AuthMethod] {
++        &[]
++    }
++
++    fn new_session(
++        self: Rc<Self>,
++        project: Entity<Project>,
++        work_dirs: PathList,
++        cx: &mut App,
++    ) -> Task<gpui::Result<Entity<AcpThread>>> {
++        let session_id = acp_v1::SessionId::new("task-actions-session");
++        let action_log = cx.new(|_| ActionLog::new(project.clone()));
++        let thread = cx.new(|cx| {
++            AcpThread::new(
++                None,
++                None,
++                Some(work_dirs),
++                self.clone(),
++                project,
++                action_log,
++                session_id.clone(),
++                watch::Receiver::constant(acp_v1::PromptCapabilities::new()),
++                cx,
++            )
++        });
++        self.sessions.lock().insert(session_id, thread.downgrade());
++        Task::ready(Ok(thread))
++    }
++
++    fn authenticate(&self, _method: acp_v1::AuthMethodId, _cx: &mut App) -> Task<gpui::Result<()>> {
++        Task::ready(Ok(()))
++    }
++
++    fn prompt(
++        &self,
++        _params: acp_v1::PromptRequest,
++        _cx: &mut App,
++    ) -> Task<gpui::Result<acp_v1::PromptResponse>> {
++        Task::ready(Ok(acp_v1::PromptResponse::new(acp_v1::StopReason::EndTurn)))
++    }
++
++    fn cancel(&self, _session_id: &acp_v1::SessionId, _cx: &mut App) {}
++
++    fn stop_task(
++        self: Rc<Self>,
++        session_id: &acp_v1::SessionId,
++        task_id: &str,
++        _cx: &mut App,
++    ) -> Task<gpui::Result<()>> {
++        self.stop_calls
++            .borrow_mut()
++            .push((session_id.clone(), task_id.to_string()));
++        match self.stop_error {
++            Some(message) => Task::ready(Err(anyhow::anyhow!(
++                "_claude/tasks/stop failed for {task_id}: {message}"
++            ))),
++            None => Task::ready(Ok(())),
++        }
++    }
++
++    fn background_task(
++        self: Rc<Self>,
++        session_id: &acp_v1::SessionId,
++        tool_call_id: &str,
++        _cx: &mut App,
++    ) -> Task<gpui::Result<bool>> {
++        self.background_calls
++            .borrow_mut()
++            .push((session_id.clone(), tool_call_id.to_string()));
++        Task::ready(Ok(self.backgrounded))
++    }
++
++    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
++        self
++    }
++}
++
++#[gpui::test]
++async fn test_task_actions_thread_delegates_to_its_connection(cx: &mut TestAppContext) {
++    let connection = Rc::new(TaskActionsConnection::new());
++    let stop_calls = connection.stop_calls.clone();
++    let background_calls = connection.background_calls.clone();
++    let (thread, _events) = tasks_thread(connection, cx).await;
++    let session_id = acp_v1::SessionId::new("task-actions-session");
++
++    thread
++        .update(cx, |thread, cx| thread.stop_task("b1", cx))
++        .await
++        .expect("stop succeeds");
++    let moved = thread
++        .update(cx, |thread, cx| thread.background_task("toolu_fg", cx))
++        .await
++        .expect("background succeeds");
++
++    assert!(moved);
++    assert_eq!(*stop_calls.borrow(), vec![(session_id.clone(), "b1".to_string())]);
++    assert_eq!(*background_calls.borrow(), vec![(session_id, "toolu_fg".to_string())]);
++}
++
++#[gpui::test]
++async fn test_task_actions_thread_returns_the_agents_error_and_false(cx: &mut TestAppContext) {
++    let mut connection = TaskActionsConnection::new();
++    connection.stop_error = Some("task b1 is not running");
++    connection.backgrounded = false;
++    let (thread, _events) = tasks_thread(Rc::new(connection), cx).await;
++
++    let error = thread
++        .update(cx, |thread, cx| thread.stop_task("b1", cx))
++        .await
++        .expect_err("the agent's error reaches the caller");
++    assert!(error.to_string().contains("task b1 is not running"), "{error}");
++
++    let moved = thread
++        .update(cx, |thread, cx| thread.background_task("toolu_none", cx))
++        .await
++        .expect("an answer of false is not an error");
++    assert!(!moved);
++}
++
++#[gpui::test]
++async fn test_task_actions_unsupported_for_an_agent_without_them(cx: &mut TestAppContext) {
++    // FakeAgentConnection does not override the actions: the trait defaults answer.
++    let (thread, _events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
++
++    thread.read_with(cx, |thread, _| assert!(thread.tasks().is_empty()));
++    let stop = thread
++        .update(cx, |thread, cx| thread.stop_task("b1", cx))
++        .await
++        .expect_err("stop is unsupported");
++    let background = thread
++        .update(cx, |thread, cx| thread.background_task("toolu_fg", cx))
++        .await
++        .expect_err("background is unsupported");
++    for error in [stop, background] {
++        let text = error.to_string().to_lowercase();
++        assert!(text.contains("not supported") || text.contains("unsupported"), "{text}");
++    }
++}
+diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
+index 43754d0..ba964ee 100644
+--- a/crates/acp_thread/src/connection.rs
++++ b/crates/acp_thread/src/connection.rs
+@@ -135,6 +135,31 @@ pub trait AgentConnection {
+         Task::ready(Err(anyhow::Error::msg("Closing sessions is not supported")))
+     }
+ 
++    /// Ask the agent to stop one of the session's tasks (`AcpThread::tasks`).
++    fn stop_task(
++        self: Rc<Self>,
++        _session_id: &acp_v1::SessionId,
++        _task_id: &str,
++        _cx: &mut App,
++    ) -> Task<Result<()>> {
++        Task::ready(Err(anyhow::Error::msg(
++            "Stopping agent tasks is not supported",
++        )))
++    }
++
++    /// Ask the agent to move the foreground tool call `tool_call_id` to the background.
++    /// `Ok(false)` means the agent answered but had nothing to move.
++    fn background_task(
++        self: Rc<Self>,
++        _session_id: &acp_v1::SessionId,
++        _tool_call_id: &str,
++        _cx: &mut App,
++    ) -> Task<Result<bool>> {
++        Task::ready(Err(anyhow::Error::msg(
++            "Backgrounding agent tasks is not supported",
++        )))
++    }
++
+     /// Whether this agent supports resuming existing sessions without loading history.
+     fn supports_resume_session(&self) -> bool {
+         false
+diff --git a/crates/acp_thread/src/test_data/claude_tasks_snapshot.json b/crates/acp_thread/src/test_data/claude_tasks_snapshot.json
+new file mode 100644
+index 0000000..3b4d6ad
+--- /dev/null
++++ b/crates/acp_thread/src/test_data/claude_tasks_snapshot.json
+@@ -0,0 +1,50 @@
++{
++  "tasks": [
++    {
++      "id": "b7k2m9x1q",
++      "toolCallId": "toolu_01ShellSleep20",
++      "type": "shell",
++      "description": "Run sleep 20 in the background",
++      "background": true,
++      "depth": 0,
++      "status": "running",
++      "startedAt": 1759500000000,
++      "endedAt": null,
++      "usage": null,
++      "lastTool": null,
++      "summary": null
++    },
++    {
++      "id": "a3f8c2d4e5b6",
++      "toolCallId": "toolu_01ExploreFeed",
++      "type": "subagent",
++      "description": "Explore the task feed",
++      "background": false,
++      "depth": 1,
++      "status": "running",
++      "startedAt": 1759500001000,
++      "endedAt": null,
++      "usage": {
++        "tokens": 18234,
++        "toolUses": 7,
++        "durationMs": 42000
++      },
++      "lastTool": "Grep",
++      "summary": "Reading the SDK task message types"
++    },
++    {
++      "id": "c9d1e2f3g",
++      "toolCallId": "toolu_01RunLinter",
++      "type": "shell",
++      "description": "Run the linter",
++      "background": true,
++      "depth": 0,
++      "status": "completed",
++      "startedAt": 1759500002000,
++      "endedAt": 1759500005000,
++      "usage": null,
++      "lastTool": null,
++      "summary": "Background command \"Run the linter\" completed (exit code 0)"
++    }
++  ]
++}
+diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
+index 21c90e5..8b70d84 100644
+--- a/crates/agent_servers/src/acp.rs
++++ b/crates/agent_servers/src/acp.rs
+@@ -60,6 +60,9 @@ use crate::{CURSOR_ID, GEMINI_ID};
+ pub const GEMINI_TERMINAL_AUTH_METHOD_ID: &str = "spawn-gemini-cli";
+ const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
+ const EXIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
++const CLAUDE_TASKS_CAPABILITY: &str = "_claude/tasks";
++const CLAUDE_TASKS_STOP_METHOD: &str = "_claude/tasks/stop";
++const CLAUDE_TASKS_BACKGROUND_METHOD: &str = "_claude/tasks/background";
+ 
+ async fn exited_load_error_after_drain(
+     status: ExitStatus,
+@@ -166,6 +169,25 @@ async fn close_session_and_drain(
+     drain_foreground_queue(dispatch_tx).await
+ }
+ 
++/// Sends one of the `_claude/tasks/*` extension requests. `id` names the task or tool
++/// call the request is about, so the caller's error says which one failed.
++async fn send_task_request(
++    connection: ConnectionTo<Agent>,
++    method: &'static str,
++    params: serde_json::Value,
++    id: String,
++) -> Result<serde_json::Value> {
++    let failed = |error: agent_client_protocol::Error| {
++        anyhow!("{method} failed for {id}: {}", error.message)
++    };
++    let request = UntypedMessage::new(method, params).map_err(failed)?;
++    connection
++        .send_request(request)
++        .block_task()
++        .await
++        .map_err(failed)
++}
++
+ async fn drain_foreground_queue(dispatch_tx: &mpsc::UnboundedSender<ForegroundWork>) -> Result<()> {
+     // The SDK response can precede application of the old session's queued replay.
+     let (acknowledgment, received) = futures::channel::oneshot::channel();
+@@ -279,6 +301,9 @@ pub struct AcpConnection {
+     connection: ConnectionTo<Agent>,
+     sessions: Rc<RefCell<HashMap<acp::SessionId, AcpSession>>>,
+     pending_sessions: RefCell<HashMap<acp::SessionId, PendingAcpSession>>,
++    /// Sessions an explicit `close_session` is closing. The release path skips them,
++    /// so dropping the thread mid-close does not send a second close request.
++    closing_sessions: RefCell<HashSet<acp::SessionId>>,
+     auth_methods: Vec<acp::AuthMethod>,
+     agent_server_store: WeakEntity<AgentServerStore>,
+     agent_capabilities: acp::AgentCapabilities,
+@@ -1087,6 +1112,7 @@ impl AcpConnection {
+             agent_version,
+             sessions,
+             pending_sessions: RefCell::new(HashMap::default()),
++            closing_sessions: RefCell::new(HashSet::default()),
+             agent_capabilities: response.agent_capabilities,
+             request_elicitations,
+             defaults,
+@@ -1129,6 +1155,7 @@ impl AcpConnection {
+             connection,
+             sessions,
+             pending_sessions: RefCell::new(HashMap::default()),
++            closing_sessions: RefCell::new(HashSet::default()),
+             auth_methods: vec![],
+             agent_server_store,
+             agent_capabilities,
+@@ -1234,6 +1261,7 @@ impl AcpConnection {
+         cx: &mut App,
+     ) {
+         if self.pending_sessions.borrow().contains_key(&session_id)
++            || self.closing_sessions.borrow().contains(&session_id)
+             || !self
+                 .sessions
+                 .borrow()
+@@ -1276,6 +1304,18 @@ impl AcpConnection {
+         self.agent_capabilities.session_capabilities.close.is_some()
+     }
+ 
++    /// Keyed on the capability alone: the entry id is whatever the user named it, and
++    /// the agent's self-reported name differs between the fork and the published package.
++    fn agent_supports_tasks(&self) -> bool {
++        self.agent_capabilities
++            .meta
++            .as_ref()
++            .and_then(|meta| meta.get(CLAUDE_TASKS_CAPABILITY))
++            .and_then(|capability| capability.get("version"))
++            .and_then(serde_json::Value::as_u64)
++            .is_some_and(|version| version >= 1)
++    }
++
+     fn open_or_create_session(
+         self: Rc<Self>,
+         session_id: acp::SessionId,
+@@ -2359,6 +2399,130 @@ impl AgentConnection for AcpConnection {
+         self.connection.send_notification(params).log_err();
+     }
+ 
++    fn close_session(
++        self: Rc<Self>,
++        session_id: &acp::SessionId,
++        cx: &mut App,
++    ) -> Task<Result<()>> {
++        let Some(thread) = self
++            .sessions
++            .borrow()
++            .get(session_id)
++            .map(|session| session.thread.clone())
++        else {
++            return Task::ready(Err(anyhow!("unknown session {session_id}")));
++        };
++        if !self
++            .closing_sessions
++            .borrow_mut()
++            .insert(session_id.clone())
++        {
++            return Task::ready(Err(anyhow!("session {session_id} is already closing")));
++        }
++        let pending_load = self
++            .pending_sessions
++            .borrow()
++            .get(session_id)
++            .map(|pending| pending.task.clone());
++        let connection = self.connection.clone();
++        let dispatch_tx = self.dispatch_tx.clone();
++        let supports_close = self.agent_supports_session_close();
++        let session_id = session_id.clone();
++        let this = Rc::downgrade(&self);
++        cx.spawn(async move |cx| {
++            if let Some(pending_load) = pending_load {
++                pending_load.await.ok();
++            }
++            // A release that was already closing the session (the pending entry
++            // awaited above) finished the job; a second close would only be refused.
++            let still_open = this.upgrade().is_some_and(|this| {
++                this.sessions
++                    .borrow()
++                    .get(&session_id)
++                    .is_some_and(|session| session.thread.entity_id() == thread.entity_id())
++            });
++            let result = if still_open {
++                close_session_and_drain(
++                    &connection,
++                    session_id.clone(),
++                    supports_close,
++                    &dispatch_tx,
++                )
++                .await
++            } else {
++                Ok(())
++            };
++            // Interrupt only after the drain: a task snapshot the agent queued before
++            // closing must not re-open a task already marked interrupted.
++            thread
++                .update(cx, |thread, cx| thread.interrupt_running_tasks(cx))
++                .ok();
++            if let Some(this) = this.upgrade() {
++                this.remove_session(&session_id, thread.entity_id());
++                this.closing_sessions.borrow_mut().remove(&session_id);
++            }
++            result
++        })
++    }
++
++    fn stop_task(
++        self: Rc<Self>,
++        session_id: &acp::SessionId,
++        task_id: &str,
++        cx: &mut App,
++    ) -> Task<Result<()>> {
++        if !self.agent_supports_tasks() {
++            return Task::ready(Err(anyhow!(
++                "Stopping agent tasks is not supported: the agent does not advertise \
++                 {CLAUDE_TASKS_CAPABILITY}"
++            )));
++        }
++        let params = serde_json::json!({ "sessionId": session_id, "taskId": task_id });
++        let request = send_task_request(
++            self.connection.clone(),
++            CLAUDE_TASKS_STOP_METHOD,
++            params,
++            task_id.to_string(),
++        );
++        cx.foreground_executor()
++            .spawn(async move { request.await.map(|_| ()) })
++    }
++
++    fn background_task(
++        self: Rc<Self>,
++        session_id: &acp::SessionId,
++        tool_call_id: &str,
++        cx: &mut App,
++    ) -> Task<Result<bool>> {
++        if !self.agent_supports_tasks() {
++            return Task::ready(Err(anyhow!(
++                "Backgrounding agent tasks is not supported: the agent does not advertise \
++                 {CLAUDE_TASKS_CAPABILITY}"
++            )));
++        }
++        let params = serde_json::json!({ "sessionId": session_id, "toolCallId": tool_call_id });
++        let tool_call_id = tool_call_id.to_string();
++        let request = send_task_request(
++            self.connection.clone(),
++            CLAUDE_TASKS_BACKGROUND_METHOD,
++            params,
++            tool_call_id.clone(),
++        );
++        cx.foreground_executor().spawn(async move {
++            let response = request.await?;
++            // A missing field is a protocol mismatch, not "nothing was moved".
++            response
++                .get("backgrounded")
++                .and_then(serde_json::Value::as_bool)
++                .with_context(|| {
++                    format!(
++                        "{CLAUDE_TASKS_BACKGROUND_METHOD} for {tool_call_id}: \
++                         response has no boolean `backgrounded`: {response}"
++                    )
++                })
++        })
++    }
++
+     fn request_elicitations(&self) -> Option<Entity<ElicitationStore>> {
+         Some(self.request_elicitations.clone())
+     }
+@@ -2691,6 +2855,26 @@ pub mod test_support {
+             self.inner.cancel(session_id, cx)
+         }
+ 
++        fn stop_task(
++            self: Rc<Self>,
++            session_id: &acp::SessionId,
++            task_id: &str,
++            cx: &mut App,
++        ) -> Task<Result<()>> {
++            self.inner.clone().stop_task(session_id, task_id, cx)
++        }
++
++        fn background_task(
++            self: Rc<Self>,
++            session_id: &acp::SessionId,
++            tool_call_id: &str,
++            cx: &mut App,
++        ) -> Task<Result<bool>> {
++            self.inner
++                .clone()
++                .background_task(session_id, tool_call_id, cx)
++        }
++
+         fn request_elicitations(&self) -> Option<Entity<ElicitationStore>> {
+             self.inner.request_elicitations()
+         }
+@@ -6200,6 +6384,8 @@ exit 7
+         cx.update(|_| ());
+         cx.run_until_parked();
+     }
++
++    include!("acp_task_actions_tests.rs");
+ }
+ 
+ fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
+diff --git a/crates/agent_servers/src/acp_task_actions_tests.rs b/crates/agent_servers/src/acp_task_actions_tests.rs
+new file mode 100644
+index 0000000..261a5e4
+--- /dev/null
++++ b/crates/agent_servers/src/acp_task_actions_tests.rs
+@@ -0,0 +1,450 @@
++// Story 012 / patch 0032 — `AcpConnection::{stop_task, background_task}` against a
++// fake ACP peer (R4.5, R4.6, R4.7, R2.7) and session close interrupting tasks (R4.11).
++//
++// R4.7's gate is the `_claude/tasks` capability the agent advertises in
++// `initialize` (`agentCapabilities._meta["_claude/tasks"].version >= 1`), never the
++// entry id or the agent's self-reported name.
++//
++// Included at the end of `mod tests` in `acp.rs`:
++//
++//     include!("acp_task_actions_tests.rs");
++//
++// so it shares that module's imports and may set `AcpConnection`'s private `id` and
++// `telemetry_id` (the agent's self-reported name). Filter: `cargo test -p agent_servers
++// task_actions`.
++
++type TaskActionsReply =
++    Arc<dyn Fn(&str, &serde_json::Value) -> Result<serde_json::Value, agent_client_protocol::Error> + Send + Sync>;
++
++struct TaskActionsPeer {
++    connection: Rc<AcpConnection>,
++    project: Entity<project::Project>,
++    requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
++    _keep_agent_alive: Task<anyhow::Result<()>>,
++}
++
++/// A fake agent that answers initialize, session/new and session/close, records
++/// every other request, and answers it with `reply`. `agent_id` is the id Zed
++/// registered the agent under; `agent_name` is what the agent reports about itself;
++/// `tasks_capability` is the value it advertises under `_claude/tasks`, if any.
++async fn connect_task_actions_peer(
++    agent_id: &str,
++    agent_name: &str,
++    tasks_capability: Option<serde_json::Value>,
++    reply: TaskActionsReply,
++    cx: &mut gpui::TestAppContext,
++) -> TaskActionsPeer {
++    cx.update(|cx| {
++        let store = settings::SettingsStore::test(cx);
++        cx.set_global(store);
++    });
++
++    let fs = fs::FakeFs::new(cx.executor());
++    fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
++    let project = project::Project::test(fs, [std::path::Path::new("/a")], cx).await;
++
++    let requests: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
++    let (client_transport, agent_transport) = agent_client_protocol::Channel::duplex();
++    let sessions: Rc<RefCell<HashMap<acp::SessionId, AcpSession>>> =
++        Rc::new(RefCell::new(HashMap::default()));
++    let client_session_list: Rc<RefCell<Option<Rc<AcpSessionList>>>> =
++        Rc::new(RefCell::new(None));
++
++    let mut capabilities = acp::AgentCapabilities::default().session_capabilities(
++        acp::SessionCapabilities::default().close(acp::SessionCloseCapabilities::new()),
++    );
++    if let Some(value) = tasks_capability {
++        let mut meta = serde_json::Map::new();
++        meta.insert("_claude/tasks".to_string(), value);
++        capabilities = capabilities.meta(meta);
++    }
++    let agent_info = acp::Implementation::new(agent_name.to_string(), "1.0.0".to_string());
++    let agent_future = Agent
++        .builder()
++        .name("task-actions-agent")
++        .on_receive_request(
++            async move |req: acp::InitializeRequest, responder, _cx| {
++                responder.respond(
++                    acp::InitializeResponse::new(req.protocol_version)
++                        .agent_capabilities(capabilities.clone())
++                        .agent_info(agent_info.clone()),
++                )
++            },
++            agent_client_protocol::on_receive_request!(),
++        )
++        .on_receive_request(
++            async move |_req: acp::CloseSessionRequest, responder, _cx| {
++                responder.respond(acp::CloseSessionResponse::new())
++            },
++            agent_client_protocol::on_receive_request!(),
++        )
++        .on_receive_request(
++            async move |_req: acp::NewSessionRequest, responder, _cx| {
++                responder.respond(acp::NewSessionResponse::new(acp::SessionId::new(
++                    "task-session",
++                )))
++            },
++            agent_client_protocol::on_receive_request!(),
++        )
++        .on_receive_request(
++            {
++                let requests = requests.clone();
++                async move |req: agent_client_protocol::UntypedMessage, responder, _cx| {
++                    requests
++                        .lock()
++                        .expect("requests mutex")
++                        .push((req.method().to_string(), req.params().clone()));
++                    match reply(req.method(), req.params()) {
++                        Ok(value) => responder.respond(value),
++                        Err(error) => responder.respond_with_error(error),
++                    }
++                }
++            },
++            agent_client_protocol::on_receive_request!(),
++        )
++        .connect_with(agent_transport, async move |_agent| {
++            futures::future::pending::<Result<(), agent_client_protocol::Error>>().await
++        });
++    let agent_io_task = cx.background_spawn(agent_future);
++
++    let (dispatch_tx, dispatch_rx) = mpsc::unbounded::<ForegroundWork>();
++    let (connection_tx, connection_rx) = futures::channel::oneshot::channel();
++    let client_future = connect_client_future(
++        "zed-test",
++        client_transport,
++        dispatch_tx.clone(),
++        connection_tx,
++    );
++    let client_io_task = cx.background_spawn(async move {
++        client_future.await.ok();
++    });
++    let client_conn: ConnectionTo<Agent> = connection_rx
++        .await
++        .expect("failed to receive ACP connection handle");
++    let response = client_conn
++        .send_request(acp::InitializeRequest::new(ProtocolVersion::V1))
++        .block_task()
++        .await
++        .expect("failed to initialize ACP connection");
++
++    let request_elicitations = cx.new(|_| ElicitationStore::default());
++    let dispatch_context = ClientContext {
++        sessions: sessions.clone(),
++        session_list: client_session_list.clone(),
++        request_elicitations: request_elicitations.clone(),
++    };
++    let dispatch_task = cx.spawn({
++        let mut dispatch_rx = dispatch_rx;
++        move |cx| async move {
++            let mut cx = cx;
++            while let Some(work) = dispatch_rx.next().await {
++                work.run(&mut cx, &dispatch_context);
++            }
++        }
++    });
++    let agent_server_store =
++        project.read_with(cx, |project, _| project.agent_server_store().downgrade());
++
++    let mut connection = cx.update(|cx| {
++        AcpConnection::new_for_test(
++            client_conn,
++            sessions,
++            response.agent_capabilities,
++            request_elicitations,
++            agent_server_store,
++            client_io_task,
++            dispatch_tx,
++            dispatch_task,
++            cx,
++        )
++    });
++    connection.id = AgentId::new(agent_id.to_string());
++    connection.telemetry_id = SharedString::from(agent_name.to_string());
++
++    let keep_agent_alive = cx.background_spawn(async move {
++        agent_io_task.await.ok();
++        anyhow::Ok(())
++    });
++
++    TaskActionsPeer {
++        connection: Rc::new(connection),
++        project,
++        requests,
++        _keep_agent_alive: keep_agent_alive,
++    }
++}
++
++fn tasks_capability_v(version: u64) -> Option<serde_json::Value> {
++    Some(serde_json::json!({ "version": version }))
++}
++
++/// Zeo's working entry: a custom id, and the published package's own name.
++const PLUS_ENTRY: &str = "Claude Agent (Plus)";
++const PLUS_NAME: &str = "@lucascouts/claude-agent-acp-plus";
++
++async fn task_actions_session(
++    peer: &TaskActionsPeer,
++    cx: &mut gpui::TestAppContext,
++) -> (Entity<AcpThread>, acp::SessionId) {
++    let thread = cx
++        .update(|cx| {
++            peer.connection.clone().new_session(
++                peer.project.clone(),
++                PathList::new(&[std::path::Path::new("/a")]),
++                cx,
++            )
++        })
++        .await
++        .expect("new session");
++    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
++    (thread, session_id)
++}
++
++fn task_actions_requests(peer: &TaskActionsPeer) -> Vec<(String, serde_json::Value)> {
++    peer.requests.lock().expect("requests mutex").clone()
++}
++
++fn task_actions_ok() -> TaskActionsReply {
++    Arc::new(|_method, _params| Ok(serde_json::json!({})))
++}
++
++#[gpui::test]
++async fn test_task_actions_stop_sends_the_request_and_succeeds(cx: &mut gpui::TestAppContext) {
++    let peer =
++        connect_task_actions_peer(PLUS_ENTRY, PLUS_NAME, tasks_capability_v(1), task_actions_ok(), cx)
++            .await;
++    let (_thread, session_id) = task_actions_session(&peer, cx).await;
++
++    cx.update(|cx| peer.connection.clone().stop_task(&session_id, "b1", cx))
++        .await
++        .expect("stop succeeds");
++
++    assert_eq!(
++        task_actions_requests(&peer),
++        vec![(
++            "_claude/tasks/stop".to_string(),
++            serde_json::json!({ "sessionId": session_id.to_string(), "taskId": "b1" }),
++        )]
++    );
++}
++
++#[gpui::test]
++async fn test_task_actions_stop_returns_the_agents_error(cx: &mut gpui::TestAppContext) {
++    let peer = connect_task_actions_peer(
++        PLUS_ENTRY,
++        PLUS_NAME,
++        tasks_capability_v(1),
++        Arc::new(|_method, _params| {
++            Err(agent_client_protocol::Error::new(-32602, "task b1 is not running"))
++        }),
++        cx,
++    )
++    .await;
++    let (_thread, session_id) = task_actions_session(&peer, cx).await;
++
++    let error = cx
++        .update(|cx| peer.connection.clone().stop_task(&session_id, "b1", cx))
++        .await
++        .expect_err("the agent's JSON-RPC error reaches the caller");
++    let text = format!("{error:#}");
++    assert!(text.contains("_claude/tasks/stop failed for b1"), "{text}");
++    assert!(text.contains("task b1 is not running"), "{text}");
++}
++
++#[gpui::test]
++async fn test_task_actions_background_reads_backgrounded(cx: &mut gpui::TestAppContext) {
++    let peer = connect_task_actions_peer(
++        PLUS_ENTRY,
++        PLUS_NAME,
++        tasks_capability_v(1),
++        Arc::new(|_method, params| {
++            let moved = params.get("toolCallId").and_then(|v| v.as_str()) == Some("toolu_fg");
++            Ok(serde_json::json!({ "backgrounded": moved }))
++        }),
++        cx,
++    )
++    .await;
++    let (_thread, session_id) = task_actions_session(&peer, cx).await;
++
++    let moved = cx
++        .update(|cx| peer.connection.clone().background_task(&session_id, "toolu_fg", cx))
++        .await
++        .expect("background succeeds");
++    let not_moved = cx
++        .update(|cx| peer.connection.clone().background_task(&session_id, "toolu_other", cx))
++        .await
++        .expect("false is an answer, not an error");
++
++    assert!(moved);
++    assert!(!not_moved);
++    assert_eq!(
++        task_actions_requests(&peer)[0],
++        (
++            "_claude/tasks/background".to_string(),
++            serde_json::json!({ "sessionId": session_id.to_string(), "toolCallId": "toolu_fg" }),
++        )
++    );
++}
++
++#[gpui::test]
++async fn test_task_actions_background_missing_field_is_an_error_not_false(
++    cx: &mut gpui::TestAppContext,
++) {
++    let peer =
++        connect_task_actions_peer(PLUS_ENTRY, PLUS_NAME, tasks_capability_v(1), task_actions_ok(), cx)
++            .await;
++    let (_thread, session_id) = task_actions_session(&peer, cx).await;
++
++    let result = cx
++        .update(|cx| peer.connection.clone().background_task(&session_id, "toolu_fg", cx))
++        .await;
++    assert!(result.is_err(), "a response without `backgrounded` must not read as false");
++}
++
++/// Both actions answer "unsupported" and nothing reaches the agent.
++async fn assert_task_actions_unsupported(peer: &TaskActionsPeer, cx: &mut gpui::TestAppContext) {
++    let (_thread, session_id) = task_actions_session(peer, cx).await;
++    let stop = cx
++        .update(|cx| peer.connection.clone().stop_task(&session_id, "b1", cx))
++        .await;
++    let background = cx
++        .update(|cx| peer.connection.clone().background_task(&session_id, "toolu_fg", cx))
++        .await;
++    assert!(stop.is_err());
++    assert!(background.is_err());
++    for error in [stop.unwrap_err(), background.unwrap_err()] {
++        let text = error.to_string().to_lowercase();
++        assert!(text.contains("not supported") || text.contains("unsupported"), "{text}");
++    }
++    assert!(task_actions_requests(peer).is_empty(), "nothing reached the agent");
++}
++
++// R4.7, hostile half first: an agent that LOOKS like the Claude adapter — the
++// registry's Claude entry id, the published package's own name — but does not
++// advertise the capability is not sent a `_claude/*` request.
++#[gpui::test]
++async fn test_task_actions_unsupported_without_the_capability_even_for_claude_names(
++    cx: &mut gpui::TestAppContext,
++) {
++    let peer = connect_task_actions_peer(
++        crate::CLAUDE_AGENT_ID,
++        PLUS_NAME,
++        None,
++        Arc::new(|_method, _params| Ok(serde_json::json!({ "backgrounded": true }))),
++        cx,
++    )
++    .await;
++    assert_task_actions_unsupported(&peer, cx).await;
++}
++
++#[gpui::test]
++async fn test_task_actions_unsupported_for_capability_version_zero(cx: &mut gpui::TestAppContext) {
++    let peer =
++        connect_task_actions_peer(PLUS_ENTRY, PLUS_NAME, tasks_capability_v(0), task_actions_ok(), cx)
++            .await;
++    assert_task_actions_unsupported(&peer, cx).await;
++}
++
++// R4.7, the converse: any entry id and any name, with the capability, is supported —
++// the fork and the published package report different names.
++#[gpui::test]
++async fn test_task_actions_supported_for_any_name_advertising_the_capability(
++    cx: &mut gpui::TestAppContext,
++) {
++    for (entry, name, version) in [
++        ("some-entry", "@lucascouts/claude-agent-acp-fork", 1),
++        ("another-entry", "an-unrelated-name", 2),
++    ] {
++        let peer = connect_task_actions_peer(
++            entry,
++            name,
++            tasks_capability_v(version),
++            task_actions_ok(),
++            cx,
++        )
++        .await;
++        let (_thread, session_id) = task_actions_session(&peer, cx).await;
++        cx.update(|cx| peer.connection.clone().stop_task(&session_id, "b1", cx))
++            .await
++            .unwrap_or_else(|error| panic!("{entry}/{name} v{version}: {error:#}"));
++        assert_eq!(task_actions_requests(&peer).len(), 1);
++    }
++}
++
++// R4.11, session close: running tasks become Interrupted and are announced once;
++// ended tasks are left alone.
++#[gpui::test]
++async fn test_task_actions_close_session_interrupts_running_tasks_once(
++    cx: &mut gpui::TestAppContext,
++) {
++    let peer =
++        connect_task_actions_peer(PLUS_ENTRY, PLUS_NAME, tasks_capability_v(1), task_actions_ok(), cx)
++            .await;
++    let (thread, session_id) = task_actions_session(&peer, cx).await;
++
++    let ended: Rc<RefCell<Vec<(String, bool)>>> = Rc::default();
++    let sink = ended.clone();
++    thread.update(cx, |_thread, cx| {
++        cx.subscribe(
++            &thread,
++            move |_thread, _event_thread, event: &acp_thread::AcpThreadEvent, _cx| {
++                if let acp_thread::AcpThreadEvent::TaskEnded { task_id, status } = event {
++                    sink.borrow_mut().push((
++                        task_id.to_string(),
++                        matches!(status, acp_thread::AgentTaskStatus::Interrupted),
++                    ));
++                }
++            },
++        )
++        .detach();
++    });
++
++    let task = |id: &str, status: &str| {
++        serde_json::json!({
++            "id": id, "toolCallId": null, "type": "shell", "description": id,
++            "background": true, "depth": 0, "status": status, "startedAt": 1_000,
++            "endedAt": if status == "running" { None } else { Some(2_000) },
++            "usage": null, "lastTool": null, "summary": null,
++        })
++    };
++    let mut meta = serde_json::Map::new();
++    meta.insert(
++        "_claude/tasks".to_string(),
++        serde_json::json!({ "tasks": [task("r1", "running"), task("d1", "completed")] }),
++    );
++    thread
++        .update(cx, |thread, cx| {
++            thread.handle_session_update(
++                acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new().meta(meta)),
++                cx,
++            )
++        })
++        .expect("snapshot applies");
++    assert_eq!(*ended.borrow(), vec![("d1".to_string(), false)]);
++
++    cx.update(|cx| peer.connection.clone().close_session(&session_id, cx))
++        .await
++        .expect("close succeeds");
++    cx.run_until_parked();
++
++    thread.read_with(cx, |thread, _| {
++        let statuses: Vec<(String, bool)> = thread
++            .tasks()
++            .iter()
++            .map(|t| {
++                (
++                    t.id.to_string(),
++                    matches!(t.status, acp_thread::AgentTaskStatus::Interrupted),
++                )
++            })
++            .collect();
++        assert_eq!(
++            statuses,
++            vec![("r1".to_string(), true), ("d1".to_string(), false)]
++        );
++    });
++    assert_eq!(
++        *ended.borrow(),
++        vec![("d1".to_string(), false), ("r1".to_string(), true)]
++    );
++}
+diff --git a/crates/agent_ui/src/agent_diff.rs b/crates/agent_ui/src/agent_diff.rs
+index 9727fae..03e22b1 100644
+--- a/crates/agent_ui/src/agent_diff.rs
++++ b/crates/agent_ui/src/agent_diff.rs
+@@ -1473,6 +1473,8 @@ impl AgentDiff {
+             | AcpThreadEvent::TokenUsageUpdated
+             | AcpThreadEvent::AccountUsageUpdated
+             | AcpThreadEvent::BackgroundTasksUpdated
++            | AcpThreadEvent::TasksUpdated
++            | AcpThreadEvent::TaskEnded { .. }
+             | AcpThreadEvent::NoticesUpdated
+             | AcpThreadEvent::SubagentSpawned(_)
+             | AcpThreadEvent::EntriesRemoved(_)
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index fe1f17c..3e32c75 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -4293,6 +4293,9 @@ impl AgentPanel {
+                         | AcpThreadEvent::SubmissionUpdated(_)
+                         | AcpThreadEvent::ToolAuthorizationReceived(_)
+                         | AcpThreadEvent::ElicitationResponded(_)
++                        // A thread kept loaded for its running tasks becomes
++                        // releasable when the last one ends (story 012, R4.9).
++                        | AcpThreadEvent::TasksUpdated
+                 ) && acp_thread.read(cx).is_idle_for_retention()
+                 {
+                     this.cleanup_retained_threads(cx);
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index 94a90f6..36d1dda 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -356,6 +356,8 @@ impl Conversation {
+                     | AcpThreadEvent::TokenUsageUpdated
+                     | AcpThreadEvent::AccountUsageUpdated
+                     | AcpThreadEvent::BackgroundTasksUpdated
++                    | AcpThreadEvent::TasksUpdated
++                    | AcpThreadEvent::TaskEnded { .. }
+                     | AcpThreadEvent::EntryUpdated(_)
+                     | AcpThreadEvent::EntriesRemoved(_)
+                     | AcpThreadEvent::Retry(_)
+@@ -783,6 +785,8 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
+         | AcpThreadEvent::TokenUsageUpdated
+         | AcpThreadEvent::AccountUsageUpdated
+         | AcpThreadEvent::BackgroundTasksUpdated
++        | AcpThreadEvent::TasksUpdated
++        | AcpThreadEvent::TaskEnded { .. }
+         | AcpThreadEvent::PromptCapabilitiesUpdated
+         | AcpThreadEvent::AvailableCommandsUpdated(_)
+         | AcpThreadEvent::ModeUpdated(_)
+@@ -2129,6 +2133,8 @@ impl ConversationView {
+             // sidebar: the agent panel observes every conversation view, active or not,
+             // and asks the sidebar to rebuild, which re-reads the thread's status.
+             AcpThreadEvent::BackgroundTasksUpdated => {}
++            // The task card (story 013) reads `tasks()`; the notify below redraws it.
++            AcpThreadEvent::TasksUpdated | AcpThreadEvent::TaskEnded { .. } => {}
+             AcpThreadEvent::AccountUsageUpdated => {
+                 // A redraw is all this needs: the account section is built from the thread
+                 // when the tooltip opens, so there is no per-turn state to recompute.
