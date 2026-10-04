@@ -7,6 +7,7 @@
 //     acp-probe.mjs fallback <adapter> [--notices] [args...]
 //     acp-probe.mjs load <adapter> --session ID --cwd DIR [args...]
 //     acp-probe.mjs ask <adapter> [--cwd DIR] [args...]
+//     acp-probe.mjs tasks <adapter> [--cwd DIR] [args...]
 //
 // <adapter> is an executable (/usr/bin/claude-agent-acp-plus) or a .js entry
 // point (dist/index.js), which is run with this node.
@@ -30,6 +31,15 @@
 //   ask   advertise form elicitation, have the model ask a multi-select
 //         AskUserQuestion, answer it by ticking two options AND typing a note,
 //         and print what the model says it received. ONE REAL MODEL TURN.
+//   tasks have the model start two background shells (`sleep 20`, `sleep 60`),
+//         print every `_claude/tasks` snapshot with a timestamp, and send
+//         `_claude/tasks/stop` for the second once it runs. Exits 0 only after
+//         seeing running -> completed for the first and stopped for the second
+//         within 120 s of the prompt; past that it prints what it saw and exits
+//         1. A task is told apart by the command of the tool call that started
+//         it (`toolCallId`), never by its model-written description. SPENDS
+//         MODEL TURNS: the prompt, plus the followup the CLI wakes the model
+//         for when a background task ends.
 //
 // Why it is versioned: every parity round from the 2026-09-11 one on wrote this
 // probe fresh into /tmp (acp-probe2..6, acp-probe-plan) and lost it with the
@@ -41,9 +51,9 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 
 const [mode, adapter, ...rest] = process.argv.slice(2);
-if (!["init", "plan", "fallback", "load", "ask"].includes(mode) || !adapter) {
+if (!["init", "plan", "fallback", "load", "ask", "tasks"].includes(mode) || !adapter) {
   console.error(
-    "usage: acp-probe.mjs init|plan|fallback|load|ask <adapter> [--cwd DIR] [--from MODE] [--notices] [--session ID] [args...]",
+    "usage: acp-probe.mjs init|plan|fallback|load|ask|tasks <adapter> [--cwd DIR] [--from MODE] [--notices] [--session ID] [args...]",
   );
   process.exit(2);
 }
@@ -89,6 +99,10 @@ const finish = (code) => {
 };
 
 const replay = { user: 0, agent: 0, firstUser: undefined };
+// tasks mode: tool call id -> the shell command it ran, and what each task did.
+const commands = new Map();
+const seen = new Map(); // task id -> Set of statuses observed
+let onSnapshot = () => {};
 let answerText = "";
 let buffer = "";
 child.stdout.on("data", (chunk) => {
@@ -118,7 +132,27 @@ child.stdout.on("data", (chunk) => {
         log("CONFIG", {
           mode: u.configOptions.find((o) => o.id === "mode")?.currentValue,
         });
-      else if (u.sessionUpdate === "tool_call") log("TOOL", { title: u.title });
+      else if (u.sessionUpdate === "tool_call") {
+        log("TOOL", { title: u.title });
+        if (typeof u.rawInput?.command === "string")
+          commands.set(u.toolCallId, u.rawInput.command);
+      } else if (
+        u.sessionUpdate === "tool_call_update" &&
+        typeof u.rawInput?.command === "string"
+      )
+        commands.set(u.toolCallId, u.rawInput.command);
+      else if (
+        u.sessionUpdate === "session_info_update" &&
+        u._meta?.["_claude/tasks"]
+      ) {
+        const snapshot = u._meta["_claude/tasks"];
+        log("TASKS", { at: new Date().toISOString(), snapshot });
+        for (const t of snapshot.tasks) {
+          if (!seen.has(t.id)) seen.set(t.id, new Set());
+          seen.get(t.id).add(t.status);
+        }
+        onSnapshot(snapshot);
+      }
       else if (u.sessionUpdate === "notice")
         log("NOTICE", {
           severity: u.severity,
@@ -176,7 +210,9 @@ try {
     protocolVersion: 1,
     clientCapabilities: {
       fs: { readTextFile: true, writeTextFile: true },
-      terminal: true,
+      // tasks: the CLI must run the shells itself, in the background; this
+      // probe answers no terminal request.
+      terminal: mode !== "tasks",
       _meta: { terminal_output: true, "terminal-auth": true },
       ...(opts.notices ? { session: { notices: {} } } : {}),
       ...(mode === "ask" ? { elicitation: { form: {} } } : {}),
@@ -245,6 +281,62 @@ try {
       text: answerText.trim().slice(0, 300),
     });
     finish(0);
+  }
+  if (mode === "tasks") {
+    const sessionId = session.sessionId;
+    const taskOf = (snapshot, pattern) =>
+      snapshot.tasks.find((t) => pattern.test(commands.get(t.toolCallId) ?? ""));
+    let first; // sleep 20: must run, then complete
+    let second; // sleep 60: must run, then be stopped by us
+    let stopSent = false;
+    const done = () =>
+      first &&
+      second &&
+      seen.get(first)?.has("running") &&
+      seen.get(first)?.has("completed") &&
+      seen.get(second)?.has("stopped");
+    const verdict = new Promise((resolve) => {
+      onSnapshot = (snapshot) => {
+        first ??= taskOf(snapshot, /\bsleep\s+20\b/)?.id;
+        const b = taskOf(snapshot, /\bsleep\s+60\b/);
+        second ??= b?.id;
+        if (b?.status === "running" && !stopSent) {
+          stopSent = true;
+          request("_claude/tasks/stop", { sessionId, taskId: b.id }).then(
+            (result) => log("STOP", { taskId: b.id, result }),
+            (error) => {
+              log("STOP_ERROR", { taskId: b.id, error });
+              finish(1);
+            },
+          );
+        }
+        if (done()) resolve(true);
+      };
+      setTimeout(() => resolve(false), 120_000).unref();
+    });
+    const turn = request("session/prompt", {
+      sessionId,
+      prompt: [
+        {
+          type: "text",
+          text:
+            "Use the Bash tool twice, both times with run_in_background set to true: first run " +
+            "exactly `sleep 20`, then run exactly `sleep 60`. Do not wait for either, do not check " +
+            "on them, and do not run anything else. Then reply with the single word: started.",
+        },
+      ],
+    });
+    turn.then(
+      (result) => log("TURN", { stopReason: result.stopReason }),
+      (error) => log("TURN_ERROR", { error }),
+    );
+    const ok = await verdict;
+    log(ok ? "DONE" : "INCOMPLETE", {
+      first: first ?? null,
+      second: second ?? null,
+      seen: Object.fromEntries([...seen].map(([id, s]) => [id, [...s]])),
+    });
+    finish(ok ? 0 : 1);
   }
   for (const modeId of [opts.from, "plan"].filter(Boolean)) {
     await request("session/set_mode", { sessionId: session.sessionId, modeId });
