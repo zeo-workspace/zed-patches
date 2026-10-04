@@ -8,7 +8,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 ---
 
 diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
-index abf2168..ab8bda0 100644
+index abf2168..1560756 100644
 --- a/crates/agent_ui/src/message_editor.rs
 +++ b/crates/agent_ui/src/message_editor.rs
 @@ -1802,7 +1802,25 @@ impl MessageEditor {
@@ -55,9 +55,9 @@ index abf2168..ab8bda0 100644
 +        let link = mention_uri.as_link().to_string();
 +        message_editor.update_in(cx, |editor, window, cx| {
 +            editor.set_message(
-+                vec![acp_v1::ContentBlock::Text(acp_v1::TextContent::new(format!(
-+                    "Look at {link} please"
-+                )))],
++                vec![acp_v1::ContentBlock::Text(acp_v1::TextContent::new(
++                    format!("Look at {link} please"),
++                ))],
 +                window,
 +                cx,
 +            );

@@ -60,7 +60,7 @@ is checked in a running Zed, not here.
 ---
 
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 164f536..bb2aba2 100644
+index 164f536..0c2e721 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -5205,7 +5205,7 @@ impl ThreadView {
@@ -126,7 +126,7 @@ index 164f536..bb2aba2 100644
          }
  
          let start_index = (0..entry_index)
-@@ -13591,6 +13625,148 @@ mod tests {
+@@ -13591,6 +13625,146 @@ mod tests {
              acp_thread::CommandCategory::Mcp,
          ))
      }
@@ -168,9 +168,7 @@ index 164f536..bb2aba2 100644
 +    /// The string the edit path serialises for the user message at `index`.
 +    fn edited_text(entries: &[acp_thread::AgentThreadEntry], index: usize, cx: &App) -> String {
 +        match &entries[index] {
-+            acp_thread::AgentThreadEntry::UserMessage(message) => {
-+                message.content.to_markdown(cx)
-+            }
++            acp_thread::AgentThreadEntry::UserMessage(message) => message.content.to_markdown(cx),
 +            other => panic!("entry {index} is not a user message: {other:?}"),
 +        }
 +    }

@@ -104,7 +104,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ---
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 5fc420f..f0fd52f 100644
+index f3f88d9..5843217 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
 @@ -1414,6 +1414,14 @@
@@ -193,7 +193,7 @@ index 331480c..ab76f65 100644
              tool_permissions: compile_tool_permissions(agent.tool_permissions),
              sandbox_permissions: compile_sandbox_permissions(agent.sandbox_permissions),
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 05b7718..fe1f17c 100644
+index 05b7718..4e2db35 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -83,7 +83,9 @@ use language::LanguageRegistry;
@@ -215,7 +215,7 @@ index 05b7718..fe1f17c 100644
  
          PopoverMenu::new("agent-options-menu")
              .trigger_with_tooltip(
-@@ -5855,6 +5858,32 @@ impl AgentPanel {
+@@ -5855,6 +5858,34 @@ impl AgentPanel {
                              .action("Worktrees", Box::new(zed_actions::git::Worktree))
                              .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
  
@@ -238,7 +238,9 @@ index 05b7718..fe1f17c 100644
 +                                None,
 +                                move |_window, cx| {
 +                                    update_settings_file(fs.clone(), cx, move |settings, _| {
-+                                        settings.agent.get_or_insert_default()
++                                        settings
++                                            .agent
++                                            .get_or_insert_default()
 +                                            .elicitation_placement = Some(value);
 +                                    });
 +                                },
@@ -319,7 +321,7 @@ index 05fb4b0..ea61856 100644
          )
      }
 diff --git a/crates/agent_ui/src/conversation_view/elicitation.rs b/crates/agent_ui/src/conversation_view/elicitation.rs
-index 837314d..aa1b217 100644
+index 837314d..06d9226 100644
 --- a/crates/agent_ui/src/conversation_view/elicitation.rs
 +++ b/crates/agent_ui/src/conversation_view/elicitation.rs
 @@ -52,6 +52,13 @@ pub(crate) struct ElicitationFormState {
@@ -428,7 +430,7 @@ index 837314d..aa1b217 100644
                      .render(cx),
                  )
          }
-@@ -1165,6 +1214,203 @@ mod tests {
+@@ -1165,6 +1214,212 @@ mod tests {
          });
      }
  
@@ -455,14 +457,22 @@ index 837314d..aa1b217 100644
 +                    .enum_values(vec!["first".to_string(), "second".to_string()]),
 +                false,
 +            )
-+            .property("question_0_custom", custom_answer_field("question_0"), false)
++            .property(
++                "question_0_custom",
++                custom_answer_field("question_0"),
++                false,
++            )
 +            .property(
 +                "question_1",
 +                acp::StringPropertySchema::new()
 +                    .enum_values(vec!["third".to_string(), "fourth".to_string()]),
 +                false,
 +            )
-+            .property("question_1_custom", custom_answer_field("question_1"), false)
++            .property(
++                "question_1_custom",
++                custom_answer_field("question_1"),
++                false,
++            )
 +    }
 +
 +    fn entry_ids<const N: usize>(ids: [&str; N]) -> [ElicitationEntryId; N] {
@@ -618,8 +628,9 @@ index 837314d..aa1b217 100644
 +    #[gpui::test]
 +    fn an_unpaginated_card_submits_from_the_first_question(cx: &mut TestAppContext) {
 +        init_keyboard_test(cx);
-+        let (view, cx) = cx
-+            .add_window_view(|window, cx| TestElicitationView::new(two_question_schema(), window, cx));
++        let (view, cx) = cx.add_window_view(|window, cx| {
++            TestElicitationView::new(two_question_schema(), window, cx)
++        });
 +        let (editor, events) = view.read_with(cx, |view, _| {
 +            (view.editor("question_1_custom"), view.events.clone())
 +        });
@@ -632,7 +643,7 @@ index 837314d..aa1b217 100644
      #[gpui::test]
      fn form_state_reports_all_validation_errors(cx: &mut TestAppContext) {
          crate::conversation_view::tests::init_test(cx);
-@@ -1698,6 +1944,100 @@ fn ask_user_question_option_preview(meta: Option<&acp::Meta>) -> Option<String>
+@@ -1698,6 +1953,100 @@ fn ask_user_question_option_preview(meta: Option<&acp::Meta>) -> Option<String>
          .map(|preview| preview.to_string())
  }
  
@@ -733,7 +744,7 @@ index 837314d..aa1b217 100644
  /// Wrap an HTML-looking preview in a fenced code block so Markdown renders it as
  /// escaped plain text — the card never renders raw HTML.
  fn preview_markdown_source(preview: &str) -> String {
-@@ -2010,6 +2350,7 @@ type RespondHandler = Rc<dyn Fn(ElicitationEntryId, &mut Window, &mut App)>;
+@@ -2010,6 +2359,7 @@ type RespondHandler = Rc<dyn Fn(ElicitationEntryId, &mut Window, &mut App)>;
  type OpenUrlHandler = Rc<dyn Fn(ElicitationEntryId, String, &mut Window, &mut App)>;
  type BooleanHandler = Rc<dyn Fn(ElicitationEntryId, String, bool, &mut App)>;
  type SelectHandler = Rc<dyn Fn(ElicitationEntryId, String, String, &mut App)>;
@@ -741,7 +752,7 @@ index 837314d..aa1b217 100644
  type MultiSelectHandler = Rc<dyn Fn(ElicitationEntryId, String, String, bool, &mut App)>;
  type TogglePreviewHandler = Rc<dyn Fn(ElicitationEntryId, String, String, String, &mut App)>;
  
-@@ -2024,6 +2365,7 @@ pub(crate) struct ElicitationCardHandlers {
+@@ -2024,6 +2374,7 @@ pub(crate) struct ElicitationCardHandlers {
      on_single_select_change: SelectHandler,
      on_multi_select_change: MultiSelectHandler,
      on_toggle_preview: TogglePreviewHandler,
@@ -749,7 +760,7 @@ index 837314d..aa1b217 100644
  }
  
  impl ElicitationCardHandlers {
-@@ -2037,6 +2379,7 @@ impl ElicitationCardHandlers {
+@@ -2037,6 +2388,7 @@ impl ElicitationCardHandlers {
          on_single_select_change: impl Fn(ElicitationEntryId, String, String, &mut App) + 'static,
          on_multi_select_change: impl Fn(ElicitationEntryId, String, String, bool, &mut App) + 'static,
          on_toggle_preview: impl Fn(ElicitationEntryId, String, String, String, &mut App) + 'static,
@@ -757,7 +768,7 @@ index 837314d..aa1b217 100644
      ) -> Self {
          Self {
              on_submit: Rc::new(on_submit),
-@@ -2048,6 +2391,7 @@ impl ElicitationCardHandlers {
+@@ -2048,6 +2400,7 @@ impl ElicitationCardHandlers {
              on_single_select_change: Rc::new(on_single_select_change),
              on_multi_select_change: Rc::new(on_multi_select_change),
              on_toggle_preview: Rc::new(on_toggle_preview),
@@ -765,7 +776,7 @@ index 837314d..aa1b217 100644
          }
      }
  
-@@ -2062,6 +2406,7 @@ impl ElicitationCardHandlers {
+@@ -2062,6 +2415,7 @@ impl ElicitationCardHandlers {
              |_, _, _, _| {},
              |_, _, _, _, _| {},
              |_, _, _, _, _| {},
@@ -773,7 +784,7 @@ index 837314d..aa1b217 100644
          )
      }
  }
-@@ -2127,12 +2472,42 @@ fn is_url_display_segment_boundary(character: char) -> bool {
+@@ -2127,12 +2481,42 @@ fn is_url_display_segment_boundary(character: char) -> bool {
      matches!(character, '/' | '?' | '&' | '#')
  }
  
@@ -816,15 +827,15 @@ index 837314d..aa1b217 100644
  }
  
  impl<'a> ElicitationCard<'a> {
-@@ -2149,9 +2524,48 @@ impl<'a> ElicitationCard<'a> {
+@@ -2149,7 +2533,46 @@ impl<'a> ElicitationCard<'a> {
              requester_name,
              form_state,
              handlers,
 +            paginated: false,
 +            queue_position: None,
-         }
-     }
- 
++        }
++    }
++
 +    /// `(position, total)` of this card among the questions queued behind one
 +    /// another. Shown only when there is more than one: a lone question has
 +    /// nothing to count.
@@ -855,17 +866,15 @@ index 837314d..aa1b217 100644
 +            || !matches!(self.elicitation.status, ElicitationStatus::Pending { .. })
 +        {
 +            return None;
-+        }
+         }
 +
 +        let state = self.form_state?;
 +        let pages = state.pages();
 +        (pages.len() > 1).then(|| (state.page(), pages))
-+    }
-+
+     }
+ 
      pub(crate) fn render(self, cx: &App) -> Div {
-         let border_color = cx.theme().colors().border.opacity(0.8);
-         let header_background = cx
-@@ -2225,9 +2639,20 @@ impl<'a> ElicitationCard<'a> {
+@@ -2225,9 +2648,20 @@ impl<'a> ElicitationCard<'a> {
                              ),
                      )
                      .child(
@@ -889,7 +898,7 @@ index 837314d..aa1b217 100644
                      ),
              )
              .child(body)
-@@ -2240,6 +2665,10 @@ impl<'a> ElicitationCard<'a> {
+@@ -2240,6 +2674,10 @@ impl<'a> ElicitationCard<'a> {
          let Some(state) = self.form_state else {
              return Empty.into_any_element();
          };
@@ -900,7 +909,7 @@ index 837314d..aa1b217 100644
  
          v_flex()
              .gap_2()
-@@ -2256,8 +2685,24 @@ impl<'a> ElicitationCard<'a> {
+@@ -2256,8 +2694,24 @@ impl<'a> ElicitationCard<'a> {
                      )
                  },
              )
@@ -925,7 +934,7 @@ index 837314d..aa1b217 100644
                      let field = state.fields.get(field_name)?;
                      Some(self.render_field(
                          field_name,
-@@ -2653,10 +3098,22 @@ impl<'a> ElicitationCard<'a> {
+@@ -2653,10 +3107,22 @@ impl<'a> ElicitationCard<'a> {
          let is_accepted_url =
              open_url.is_some() && matches!(self.elicitation.status, ElicitationStatus::Accepted);
          let is_submitting = self.form_state.is_some_and(|state| state.is_submitting);
@@ -948,7 +957,7 @@ index 837314d..aa1b217 100644
          } else {
              ("Submit", IconName::Check, Color::Success)
          };
-@@ -2666,7 +3123,10 @@ impl<'a> ElicitationCard<'a> {
+@@ -2666,7 +3132,10 @@ impl<'a> ElicitationCard<'a> {
          let on_decline = self.handlers.on_decline.clone();
          let on_cancel = self.handlers.on_cancel.clone();
          let on_dismiss_url = self.handlers.on_dismiss_url.clone();
@@ -959,7 +968,7 @@ index 837314d..aa1b217 100644
          let decline_id = self.elicitation.id.clone();
          let cancel_id = self.elicitation.id.clone();
          let dismiss_id = self.elicitation.id.clone();
-@@ -2678,6 +3138,22 @@ impl<'a> ElicitationCard<'a> {
+@@ -2678,6 +3147,22 @@ impl<'a> ElicitationCard<'a> {
              .justify_end()
              .border_t_1()
              .border_color(border_color)
@@ -982,7 +991,7 @@ index 837314d..aa1b217 100644
              .child(
                  Button::new(("elicitation-accept", self.entry_ix), accept_label)
                      .tab_index(0_isize)
-@@ -2694,6 +3170,8 @@ impl<'a> ElicitationCard<'a> {
+@@ -2694,6 +3179,8 @@ impl<'a> ElicitationCard<'a> {
                              if !is_accepted_url {
                                  on_submit(submit_id.clone(), window, cx);
                              }
@@ -992,7 +1001,7 @@ index 837314d..aa1b217 100644
                              on_submit(submit_id.clone(), window, cx);
                          }
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 6aa5ea3..161bb8b 100644
+index d7d5c5c..6c35421 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -42,7 +42,7 @@ use language_model::{
@@ -1063,7 +1072,7 @@ index 6aa5ea3..161bb8b 100644
                          cx.notify();
                      }
                  })
-@@ -7793,6 +7809,75 @@ impl ThreadView {
+@@ -7797,6 +7813,75 @@ impl ThreadView {
          self.message_editor.read(cx).set_local_commands(commands);
      }
  
@@ -1139,7 +1148,7 @@ index 6aa5ea3..161bb8b 100644
      fn render_request_elicitations(&self, cx: &Context<Self>) -> Vec<AnyElement> {
          let server_view = self.server_view.clone();
          let handlers_view = server_view.clone();
-@@ -13544,6 +13629,7 @@ impl Render for ThreadView {
+@@ -13548,6 +13633,7 @@ impl Render for ThreadView {
                  |this, version| this.child(self.render_new_version_callout(&version, cx)),
              )
              .children(self.render_token_limit_callout(cx))
