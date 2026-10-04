@@ -72,7 +72,7 @@ BY DEPENDENCY, like 0011, 0013 and 0029.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index e9612b9..1812307 100644
+index a434320..984a730 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -43,7 +43,7 @@ use std::fmt::{Formatter, Write};
@@ -393,7 +393,7 @@ index e9612b9..1812307 100644
          cx.emit(AcpThreadEvent::LoadError(error));
      }
  
-@@ -22654,4 +22900,7 @@ mod tests {
+@@ -22655,4 +22901,7 @@ mod tests {
          request.await.expect("turn should complete");
          assert_eq!(cx.active_idle_sleep_preventions(), 0);
      }
@@ -461,7 +461,7 @@ index 0000000..253e2c4
 +}
 diff --git a/crates/acp_thread/src/acp_thread_tasks_tests.rs b/crates/acp_thread/src/acp_thread_tasks_tests.rs
 new file mode 100644
-index 0000000..848f464
+index 0000000..f2fd396
 --- /dev/null
 +++ b/crates/acp_thread/src/acp_thread_tasks_tests.rs
 @@ -0,0 +1,781 @@
@@ -920,7 +920,7 @@ index 0000000..848f464
 +        let r1 = thread
 +            .tasks()
 +            .iter()
-+            .find(|task| task.id.to_string() == "r1")
++            .find(|task| task.id.as_ref() == "r1")
 +            .expect("the vanished task is kept once, as interrupted");
 +        assert_eq!(tasks_status_word(&r1.status), "interrupted");
 +        assert!(r1.ended_at.is_some());

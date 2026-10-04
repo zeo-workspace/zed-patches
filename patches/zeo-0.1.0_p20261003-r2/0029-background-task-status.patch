@@ -57,7 +57,7 @@ claude-agent-acp-plus flag BY DEPENDENCY, like 0011 and 0013.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 8f89356..e9612b9 100644
+index 8f89356..a434320 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -3562,6 +3562,15 @@ impl AccountUsage {
@@ -144,7 +144,7 @@ index 8f89356..e9612b9 100644
              }
              acp_v1::SessionUpdate::AvailableCommandsUpdate(acp_v1::AvailableCommandsUpdate {
                  available_commands,
-@@ -18781,6 +18816,78 @@ mod tests {
+@@ -18781,6 +18816,79 @@ mod tests {
          );
      }
  
@@ -183,7 +183,8 @@ index 8f89356..e9612b9 100644
 +        let send = |update: acp_v1::SessionInfoUpdate, cx: &mut TestAppContext| {
 +            thread
 +                .update(cx, |thread, cx| {
-+                    thread.handle_session_update(acp_v1::SessionUpdate::SessionInfoUpdate(update), cx)
++                    thread
++                        .handle_session_update(acp_v1::SessionUpdate::SessionInfoUpdate(update), cx)
 +                })
 +                .expect("session info update should succeed");
 +        };
