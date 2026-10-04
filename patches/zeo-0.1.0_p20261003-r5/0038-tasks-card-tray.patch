@@ -133,7 +133,7 @@ index e01aee2..f09f016 100644
      pub(crate) fn tasks_card(&self) -> &Entity<TasksCard> {
          &self.tasks_card
 diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
-index 698e941..6b58e4e 100644
+index db70692..50f1002 100644
 --- a/crates/agent_ui/src/tasks_card.rs
 +++ b/crates/agent_ui/src/tasks_card.rs
 @@ -30,6 +30,8 @@ use ui::{ButtonLike, Chip, CommonAnimationExt as _, Tooltip, prelude::*};
@@ -145,7 +145,7 @@ index 698e941..6b58e4e 100644
  #[cfg(test)]
  mod test_helpers;
  
-@@ -83,6 +85,10 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
+@@ -87,6 +89,10 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
  /// same id, and the adapter only promises uniqueness within a session.
  pub(crate) type TaskKey = (acp::SessionId, AgentTaskId);
  
@@ -156,7 +156,7 @@ index 698e941..6b58e4e 100644
  /// What the card asks of the agent panel that hosts it. The card holds no handle
  /// to the panel — the panel owns the card — so it asks through an event the panel
  /// subscribes to, which also reaches exactly the panel that owns this card.
-@@ -131,6 +137,12 @@ pub struct TasksCard {
+@@ -135,6 +141,12 @@ pub struct TasksCard {
      row_errors: HashMap<TaskKey, RowError>,
      /// Counts endings as they reach the card, to order ended-only groups.
      endings_seen: u64,
@@ -169,7 +169,7 @@ index 698e941..6b58e4e 100644
      /// The single wake scheduled at the earliest expiry of `ended`.
      _expiry: Option<Task<()>>,
      /// Repaints the elapsed times every second; only exists while the card is
-@@ -204,6 +216,8 @@ impl TasksCard {
+@@ -208,6 +220,8 @@ impl TasksCard {
              ended: HashMap::default(),
              row_errors: HashMap::default(),
              endings_seen: 0,
@@ -178,7 +178,7 @@ index 698e941..6b58e4e 100644
              _expiry: None,
              _tick: None,
              _settings_observation: cx
-@@ -215,6 +229,19 @@ impl TasksCard {
+@@ -219,6 +233,19 @@ impl TasksCard {
          }
      }
  
@@ -198,7 +198,7 @@ index 698e941..6b58e4e 100644
      /// Makes the card follow exactly `views`: new conversations are subscribed to,
      /// conversations no longer held are dropped with their rows (R1.8).
      pub fn sync_threads<'a>(
-@@ -720,6 +747,14 @@ impl TasksCard {
+@@ -724,6 +751,14 @@ impl TasksCard {
              error_session != session_id
                  || tasks.iter().find(|task| &task.id == task_id) == error.task.as_ref()
          });
@@ -213,7 +213,7 @@ index 698e941..6b58e4e 100644
          // A background task can run for minutes between snapshots, so a snapshot
          // re-arms the tick as well as expanding the card does.
          self.update_tick(cx);
-@@ -746,20 +781,65 @@ impl TasksCard {
+@@ -750,20 +785,65 @@ impl TasksCard {
              );
              return;
          };
@@ -280,7 +280,7 @@ index 698e941..6b58e4e 100644
      /// Keeps one wake pending, at the earliest expiry; none when nothing is ended.
      fn schedule_expiry(&mut self, cx: &mut Context<Self>) {
          let Some(earliest) = self.ended.values().map(|ended| ended.expires_at).min() else {
-@@ -908,6 +988,8 @@ impl TasksCard {
+@@ -912,6 +992,8 @@ impl TasksCard {
              .retain(|(session_id, _)| held.contains(session_id));
          self.row_errors
              .retain(|(session_id, _), _| held.contains(session_id));
@@ -307,10 +307,10 @@ index 0000000..f863c60
 +}
 diff --git a/crates/agent_ui/src/tasks_card/tray.rs b/crates/agent_ui/src/tasks_card/tray.rs
 new file mode 100644
-index 0000000..b92b69d
+index 0000000..8e4dd85
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/tray.rs
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,179 @@
 +//! The tray sender: when a task ends out of view, tell `zeo-systray` over its
 +//! datagram socket (story 013, patch `0038`).
 +//!
@@ -345,6 +345,10 @@ index 0000000..b92b69d
 +#[cfg(test)]
 +#[path = "tray/wiring_tests.rs"]
 +mod wiring;
++
++#[cfg(test)]
++#[path = "tray/dedupe_tests.rs"]
++mod dedupe;
 +
 +/// What `project` reads when the thread has no work directory.
 +const NO_PROJECT: &str = "Zeo";
@@ -757,9 +761,291 @@ index 0000000..b035a4c
 +    assert_eq!(without.cwd, "");
 +    assert_eq!(without.project, "Zeo");
 +}
+diff --git a/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs b/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs
+new file mode 100644
+index 0000000..a813a6e
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs
+@@ -0,0 +1,276 @@
++// Story 013 / task 9.2 — one ending, one datagram, however many views hold its
++// thread (R5.10). Filter: `tasks_card::tray::dedupe`.
++//
++// Two views of one session share one `AcpThread`: `AcpConnection` hands the thread
++// it already holds to a second caller that loads the same session id. The card
++// subscribes to that thread once per view, so it hears each `TaskEnded` twice.
++//
++// `XDG_RUNTIME_DIR` is process-wide: these tests hold the send tests' `ENV_LOCK`
++// and point it at a tempdir, never at the user's real daemon.
++
++use std::{
++    any::Any,
++    collections::HashMap,
++    io,
++    os::unix::net::UnixDatagram,
++    path::Path,
++    rc::Rc,
++    sync::{Arc, Mutex},
++};
++
++use acp_thread::{AcpThread, AgentConnection};
++use agent_client_protocol::schema::v1 as acp;
++use anyhow::{Result, anyhow};
++use gpui::{
++    App, AppContext as _, Entity, SharedString, Task, TestAppContext, VisualTestContext, WeakEntity,
++};
++use project::{AgentId, Project};
++use workspace::{PathList, Workspace};
++
++use super::send::ENV_LOCK;
++use crate::agent_connection_store::AgentConnectionStore;
++use crate::tasks_card::test_helpers::*;
++use crate::test_support::{StubAgentServer, open_thread_with_custom_connection};
++use crate::{Agent, AgentPanel, AgentThreadSource, ConversationView};
++
++fn set_runtime_dir(dir: Option<&Path>) {
++    // SAFETY: serialised by ENV_LOCK; no other thread of these tests reads it meanwhile.
++    unsafe {
++        match dir {
++            Some(dir) => std::env::set_var("XDG_RUNTIME_DIR", dir),
++            None => std::env::remove_var("XDG_RUNTIME_DIR"),
++        }
++    }
++}
++
++/// A runtime dir with the daemon's socket bound in it, as zeo-systray binds it.
++fn bound_socket() -> (tempfile::TempDir, UnixDatagram) {
++    let dir = tempfile::tempdir().expect("tempdir");
++    let socket = UnixDatagram::bind(dir.path().join("zeo-systray.sock")).expect("bind");
++    socket.set_nonblocking(true).expect("nonblocking");
++    (dir, socket)
++}
++
++/// Every datagram waiting on `socket`, parsed.
++fn drain(socket: &UnixDatagram) -> Vec<serde_json::Value> {
++    let mut buffer = vec![0u8; 64 * 1024];
++    let mut received = Vec::new();
++    loop {
++        match socket.recv(&mut buffer) {
++            Ok(n) => received.push(serde_json::from_slice(&buffer[..n]).expect("a JSON datagram")),
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return received,
++            Err(error) => panic!("recv failed: {error}"),
++        }
++    }
++}
++
++/// `TaskActionsConnection`, plus the session reuse of `AcpConnection`: loading a
++/// session that is already open returns the thread that holds it.
++#[derive(Clone)]
++struct SharedSessionConnection {
++    inner: TaskActionsConnection,
++    threads: Arc<Mutex<HashMap<acp::SessionId, WeakEntity<AcpThread>>>>,
++}
++
++impl SharedSessionConnection {
++    fn new() -> Self {
++        Self {
++            inner: TaskActionsConnection::new(),
++            threads: Arc::default(),
++        }
++    }
++}
++
++impl AgentConnection for SharedSessionConnection {
++    fn agent_id(&self) -> AgentId {
++        self.inner.agent_id()
++    }
++
++    fn telemetry_id(&self) -> SharedString {
++        self.inner.telemetry_id()
++    }
++
++    fn new_session(
++        self: Rc<Self>,
++        project: Entity<Project>,
++        work_dirs: PathList,
++        cx: &mut App,
++    ) -> Task<Result<Entity<AcpThread>>> {
++        let created = Rc::new(self.inner.clone()).new_session(project, work_dirs, cx);
++        let threads = self.threads.clone();
++        cx.spawn(async move |cx| {
++            let thread = created.await?;
++            let session_id = cx.update(|cx| thread.read(cx).session_id().clone());
++            threads
++                .lock()
++                .map_err(|_| anyhow!("thread registry poisoned"))?
++                .insert(session_id, thread.downgrade());
++            Ok(thread)
++        })
++    }
++
++    fn supports_load_session(&self) -> bool {
++        true
++    }
++
++    fn load_session(
++        self: Rc<Self>,
++        session_id: acp::SessionId,
++        _project: Entity<Project>,
++        _work_dirs: PathList,
++        _title: Option<SharedString>,
++        _cx: &mut App,
++    ) -> Task<Result<Entity<AcpThread>>> {
++        let held = self
++            .threads
++            .lock()
++            .ok()
++            .and_then(|threads| threads.get(&session_id).and_then(WeakEntity::upgrade));
++        Task::ready(held.ok_or_else(|| anyhow!("session {session_id} is not open")))
++    }
++
++    fn auth_methods(&self) -> &[acp::AuthMethod] {
++        &[]
++    }
++
++    fn authenticate(&self, method: acp::AuthMethodId, cx: &mut App) -> Task<Result<()>> {
++        self.inner.authenticate(method, cx)
++    }
++
++    fn prompt(
++        &self,
++        params: acp::PromptRequest,
++        cx: &mut App,
++    ) -> Task<Result<acp::PromptResponse>> {
++        self.inner.prompt(params, cx)
++    }
++
++    fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
++        self.inner.cancel(session_id, cx)
++    }
++
++    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
++        self
++    }
++}
++
++/// A second conversation view that loads the already open `session_id`.
++fn second_view_of(
++    session_id: &acp::SessionId,
++    connection: &SharedSessionConnection,
++    workspace: &Entity<Workspace>,
++    cx: &mut VisualTestContext,
++) -> Entity<ConversationView> {
++    let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
++    let view = cx.update(|window, cx| {
++        let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
++        cx.new(|cx| {
++            ConversationView::new(
++                Rc::new(StubAgentServer::new(connection.clone()).with_connection_agent_id()),
++                connection_store,
++                Agent::Custom {
++                    id: connection.agent_id(),
++                },
++                Some(session_id.clone()),
++                None,
++                None,
++                None,
++                None,
++                workspace.downgrade(),
++                project,
++                None,
++                AgentThreadSource::AgentPanel,
++                window,
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    view
++}
++
++fn root_thread_of(view: &Entity<ConversationView>, cx: &VisualTestContext) -> Entity<AcpThread> {
++    view.read_with(cx, |view, cx| view.root_thread(cx))
++        .expect("the view holds a root thread")
++}
++
++/// A watched task of a session two views hold ends once, out of view: the card
++/// hears the ending through both views and the tray gets one datagram for it.
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_one_ending_seen_through_two_views_sends_one_datagram(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, workspace, mut cx) = setup_card_panel_in_workspace(cx).await;
++    let connection = SharedSessionConnection::new();
++    open_thread_with_custom_connection(&panel, connection.clone(), &mut cx);
++    let thread = panel.read_with(&cx, |panel, cx| panel.active_agent_thread(cx).unwrap());
++    send_info(
++        &thread,
++        acp::SessionInfoUpdate::new().title("Shared"),
++        &mut cx,
++    );
++    let session = session_of(&thread, &cx);
++
++    let first = active_view(&panel, &cx);
++    let second = second_view_of(&session, &connection, &workspace, &mut cx);
++    assert_ne!(first.entity_id(), second.entity_id(), "two views");
++    assert_eq!(
++        root_thread_of(&second, &cx).entity_id(),
++        thread.entity_id(),
++        "the second view shares the first view's thread"
++    );
++
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| {
++        card.sync_threads([first.clone(), second.clone()].iter(), cx)
++    });
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "running", true, 1_000)],
++        &mut cx,
++    );
++    let id = find_row(&card, &session, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| {
++        card.toggle_watch(session.clone(), id, cx)
++    });
++    card.read_with(&cx, |card, _| {
++        let held: Vec<_> = card
++            .views
++            .iter()
++            .filter_map(|held| held.thread.as_ref())
++            .map(|held| held.thread_id)
++            .collect();
++        assert_eq!(
++            held,
++            vec![thread.entity_id(), thread.entity_id()],
++            "the card holds the one thread through both views"
++        );
++    });
++
++    cx.deactivate_window();
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "completed", true, 1_000)],
++        &mut cx,
++    );
++    cx.run_until_parked();
++
++    let received = drain(&socket);
++    assert_eq!(received.len(), 1, "one ending, one datagram: {received:?}");
++    assert_eq!(received[0]["task_id"], "t1");
++    assert_eq!(received[0]["task_outcome"], "completed");
++    assert_eq!(received[0]["session_id"], session.to_string());
++    set_runtime_dir(None);
++}
++
++fn active_view(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Entity<ConversationView> {
++    panel
++        .read_with(cx, |panel, _| panel.active_conversation_view().cloned())
++        .expect("the panel shows a conversation")
++}
 diff --git a/crates/agent_ui/src/tasks_card/tray/send_tests.rs b/crates/agent_ui/src/tasks_card/tray/send_tests.rs
 new file mode 100644
-index 0000000..bdf5140
+index 0000000..b0548bd
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/tray/send_tests.rs
 @@ -0,0 +1,314 @@
@@ -782,7 +1068,7 @@ index 0000000..bdf5140
 +use super::{TaskOutcomeDatagram, send};
 +use crate::tasks_card::test_helpers::*;
 +
-+static ENV_LOCK: Mutex<()> = Mutex::new(());
++pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
 +
 +fn set_runtime_dir(dir: Option<&std::path::Path>) {
 +    // SAFETY: serialised by ENV_LOCK; no other thread of these tests reads it meanwhile.
@@ -1079,16 +1365,18 @@ index 0000000..bdf5140
 +}
 diff --git a/crates/agent_ui/src/tasks_card/tray/wiring_tests.rs b/crates/agent_ui/src/tasks_card/tray/wiring_tests.rs
 new file mode 100644
-index 0000000..5c24e2e
+index 0000000..27975cb
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/tray/wiring_tests.rs
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,170 @@
 +// Story 013 / task 6.2 review — what the card asks before telling the tray, and
 +// the cap on the title it sends. Filter: `tasks_card::tray::wiring`.
 +//
 +// These tests ask the card's `in_view` query directly, as `tell_tray` does, rather
-+// than reading a socket: `XDG_RUNTIME_DIR` is process-wide, and the lock that
-+// serialises it lives in `send_tests.rs`, out of reach of this module.
++// than reading a socket: `XDG_RUNTIME_DIR` is process-wide, so any test that binds
++// one must hold `send_tests.rs`'s `ENV_LOCK`. The lock is reachable from here, but
++// asking the query keeps these tests off the variable altogether — and pins the
++// in-view answer itself, not a datagram that merely failed to arrive.
 +
 +use acp_thread::AgentTask;
 +use agent_client_protocol::schema::v1 as acp;
@@ -1097,6 +1385,7 @@ index 0000000..5c24e2e
 +use workspace::MultiWorkspace;
 +
 +use super::{MAX_TITLE_CHARS, datagram_for};
++use crate::AgentPanel;
 +use crate::tasks_card::TasksCard;
 +use crate::tasks_card::test_helpers::*;
 +
@@ -1160,6 +1449,53 @@ index 0000000..5c24e2e
 +    assert!(
 +        in_view(&card, &session, &mut cx),
 +        "T is back on screen with A"
++    );
++}
++
++/// R5.3: the window is active and T is the panel's active thread, but the panel is
++/// closed — T is not in front of the user. Closed through the workspace's dock path
++/// (`close_panel` → `Dock::set_open(false)` → `Panel::set_active(false)`), the same
++/// route the dock actions take, rather than by setting the panel's flag directly.
++#[gpui::test]
++async fn test_a_thread_in_a_closed_agent_panel_is_out_of_view(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_card_panel_in_workspace(cx).await;
++    let connection = TaskActionsConnection::new();
++    let thread = open_titled_thread(&panel, &connection, "T", &mut cx);
++    let session = session_of(&thread, &cx);
++    let card = card(&panel, &cx);
++    cx.update(|window, _| window.activate_window());
++    cx.run_until_parked();
++
++    // Control: active window, panel open on T.
++    assert!(in_view(&card, &session, &mut cx), "T is on screen");
++
++    workspace.update_in(&mut cx, |workspace, window, cx| {
++        workspace.close_panel::<AgentPanel>(window, cx)
++    });
++    cx.run_until_parked();
++    assert!(
++        cx.update(|window, _| window.is_window_active()),
++        "the window is still active"
++    );
++    assert!(
++        panel
++            .read_with(&cx, |panel, cx| panel.active_agent_thread(cx))
++            .is_some_and(|active| active == thread),
++        "the closed panel still holds T as its active thread"
++    );
++    assert!(
++        !in_view(&card, &session, &mut cx),
++        "T left the screen with the panel"
++    );
++
++    // Converse: reopened, T is in view again.
++    workspace.update_in(&mut cx, |workspace, window, cx| {
++        workspace.open_panel::<AgentPanel>(window, cx)
++    });
++    cx.run_until_parked();
++    assert!(
++        in_view(&card, &session, &mut cx),
++        "T is back on screen with the panel"
 +    );
 +}
 +

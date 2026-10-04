@@ -852,10 +852,10 @@ index afdb13d..3131bd1 100644
          index: usize,
 diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
 new file mode 100644
-index 0000000..698e941
+index 0000000..db70692
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card.rs
-@@ -0,0 +1,1621 @@
+@@ -0,0 +1,1625 @@
 +//! The tasks card: one floating list of the live tasks of every conversation the
 +//! agent panel holds (story 013, patch `0037`).
 +//!
@@ -930,6 +930,10 @@ index 0000000..698e941
 +#[cfg(test)]
 +#[path = "tasks_card/open_tests.rs"]
 +mod open;
++
++#[cfg(test)]
++#[path = "tasks_card/group_open_tests.rs"]
++mod group_open;
 +
 +/// How long an ended task's final status stays on the card (R1.6).
 +pub(crate) const ENDED_ROW_TTL: Duration = Duration::from_secs(10);
@@ -2912,6 +2916,173 @@ index 0000000..ac5de33
 +        .error
 +        .expect("error on the row");
 +    assert_eq!(error.to_string(), "Nothing was moved to the background");
++}
+diff --git a/crates/agent_ui/src/tasks_card/group_open_tests.rs b/crates/agent_ui/src/tasks_card/group_open_tests.rs
+new file mode 100644
+index 0000000..fd5303a
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/group_open_tests.rs
+@@ -0,0 +1,161 @@
++// Story 013 / task 9.1 — activating a thread group's header opens the thread at
++// its oldest running task's tool call, or only opens it when no running task has
++// one (R4.8). Filter: `tasks_card::group_open`.
++
++use acp_thread::{AcpThread, AgentThreadEntry};
++use agent_client_protocol::schema::v1 as acp;
++use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
++
++use super::test_helpers::*;
++use crate::test_support::active_session_id;
++
++/// Fills `thread` with forty user/agent messages before, between and after each
++/// of `tool_calls`, so every one of them sits at its own index and scrolling to
++/// it moves the list.
++fn fill_around_tool_calls(
++    thread: &Entity<AcpThread>,
++    tool_calls: &[&str],
++    cx: &mut VisualTestContext,
++) {
++    thread.update(cx, |thread, cx| {
++        let mut push = |update: acp::SessionUpdate| {
++            thread
++                .handle_session_update(update, cx)
++                .expect("entry applies");
++        };
++        push_messages(&mut push);
++        for tool_call in tool_calls {
++            push(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
++                tool_call.to_string(),
++                format!("Run {tool_call}"),
++            )));
++            push_messages(&mut push);
++        }
++    });
++    cx.run_until_parked();
++}
++
++fn push_messages(push: &mut dyn FnMut(acp::SessionUpdate)) {
++    for i in 0..20 {
++        push(acp::SessionUpdate::UserMessageChunk(
++            acp::ContentChunk::new(format!("question {i}").into()),
++        ));
++        push(acp::SessionUpdate::AgentMessageChunk(
++            acp::ContentChunk::new(format!("answer {i}").into()),
++        ));
++    }
++}
++
++fn tool_call_index(thread: &Entity<AcpThread>, id: &str, cx: &VisualTestContext) -> usize {
++    thread.read_with(cx, |thread, _| {
++        thread
++            .entries()
++            .iter()
++            .position(|entry| matches!(entry, AgentThreadEntry::ToolCall(call) if call.id.to_string() == id))
++            .expect("the tool call is an entry")
++    })
++}
++
++fn scroll_top(panel: &Entity<crate::AgentPanel>, cx: &mut VisualTestContext) -> usize {
++    let view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
++    view.read_with(cx, |view, _| view.list_state.logical_scroll_top().item_ix)
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Clicks the painted header of `session`'s group, as the user does.
++fn click_group_header(session: &acp::SessionId, cx: &mut VisualTestContext) {
++    draw(cx);
++    // `debug_bounds` takes a `&'static str`; the selector carries the session id.
++    let selector: &'static str = format!("tasks-card-open-group-{}", session.0).leak();
++    let header = cx
++        .debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"));
++    cx.simulate_click(header.center(), Modifiers::none());
++    cx.run_until_parked();
++}
++
++fn without_tool_call(mut task: serde_json::Value) -> serde_json::Value {
++    task["toolCallId"] = serde_json::Value::Null;
++    task
++}
++
++/// Hostile on three fronts: the older task's tool call sits *later* in the
++/// thread than the newer one's, the snapshot lists the newer task first, and an
++/// even older running task has no tool call at all — so only "the oldest running
++/// task that has one" lands on `toolu_old`. Another thread is in front, too.
++#[gpui::test]
++async fn test_group_header_scrolls_to_the_oldest_running_tool_call(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    fill_around_tool_calls(&a, &["toolu_new", "toolu_old"], &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            wire_task("new", "running", true, 3_000),
++            wire_task("old", "running", true, 2_000),
++            without_tool_call(wire_task("oldest", "running", true, 1_000)),
++        ],
++        &mut cx,
++    );
++    let sa = session_of(&a, &cx);
++    let older = tool_call_index(&a, "toolu_old", &cx);
++    let newer = tool_call_index(&a, "toolu_new", &cx);
++    assert!(newer > 0 && older > newer, "distinct, non-zero indexes");
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 4_000)], &mut cx);
++    assert_eq!(active_session_id(&panel, &cx), session_of(&b, &cx));
++
++    click_group_header(&sa, &mut cx);
++
++    assert_eq!(active_session_id(&panel, &cx), sa);
++    assert_eq!(
++        scroll_top(&panel, &mut cx),
++        older,
++        "the header opens at the OLDEST running task's tool call"
++    );
++}
++
++/// No running task of the group has a tool call: the header brings the thread
++/// forward and leaves its scroll where it was — not at an unrelated tool call.
++#[gpui::test]
++async fn test_group_header_without_a_tool_call_opens_the_thread_only(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    fill_around_tool_calls(&a, &["toolu_unrelated"], &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            without_tool_call(wire_task("t1", "running", true, 1_000)),
++            without_tool_call(wire_task("t2", "running", true, 2_000)),
++        ],
++        &mut cx,
++    );
++    let sa = session_of(&a, &cx);
++    let unrelated = tool_call_index(&a, "toolu_unrelated", &cx);
++    let before = scroll_top(&panel, &mut cx);
++    assert_ne!(
++        before, unrelated,
++        "the fixture starts away from the tool call"
++    );
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    assert_eq!(active_session_id(&panel, &cx), session_of(&b, &cx));
++
++    click_group_header(&sa, &mut cx);
++
++    assert_eq!(
++        active_session_id(&panel, &cx),
++        sa,
++        "the header brings the thread forward"
++    );
++    assert_eq!(
++        scroll_top(&panel, &mut cx),
++        before,
++        "opened without scrolling"
++    );
 +}
 diff --git a/crates/agent_ui/src/tasks_card/live_tests.rs b/crates/agent_ui/src/tasks_card/live_tests.rs
 new file mode 100644
