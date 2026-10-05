@@ -1,0 +1,1541 @@
+From d514cc03ce93129a5e4d18ca083eb3b2cfed2c88 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sun, 4 Oct 2026 13:59:28 -0300
+Subject: [PATCH] agent_ui: tell zeo-systray when a task ends out of view
+
+0037's card shows a task ending only to someone looking at the agent panel.
+A background task runs for minutes, and the user has usually gone elsewhere
+by the time it finishes -- which is when they want to know. zeo-systray, the
+tray daemon already fed by Claude Code's hooks, gains a task-outcome datagram
+in 0.3.0; this patch is Zeo's side of it (story 013).
+
+When a task ends, the card weighs it once, and sends a datagram only when
+both hold:
+
+  * the task was watched (0037's Watch control) or it failed, and
+  * its thread is not in front of the user. In view means all four: this
+    window is active, this panel's workspace is the one the window displays,
+    the panel is open, and the thread is its active one. The workspace check
+    matters because multi-workspace windows are on by default, and switching
+    a window to another workspace keeps the previous one alive without
+    deactivating its panels -- a panel open in a workspace nobody looks at
+    would otherwise count as seen, and its endings would never be sent.
+
+The panel answers that question through a query closure it hands the card at
+construction, holding the panel weakly and the window by handle: the panel
+owns the card, so a handle back would be a cycle. A thread held through two
+views delivers each ending twice; the card remembers what it has weighed, so
+one ending is one datagram at most, and an ending is news again once its
+task leaves the list or runs again -- the rule the thread's own announcements
+follow.
+
+The datagram is one JSON object of exactly eight fields, the daemon's
+TaskOutcome: task_outcome (completed, failed, stopped or interrupted),
+session_id, task_id, cwd, project (the work directory's last component, or
+"Zeo" without one), thread_title (always written, null when absent),
+task_type and duration_ms. The shape is pinned by one fixture shared byte
+for byte with zeo-systray 0.3.0 --
+crates/agent_ui/src/tasks_card/test_data/task_outcome.json here,
+tests/fixtures/task-outcome.json there -- and both test suites parse it.
+Nothing in it can carry a task's description, summary or command line: those
+are model-written, and they never leave Zeo.
+
+How it is sent:
+
+  * To $XDG_RUNTIME_DIR/zeo-systray.sock and nowhere else. Never a fallback
+    such as /tmp: that directory is world-writable, so anyone could bind the
+    socket name first and read every outcome Zeo sends. An absent, empty or
+    relative XDG_RUNTIME_DIR sends nothing, as the XDG spec asks.
+  * From an unbound, non-blocking UnixDatagram, on the background executor.
+    A daemon that stopped reading costs a WouldBlock, never a wait; the
+    datagram is dropped, and only the session's first failure is logged, at
+    debug, with ids only.
+  * The thread title is capped at 256 characters, on a char boundary. ACP
+    bounds no title, and the daemon reads each datagram into a 64 KiB
+    buffer: past it the datagram would arrive cut short, as JSON it cannot
+    parse.
+
+zeo-systray is optional at runtime and needs no build-time dependency: with
+no daemon running, or no runtime dir, the send is a silent no-op and the card
+behaves exactly as in 0037. A daemon older than 0.3.0 cannot parse the
+datagram; it logs "discarded malformed datagram" and drops it.
+
+Rides the claude-agent-acp-plus flag BY DEPENDENCY, with 0037: there is no
+task to report without the adapter's feed, so it also needs
+claude-agent-acp-plus 0.24.0 or later to do anything.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 351473b..62977c7 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -1549,7 +1549,10 @@ impl AgentPanel {
+ 
+         // Created with the panel, before any thread: it follows every conversation
+         // from the first one, whether or not it is enabled or shown.
+-        let tasks_card = cx.new(TasksCard::new);
++        let tasks_card = {
++            let in_view = Self::tasks_card_in_view_query(cx.weak_entity(), window.window_handle());
++            cx.new(|cx| TasksCard::new(cx).with_in_view_query(in_view))
++        };
+         // The dock caches this panel's view, and a hidden card is not rendered at
+         // all, so the card's own notify would never reach the screen: whether it
+         // shows is decided here, in `render`. Once shown, the card repaints itself;
+@@ -4492,6 +4495,48 @@ impl AgentPanel {
+         self.retained_threads.remove(thread_id)
+     }
+ 
++    /// The tasks card's question before it tells the tray about an ending (R5.3):
++    /// is that session's thread in front of the user — this window active, this
++    /// panel's workspace the one the window displays, this panel open, and the
++    /// thread the one it shows? The panel is held weakly, as the card it is
++    /// handed to is owned by the panel.
++    fn tasks_card_in_view_query(
++        panel: WeakEntity<Self>,
++        window_handle: gpui::AnyWindowHandle,
++    ) -> impl Fn(&acp::SessionId, &mut App) -> bool + 'static {
++        move |session_id, cx| {
++            // A window or panel that is gone shows nothing.
++            window_handle
++                .update(cx, |_, window, cx| {
++                    window.is_window_active()
++                        && panel
++                            .read_with(cx, |panel, cx| panel.shows_session(session_id, window, cx))
++                            .unwrap_or(false)
++                })
++                .unwrap_or(false)
++        }
++    }
++
++    /// Whether this panel is on screen with the thread of `session_id` as its
++    /// active one.
++    ///
++    /// `is_active` alone is not enough: switching a window to another workspace
++    /// keeps the previous one alive without deactivating its panels, so a panel
++    /// can be open in a workspace nobody is looking at.
++    fn shows_session(&self, session_id: &acp::SessionId, window: &Window, cx: &App) -> bool {
++        if !self.is_active {
++            return false;
++        }
++        // A window whose root is not a `MultiWorkspace` holds only this workspace.
++        if let Some(multi_workspace) = window.root::<MultiWorkspace>().flatten() {
++            if &self.workspace != multi_workspace.read(cx).workspace() {
++                return false;
++            }
++        }
++        self.active_agent_thread(cx)
++            .is_some_and(|thread| thread.read(cx).session_id() == session_id)
++    }
++
+     #[cfg(test)]
+     pub(crate) fn tasks_card(&self) -> &Entity<TasksCard> {
+         &self.tasks_card
+diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
+index db70692..50f1002 100644
+--- a/crates/agent_ui/src/tasks_card.rs
++++ b/crates/agent_ui/src/tasks_card.rs
+@@ -30,6 +30,8 @@ use ui::{ButtonLike, Chip, CommonAnimationExt as _, Tooltip, prelude::*};
+ use crate::DEFAULT_THREAD_TITLE;
+ use crate::conversation_view::ConversationView;
+ 
++mod tray;
++
+ #[cfg(test)]
+ mod test_helpers;
+ 
+@@ -87,6 +89,10 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
+ /// same id, and the adapter only promises uniqueness within a session.
+ pub(crate) type TaskKey = (acp::SessionId, AgentTaskId);
+ 
++/// Whether the thread of a session is in front of the user right now. The panel
++/// that hosts the card answers it; see `TasksCard::with_in_view_query`.
++type InViewQuery = Box<dyn Fn(&acp::SessionId, &mut App) -> bool>;
++
+ /// What the card asks of the agent panel that hosts it. The card holds no handle
+ /// to the panel — the panel owns the card — so it asks through an event the panel
+ /// subscribes to, which also reaches exactly the panel that owns this card.
+@@ -135,6 +141,12 @@ pub struct TasksCard {
+     row_errors: HashMap<TaskKey, RowError>,
+     /// Counts endings as they reach the card, to order ended-only groups.
+     endings_seen: u64,
++    /// Endings already weighed for the tray. A thread held through two views
++    /// delivers each `TaskEnded` twice, and one ending is one datagram at most.
++    tray_weighed: HashSet<TaskKey>,
++    /// Asked before telling the tray about an ending (R5.3); `None` for a card no
++    /// panel hosts, which tells the tray nothing.
++    in_view: Option<InViewQuery>,
+     /// The single wake scheduled at the earliest expiry of `ended`.
+     _expiry: Option<Task<()>>,
+     /// Repaints the elapsed times every second; only exists while the card is
+@@ -208,6 +220,8 @@ impl TasksCard {
+             ended: HashMap::default(),
+             row_errors: HashMap::default(),
+             endings_seen: 0,
++            tray_weighed: HashSet::default(),
++            in_view: None,
+             _expiry: None,
+             _tick: None,
+             _settings_observation: cx
+@@ -219,6 +233,19 @@ impl TasksCard {
+         }
+     }
+ 
++    /// Lets the card tell `zeo-systray` about endings, asking `in_view` first
++    /// whether the task's thread is the one the user is looking at.
++    ///
++    /// A query rather than a handle: the panel owns the card, so a strong handle
++    /// back would be a cycle, and the panel's own state is what decides.
++    pub(crate) fn with_in_view_query(
++        mut self,
++        in_view: impl Fn(&acp::SessionId, &mut App) -> bool + 'static,
++    ) -> Self {
++        self.in_view = Some(Box::new(in_view));
++        self
++    }
++
+     /// Makes the card follow exactly `views`: new conversations are subscribed to,
+     /// conversations no longer held are dropped with their rows (R1.8).
+     pub fn sync_threads<'a>(
+@@ -724,6 +751,14 @@ impl TasksCard {
+             error_session != session_id
+                 || tasks.iter().find(|task| &task.id == task_id) == error.task.as_ref()
+         });
++        // Same rule as the thread's own announcements: an ending is news again
++        // once its task leaves the list or runs again.
++        self.tray_weighed.retain(|(weighed_session, task_id)| {
++            weighed_session != session_id
++                || tasks
++                    .iter()
++                    .any(|task| &task.id == task_id && !task.status.is_running())
++        });
+         // A background task can run for minutes between snapshots, so a snapshot
+         // re-arms the tick as well as expanding the card does.
+         self.update_tick(cx);
+@@ -750,20 +785,65 @@ impl TasksCard {
+             );
+             return;
+         };
++        let status = task.status;
++        let datagram = tray::datagram_for(
++            &task,
++            &session_id,
++            thread
++                .work_dirs()
++                .and_then(|dirs| dirs.paths().first())
++                .map(|dir| dir.as_path()),
++            thread.title().as_deref(),
++            SystemTime::now(),
++        );
++        let key = (session_id, task.id.clone());
+         let now = cx.background_executor().now();
+         self.endings_seen += 1;
+         self.ended.insert(
+-            (session_id, task.id.clone()),
++            key.clone(),
+             EndedRow {
+                 task,
+                 expires_at: now.checked_add(ENDED_ROW_TTL).unwrap_or(now),
+                 sequence: self.endings_seen,
+             },
+         );
++        self.tell_tray(key, status, datagram, cx);
+         self.schedule_expiry(cx);
+         cx.notify();
+     }
+ 
++    /// Tells `zeo-systray` about an ending the user is not looking at, when it is
++    /// watched or failed (R5.1–R5.3). The send runs off the UI thread.
++    fn tell_tray(
++        &mut self,
++        key: TaskKey,
++        status: AgentTaskStatus,
++        datagram: Option<tray::TaskOutcomeDatagram>,
++        cx: &mut Context<Self>,
++    ) {
++        if !self.tray_weighed.insert(key.clone()) {
++            return;
++        }
++        let Some(in_view) = &self.in_view else {
++            return;
++        };
++        let watched = self.watched.contains(&key);
++        if !tray::should_notify(watched, status, in_view(&key.0, cx)) {
++            return;
++        }
++        let (session_id, task_id) = &key;
++        let Some(datagram) = datagram else {
++            log::debug!(
++                "tasks card: task {task_id} of session {session_id} has no outcome to send"
++            );
++            return;
++        };
++        log::debug!(
++            "tasks card: telling zeo-systray that task {task_id} of session {session_id} ended"
++        );
++        tray::send_in_background(datagram, cx);
++    }
++
+     /// Keeps one wake pending, at the earliest expiry; none when nothing is ended.
+     fn schedule_expiry(&mut self, cx: &mut Context<Self>) {
+         let Some(earliest) = self.ended.values().map(|ended| ended.expires_at).min() else {
+@@ -912,6 +992,8 @@ impl TasksCard {
+             .retain(|(session_id, _)| held.contains(session_id));
+         self.row_errors
+             .retain(|(session_id, _), _| held.contains(session_id));
++        self.tray_weighed
++            .retain(|(session_id, _)| held.contains(session_id));
+         self.schedule_expiry(cx);
+     }
+ }
+diff --git a/crates/agent_ui/src/tasks_card/test_data/task_outcome.json b/crates/agent_ui/src/tasks_card/test_data/task_outcome.json
+new file mode 100644
+index 0000000..f863c60
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/test_data/task_outcome.json
+@@ -0,0 +1,10 @@
++{
++  "task_outcome": "failed",
++  "session_id": "sess-013",
++  "task_id": "task-7",
++  "cwd": "/home/user/zed-patches",
++  "project": "zed-patches",
++  "thread_title": "Bump the series",
++  "task_type": "shell",
++  "duration_ms": 20500
++}
+diff --git a/crates/agent_ui/src/tasks_card/tray.rs b/crates/agent_ui/src/tasks_card/tray.rs
+new file mode 100644
+index 0000000..8e4dd85
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/tray.rs
+@@ -0,0 +1,179 @@
++//! The tray sender: when a task ends out of view, tell `zeo-systray` over its
++//! datagram socket (story 013, patch `0038`).
++//!
++//! The datagram is the contract shared with `zeo-systray`'s `TaskOutcome`, pinned by
++//! one JSON fixture both repositories test against. Its privacy boundary is the
++//! tray's: identifiers, a path, labels, an outcome and a duration. A task's
++//! description, summary and command line are model-written and never leave Zeo.
++
++use std::{
++    io,
++    os::unix::net::UnixDatagram,
++    path::{Path, PathBuf},
++    sync::atomic::{AtomicBool, Ordering},
++    time::{Duration, SystemTime},
++};
++
++use acp_thread::{AgentTask, AgentTaskStatus};
++use agent_client_protocol::schema::v1 as acp;
++use gpui::{App, AppContext as _};
++use serde::Serialize;
++
++use super::ended_duration;
++
++#[cfg(test)]
++#[path = "tray/decision_tests.rs"]
++mod decision;
++
++#[cfg(test)]
++#[path = "tray/send_tests.rs"]
++mod send;
++
++#[cfg(test)]
++#[path = "tray/wiring_tests.rs"]
++mod wiring;
++
++#[cfg(test)]
++#[path = "tray/dedupe_tests.rs"]
++mod dedupe;
++
++/// What `project` reads when the thread has no work directory.
++const NO_PROJECT: &str = "Zeo";
++
++/// The daemon's socket under `$XDG_RUNTIME_DIR` — `zeo-systray`'s `SOCKET_NAME`.
++const SOCKET_NAME: &str = "zeo-systray.sock";
++
++/// The longest thread title a datagram carries, in characters. ACP bounds no
++/// title, and the daemon reads each datagram into a 64 KiB buffer: past it the
++/// datagram would arrive cut short, as JSON it cannot parse.
++pub(crate) const MAX_TITLE_CHARS: usize = 256;
++
++/// Set by the first failed send: a daemon that is not running fails every send,
++/// and one line per Zeo session is enough to say so (R5.4).
++static SEND_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
++
++/// Whether an ended task is worth a tray notification: never while the user is
++/// looking at it (R5.3), otherwise when it is watched (R5.1) or it failed (R5.2).
++pub(crate) fn should_notify(watched: bool, status: AgentTaskStatus, in_view: bool) -> bool {
++    !in_view && (watched || status == AgentTaskStatus::Failed)
++}
++
++/// One task-outcome datagram, serialised as one JSON object. The fields are exactly
++/// `zeo-systray`'s `TaskOutcome`; there is deliberately no field that could carry a
++/// task's description, summary or command line (R5.5).
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub(crate) struct TaskOutcomeDatagram {
++    task_outcome: &'static str,
++    session_id: String,
++    task_id: String,
++    cwd: String,
++    project: String,
++    /// Written as `null` when absent, never omitted, so the daemon parses one shape.
++    thread_title: Option<String>,
++    task_type: String,
++    duration_ms: u64,
++}
++
++/// Builds the datagram for an ended task; `None` for a task still running, which
++/// has no outcome to report.
++pub(crate) fn datagram_for(
++    task: &AgentTask,
++    session_id: &acp::SessionId,
++    work_dir: Option<&Path>,
++    thread_title: Option<&str>,
++    now: SystemTime,
++) -> Option<TaskOutcomeDatagram> {
++    let task_outcome = outcome_word(task.status)?;
++    let duration = ended_duration(task)
++        .unwrap_or_else(|| now.duration_since(task.started_at).unwrap_or_default());
++    let (cwd, project) = match work_dir {
++        Some(dir) => {
++            let cwd = dir.to_string_lossy().into_owned();
++            // Same fallback as the hook side: a directory with no last component
++            // (`/`) is labelled by its own path.
++            let project = dir
++                .file_name()
++                .map(|name| name.to_string_lossy().into_owned())
++                .unwrap_or_else(|| cwd.clone());
++            (cwd, project)
++        }
++        None => (String::new(), NO_PROJECT.to_string()),
++    };
++    Some(TaskOutcomeDatagram {
++        task_outcome,
++        session_id: session_id.to_string(),
++        task_id: task.id.to_string(),
++        cwd,
++        project,
++        thread_title: thread_title.map(|title| title.chars().take(MAX_TITLE_CHARS).collect()),
++        task_type: task.kind.to_string(),
++        duration_ms: duration_millis(duration),
++    })
++}
++
++/// The wire spelling of an ended status, matching `zeo-systray`'s `Outcome`.
++fn outcome_word(status: AgentTaskStatus) -> Option<&'static str> {
++    match status {
++        AgentTaskStatus::Running => None,
++        AgentTaskStatus::Completed => Some("completed"),
++        AgentTaskStatus::Failed => Some("failed"),
++        AgentTaskStatus::Stopped => Some("stopped"),
++        AgentTaskStatus::Interrupted => Some("interrupted"),
++    }
++}
++
++/// Milliseconds as the wire's `u64`, saturating rather than wrapping.
++fn duration_millis(duration: Duration) -> u64 {
++    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
++}
++
++/// Sends one datagram to `zeo-systray`, without ever waiting for it (R5.4).
++///
++/// No runtime dir means no daemon to reach: `Ok(())`, and nothing is sent. An
++/// absent socket, a refused send or a full queue — `WouldBlock`, since the socket
++/// is non-blocking — is an `Err` for the caller to drop.
++pub(crate) fn send(datagram: &TaskOutcomeDatagram) -> io::Result<()> {
++    let Some(path) = socket_path() else {
++        return Ok(());
++    };
++    let payload = serde_json::to_vec(datagram)?;
++    let socket = UnixDatagram::unbound()?;
++    // A blocking send would wait behind a daemon that stopped reading.
++    socket.set_nonblocking(true)?;
++    socket.send_to(&payload, path)?;
++    Ok(())
++}
++
++/// `$XDG_RUNTIME_DIR/zeo-systray.sock`, or `None` without a usable runtime dir.
++///
++/// Never a fallback such as `/tmp`: it is world-writable, so anyone could bind
++/// the socket name there first and read every outcome Zeo sends. A relative
++/// value — an empty one included — is ignored, as the XDG spec asks.
++fn socket_path() -> Option<PathBuf> {
++    let dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
++    dir.is_absolute().then(|| dir.join(SOCKET_NAME))
++}
++
++/// Sends `datagram` off the UI thread, dropping it if the daemon does not take
++/// it; only the session's first failure is logged.
++pub(crate) fn send_in_background(datagram: TaskOutcomeDatagram, cx: &App) {
++    cx.background_spawn(async move {
++        if let Err(error) = send(&datagram) {
++            log_send_failure(&datagram, &error);
++        }
++    })
++    .detach();
++}
++
++/// Ids only: the rest of the datagram is the user's, and stays out of the log.
++fn log_send_failure(datagram: &TaskOutcomeDatagram, error: &io::Error) {
++    if SEND_FAILURE_LOGGED.swap(true, Ordering::Relaxed) {
++        return;
++    }
++    log::debug!(
++        "tasks card: zeo-systray did not take the outcome of task {} of session {}; \
++         dropped: {error}. Later failures this session are not logged",
++        datagram.task_id,
++        datagram.session_id
++    );
++}
+diff --git a/crates/agent_ui/src/tasks_card/tray/decision_tests.rs b/crates/agent_ui/src/tasks_card/tray/decision_tests.rs
+new file mode 100644
+index 0000000..b035a4c
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/tray/decision_tests.rs
+@@ -0,0 +1,265 @@
++// Story 013 / task 6.1 — `should_notify` and `TaskOutcomeDatagram`
++// (R5.1, R5.2, R5.3, R5.5, Q12). Filter: `tasks_card::tray::decision`.
++
++use std::{
++    collections::BTreeSet,
++    path::Path,
++    time::{Duration, SystemTime, UNIX_EPOCH},
++};
++
++use acp_thread::{AgentTask, AgentTaskStatus};
++use agent_client_protocol::schema::v1 as acp;
++use gpui::{TestAppContext, VisualTestContext};
++use serde_json::json;
++
++use super::{TaskOutcomeDatagram, datagram_for, should_notify};
++use crate::tasks_card::test_helpers::*;
++
++/// The shared contract fixture: a byte-identical copy of
++/// `zeo-systray/tests/fixtures/task-outcome.json`, which zeo-systray parses.
++const TASK_OUTCOME_FIXTURE: &str = include_str!("../test_data/task_outcome.json");
++
++const ENDED: [AgentTaskStatus; 4] = [
++    AgentTaskStatus::Completed,
++    AgentTaskStatus::Failed,
++    AgentTaskStatus::Stopped,
++    AgentTaskStatus::Interrupted,
++];
++
++// ---- hostile halves first: the cases where a notification would be WRONG ---------
++
++#[test]
++fn test_an_unwatched_task_that_completes_is_not_notified() {
++    assert!(!should_notify(false, AgentTaskStatus::Completed, false));
++    assert!(!should_notify(false, AgentTaskStatus::Stopped, false));
++    assert!(!should_notify(false, AgentTaskStatus::Interrupted, false));
++}
++
++#[test]
++fn test_nothing_is_notified_while_the_task_is_in_view() {
++    // Watched and completed, but the user is looking at it.
++    assert!(!should_notify(true, AgentTaskStatus::Completed, true));
++    // Even a failure — watched or not — is not sent while in view (R5.3 over R5.2).
++    assert!(!should_notify(true, AgentTaskStatus::Failed, true));
++    assert!(!should_notify(false, AgentTaskStatus::Failed, true));
++}
++
++// ---- then the cases where silence would be WRONG ----------------------------------
++
++#[test]
++fn test_a_failed_task_out_of_view_is_notified_even_unwatched() {
++    assert!(should_notify(false, AgentTaskStatus::Failed, false));
++}
++
++#[test]
++fn test_a_watched_task_out_of_view_is_notified_however_it_ends() {
++    for status in ENDED {
++        assert!(should_notify(true, status, false), "{status:?}");
++    }
++}
++
++/// The whole table, so no cell is left to chance: notify iff out of view and
++/// (watched or failed).
++#[test]
++fn test_the_full_truth_table() {
++    for watched in [false, true] {
++        for in_view in [false, true] {
++            for status in ENDED {
++                let expected = !in_view && (watched || status == AgentTaskStatus::Failed);
++                assert_eq!(
++                    should_notify(watched, status, in_view),
++                    expected,
++                    "watched={watched} status={status:?} in_view={in_view}"
++                );
++            }
++        }
++    }
++}
++
++// ---- the datagram -------------------------------------------------------------------
++
++fn fixture_datagram() -> TaskOutcomeDatagram {
++    TaskOutcomeDatagram {
++        task_outcome: "failed",
++        session_id: "sess-013".into(),
++        task_id: "task-7".into(),
++        cwd: "/home/user/zed-patches".into(),
++        project: "zed-patches".into(),
++        thread_title: Some("Bump the series".into()),
++        task_type: "shell".into(),
++        duration_ms: 20_500,
++    }
++}
++
++/// Q12: what Zeo serialises is exactly what zeo-systray's test parses.
++#[test]
++fn test_the_datagram_serialises_to_the_shared_fixture() {
++    let wire = serde_json::to_value(fixture_datagram()).expect("the datagram serialises");
++    let fixture: serde_json::Value =
++        serde_json::from_str(TASK_OUTCOME_FIXTURE).expect("the fixture is JSON");
++    assert_eq!(wire, fixture);
++}
++
++/// R5.5: the datagram's keys are exactly the contract's — no description, no
++/// summary, no command line, and nothing else that could carry free text.
++#[test]
++fn test_the_datagram_carries_no_free_text_fields() {
++    let wire = serde_json::to_value(fixture_datagram()).expect("the datagram serialises");
++    let keys: BTreeSet<&str> = wire
++        .as_object()
++        .expect("one JSON object")
++        .keys()
++        .map(String::as_str)
++        .collect();
++    let expected: BTreeSet<&str> = [
++        "task_outcome",
++        "session_id",
++        "task_id",
++        "cwd",
++        "project",
++        "thread_title",
++        "task_type",
++        "duration_ms",
++    ]
++    .into_iter()
++    .collect();
++    assert_eq!(keys, expected);
++    for forbidden in [
++        "description",
++        "summary",
++        "command",
++        "last_tool",
++        "output_file",
++    ] {
++        assert!(
++            !keys.contains(forbidden),
++            "{forbidden} must not cross the socket"
++        );
++    }
++}
++
++/// `thread_title` is `string | null`: absent is written as null, not omitted, so the
++/// daemon's parse sees the same shape every time.
++#[test]
++fn test_a_missing_thread_title_is_written_as_null() {
++    let mut datagram = fixture_datagram();
++    datagram.thread_title = None;
++    let wire = serde_json::to_value(datagram).expect("the datagram serialises");
++    assert_eq!(wire.get("thread_title"), Some(&serde_json::Value::Null));
++}
++
++// ---- datagram_for: outcome words, Running, duration fallbacks, work dir -------------
++
++fn at_ms(ms: u64) -> SystemTime {
++    UNIX_EPOCH + Duration::from_millis(ms)
++}
++
++/// The model's tasks for one snapshot, parsed by story 012's code (no struct
++/// literal, so the test does not pin `AgentTask`'s shape). One panel per test:
++/// `init_test` runs once.
++async fn model_tasks(
++    wire: Vec<serde_json::Value>,
++    cx: &mut TestAppContext,
++) -> (Vec<AgentTask>, acp::SessionId, VisualTestContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let thread = open_titled_thread(&panel, &connection, "T", &mut cx);
++    send_tasks(&thread, wire, &mut cx);
++    let tasks = thread.read_with(&cx, |thread, _| thread.tasks().to_vec());
++    let session = session_of(&thread, &cx);
++    (tasks, session, cx)
++}
++
++fn by_id<'a>(tasks: &'a [AgentTask], id: &str) -> &'a AgentTask {
++    tasks
++        .iter()
++        .find(|task| task.id == id)
++        .unwrap_or_else(|| panic!("task {id} is in the model"))
++}
++
++#[gpui::test]
++async fn test_each_ending_maps_to_its_outcome_word(cx: &mut TestAppContext) {
++    let pairs = [
++        ("completed", "completed"),
++        ("failed", "failed"),
++        ("stopped", "stopped"),
++        ("interrupted", "interrupted"),
++    ];
++    let wire = pairs
++        .iter()
++        .enumerate()
++        .map(|(i, (status, _))| wire_task(status, status, true, 1_000 + i as u64))
++        .collect();
++    let (tasks, session, _visual) = model_tasks(wire, cx).await;
++    for (status, word) in pairs {
++        let datagram = datagram_for(
++            by_id(&tasks, status),
++            &session,
++            None,
++            Some("T"),
++            at_ms(9_000),
++        )
++        .unwrap_or_else(|| panic!("an ended task ({status}) yields a datagram"));
++        assert_eq!(datagram.task_outcome, word);
++    }
++}
++
++/// Hostile half: a task that has not ended must never produce a datagram.
++#[gpui::test]
++async fn test_a_running_task_yields_no_datagram(cx: &mut TestAppContext) {
++    let (tasks, session, _visual) =
++        model_tasks(vec![wire_task("t1", "running", true, 1_000)], cx).await;
++    assert!(datagram_for(by_id(&tasks, "t1"), &session, None, Some("T"), at_ms(9_000)).is_none());
++}
++
++#[gpui::test]
++async fn test_duration_prefers_ended_at_then_usage_then_now(cx: &mut TestAppContext) {
++    // ended_at set (2_000): it wins over a disagreeing usage figure.
++    let mut ended = wire_task("ended", "completed", true, 1_000);
++    ended["usage"] = json!({ "tokens": 1, "toolUses": 1, "durationMs": 99_999 });
++    // No ended_at: usage.duration_ms.
++    let mut usage = wire_task("usage", "completed", true, 1_001);
++    usage["endedAt"] = serde_json::Value::Null;
++    usage["usage"] = json!({ "tokens": 1, "toolUses": 1, "durationMs": 4_321 });
++    // Neither: now - started_at.
++    let mut neither = wire_task("neither", "completed", true, 1_002);
++    neither["endedAt"] = serde_json::Value::Null;
++
++    let (tasks, session, _visual) = model_tasks(vec![ended, usage, neither], cx).await;
++    let now = at_ms(8_002);
++    let duration = |id: &str| {
++        datagram_for(by_id(&tasks, id), &session, None, None, now)
++            .unwrap()
++            .duration_ms
++    };
++    assert_eq!(duration("ended"), 1_000);
++    assert_eq!(duration("usage"), 4_321);
++    assert_eq!(duration("neither"), 7_000);
++}
++
++/// cwd is the thread's first work directory and project its last component; with
++/// no work directory, cwd is empty and project is "Zeo" — never a made-up path.
++#[gpui::test]
++async fn test_cwd_and_project_come_from_the_work_dir_or_fall_back(cx: &mut TestAppContext) {
++    let (tasks, session, _visual) =
++        model_tasks(vec![wire_task("t1", "failed", true, 1_000)], cx).await;
++    let task = by_id(&tasks, "t1");
++    let with_dir = datagram_for(
++        task,
++        &session,
++        Some(Path::new("/home/user/zed-patches")),
++        Some("T"),
++        at_ms(9_000),
++    )
++    .unwrap();
++    assert_eq!(with_dir.cwd, "/home/user/zed-patches");
++    assert_eq!(with_dir.project, "zed-patches");
++    assert_eq!(with_dir.session_id, session.to_string());
++    assert_eq!(with_dir.task_id, "t1");
++    assert_eq!(with_dir.task_type, "shell");
++    assert_eq!(with_dir.thread_title.as_deref(), Some("T"));
++
++    let without = datagram_for(task, &session, None, Some("T"), at_ms(9_000)).unwrap();
++    assert_eq!(without.cwd, "");
++    assert_eq!(without.project, "Zeo");
++}
+diff --git a/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs b/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs
+new file mode 100644
+index 0000000..a813a6e
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs
+@@ -0,0 +1,276 @@
++// Story 013 / task 9.2 — one ending, one datagram, however many views hold its
++// thread (R5.10). Filter: `tasks_card::tray::dedupe`.
++//
++// Two views of one session share one `AcpThread`: `AcpConnection` hands the thread
++// it already holds to a second caller that loads the same session id. The card
++// subscribes to that thread once per view, so it hears each `TaskEnded` twice.
++//
++// `XDG_RUNTIME_DIR` is process-wide: these tests hold the send tests' `ENV_LOCK`
++// and point it at a tempdir, never at the user's real daemon.
++
++use std::{
++    any::Any,
++    collections::HashMap,
++    io,
++    os::unix::net::UnixDatagram,
++    path::Path,
++    rc::Rc,
++    sync::{Arc, Mutex},
++};
++
++use acp_thread::{AcpThread, AgentConnection};
++use agent_client_protocol::schema::v1 as acp;
++use anyhow::{Result, anyhow};
++use gpui::{
++    App, AppContext as _, Entity, SharedString, Task, TestAppContext, VisualTestContext, WeakEntity,
++};
++use project::{AgentId, Project};
++use workspace::{PathList, Workspace};
++
++use super::send::ENV_LOCK;
++use crate::agent_connection_store::AgentConnectionStore;
++use crate::tasks_card::test_helpers::*;
++use crate::test_support::{StubAgentServer, open_thread_with_custom_connection};
++use crate::{Agent, AgentPanel, AgentThreadSource, ConversationView};
++
++fn set_runtime_dir(dir: Option<&Path>) {
++    // SAFETY: serialised by ENV_LOCK; no other thread of these tests reads it meanwhile.
++    unsafe {
++        match dir {
++            Some(dir) => std::env::set_var("XDG_RUNTIME_DIR", dir),
++            None => std::env::remove_var("XDG_RUNTIME_DIR"),
++        }
++    }
++}
++
++/// A runtime dir with the daemon's socket bound in it, as zeo-systray binds it.
++fn bound_socket() -> (tempfile::TempDir, UnixDatagram) {
++    let dir = tempfile::tempdir().expect("tempdir");
++    let socket = UnixDatagram::bind(dir.path().join("zeo-systray.sock")).expect("bind");
++    socket.set_nonblocking(true).expect("nonblocking");
++    (dir, socket)
++}
++
++/// Every datagram waiting on `socket`, parsed.
++fn drain(socket: &UnixDatagram) -> Vec<serde_json::Value> {
++    let mut buffer = vec![0u8; 64 * 1024];
++    let mut received = Vec::new();
++    loop {
++        match socket.recv(&mut buffer) {
++            Ok(n) => received.push(serde_json::from_slice(&buffer[..n]).expect("a JSON datagram")),
++            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return received,
++            Err(error) => panic!("recv failed: {error}"),
++        }
++    }
++}
++
++/// `TaskActionsConnection`, plus the session reuse of `AcpConnection`: loading a
++/// session that is already open returns the thread that holds it.
++#[derive(Clone)]
++struct SharedSessionConnection {
++    inner: TaskActionsConnection,
++    threads: Arc<Mutex<HashMap<acp::SessionId, WeakEntity<AcpThread>>>>,
++}
++
++impl SharedSessionConnection {
++    fn new() -> Self {
++        Self {
++            inner: TaskActionsConnection::new(),
++            threads: Arc::default(),
++        }
++    }
++}
++
++impl AgentConnection for SharedSessionConnection {
++    fn agent_id(&self) -> AgentId {
++        self.inner.agent_id()
++    }
++
++    fn telemetry_id(&self) -> SharedString {
++        self.inner.telemetry_id()
++    }
++
++    fn new_session(
++        self: Rc<Self>,
++        project: Entity<Project>,
++        work_dirs: PathList,
++        cx: &mut App,
++    ) -> Task<Result<Entity<AcpThread>>> {
++        let created = Rc::new(self.inner.clone()).new_session(project, work_dirs, cx);
++        let threads = self.threads.clone();
++        cx.spawn(async move |cx| {
++            let thread = created.await?;
++            let session_id = cx.update(|cx| thread.read(cx).session_id().clone());
++            threads
++                .lock()
++                .map_err(|_| anyhow!("thread registry poisoned"))?
++                .insert(session_id, thread.downgrade());
++            Ok(thread)
++        })
++    }
++
++    fn supports_load_session(&self) -> bool {
++        true
++    }
++
++    fn load_session(
++        self: Rc<Self>,
++        session_id: acp::SessionId,
++        _project: Entity<Project>,
++        _work_dirs: PathList,
++        _title: Option<SharedString>,
++        _cx: &mut App,
++    ) -> Task<Result<Entity<AcpThread>>> {
++        let held = self
++            .threads
++            .lock()
++            .ok()
++            .and_then(|threads| threads.get(&session_id).and_then(WeakEntity::upgrade));
++        Task::ready(held.ok_or_else(|| anyhow!("session {session_id} is not open")))
++    }
++
++    fn auth_methods(&self) -> &[acp::AuthMethod] {
++        &[]
++    }
++
++    fn authenticate(&self, method: acp::AuthMethodId, cx: &mut App) -> Task<Result<()>> {
++        self.inner.authenticate(method, cx)
++    }
++
++    fn prompt(
++        &self,
++        params: acp::PromptRequest,
++        cx: &mut App,
++    ) -> Task<Result<acp::PromptResponse>> {
++        self.inner.prompt(params, cx)
++    }
++
++    fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
++        self.inner.cancel(session_id, cx)
++    }
++
++    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
++        self
++    }
++}
++
++/// A second conversation view that loads the already open `session_id`.
++fn second_view_of(
++    session_id: &acp::SessionId,
++    connection: &SharedSessionConnection,
++    workspace: &Entity<Workspace>,
++    cx: &mut VisualTestContext,
++) -> Entity<ConversationView> {
++    let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
++    let view = cx.update(|window, cx| {
++        let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
++        cx.new(|cx| {
++            ConversationView::new(
++                Rc::new(StubAgentServer::new(connection.clone()).with_connection_agent_id()),
++                connection_store,
++                Agent::Custom {
++                    id: connection.agent_id(),
++                },
++                Some(session_id.clone()),
++                None,
++                None,
++                None,
++                None,
++                workspace.downgrade(),
++                project,
++                None,
++                AgentThreadSource::AgentPanel,
++                window,
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    view
++}
++
++fn root_thread_of(view: &Entity<ConversationView>, cx: &VisualTestContext) -> Entity<AcpThread> {
++    view.read_with(cx, |view, cx| view.root_thread(cx))
++        .expect("the view holds a root thread")
++}
++
++/// A watched task of a session two views hold ends once, out of view: the card
++/// hears the ending through both views and the tray gets one datagram for it.
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_one_ending_seen_through_two_views_sends_one_datagram(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, workspace, mut cx) = setup_card_panel_in_workspace(cx).await;
++    let connection = SharedSessionConnection::new();
++    open_thread_with_custom_connection(&panel, connection.clone(), &mut cx);
++    let thread = panel.read_with(&cx, |panel, cx| panel.active_agent_thread(cx).unwrap());
++    send_info(
++        &thread,
++        acp::SessionInfoUpdate::new().title("Shared"),
++        &mut cx,
++    );
++    let session = session_of(&thread, &cx);
++
++    let first = active_view(&panel, &cx);
++    let second = second_view_of(&session, &connection, &workspace, &mut cx);
++    assert_ne!(first.entity_id(), second.entity_id(), "two views");
++    assert_eq!(
++        root_thread_of(&second, &cx).entity_id(),
++        thread.entity_id(),
++        "the second view shares the first view's thread"
++    );
++
++    let card = card(&panel, &cx);
++    card.update(&mut cx, |card, cx| {
++        card.sync_threads([first.clone(), second.clone()].iter(), cx)
++    });
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "running", true, 1_000)],
++        &mut cx,
++    );
++    let id = find_row(&card, &session, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| {
++        card.toggle_watch(session.clone(), id, cx)
++    });
++    card.read_with(&cx, |card, _| {
++        let held: Vec<_> = card
++            .views
++            .iter()
++            .filter_map(|held| held.thread.as_ref())
++            .map(|held| held.thread_id)
++            .collect();
++        assert_eq!(
++            held,
++            vec![thread.entity_id(), thread.entity_id()],
++            "the card holds the one thread through both views"
++        );
++    });
++
++    cx.deactivate_window();
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "completed", true, 1_000)],
++        &mut cx,
++    );
++    cx.run_until_parked();
++
++    let received = drain(&socket);
++    assert_eq!(received.len(), 1, "one ending, one datagram: {received:?}");
++    assert_eq!(received[0]["task_id"], "t1");
++    assert_eq!(received[0]["task_outcome"], "completed");
++    assert_eq!(received[0]["session_id"], session.to_string());
++    set_runtime_dir(None);
++}
++
++fn active_view(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Entity<ConversationView> {
++    panel
++        .read_with(cx, |panel, _| panel.active_conversation_view().cloned())
++        .expect("the panel shows a conversation")
++}
+diff --git a/crates/agent_ui/src/tasks_card/tray/send_tests.rs b/crates/agent_ui/src/tasks_card/tray/send_tests.rs
+new file mode 100644
+index 0000000..b0548bd
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/tray/send_tests.rs
+@@ -0,0 +1,314 @@
++// Story 013 / task 6.2 — the non-blocking send and its wiring (R5.1, R5.3, R5.4).
++// Filter: `tasks_card::tray::send`.
++//
++// Every test that touches `XDG_RUNTIME_DIR` holds `ENV_LOCK`, because the variable
++// is process-wide and tests run on parallel threads.
++
++use std::{
++    io,
++    os::unix::net::UnixDatagram,
++    path::PathBuf,
++    sync::Mutex,
++    time::{Duration, Instant},
++};
++
++use gpui::TestAppContext;
++
++use super::{TaskOutcomeDatagram, send};
++use crate::tasks_card::test_helpers::*;
++
++pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
++
++fn set_runtime_dir(dir: Option<&std::path::Path>) {
++    // SAFETY: serialised by ENV_LOCK; no other thread of these tests reads it meanwhile.
++    unsafe {
++        match dir {
++            Some(dir) => std::env::set_var("XDG_RUNTIME_DIR", dir),
++            None => std::env::remove_var("XDG_RUNTIME_DIR"),
++        }
++    }
++}
++
++/// A runtime dir with the daemon's socket bound in it, as zeo-systray binds it.
++fn bound_socket() -> (tempfile::TempDir, UnixDatagram) {
++    let dir = tempfile::tempdir().expect("tempdir");
++    let socket = UnixDatagram::bind(dir.path().join("zeo-systray.sock")).expect("bind");
++    socket.set_nonblocking(true).expect("nonblocking");
++    (dir, socket)
++}
++
++fn receive(socket: &UnixDatagram) -> Option<serde_json::Value> {
++    let mut buffer = vec![0u8; 64 * 1024];
++    match socket.recv(&mut buffer) {
++        Ok(n) => Some(serde_json::from_slice(&buffer[..n]).expect("a JSON datagram")),
++        Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
++        Err(error) => panic!("recv failed: {error}"),
++    }
++}
++
++fn datagram() -> TaskOutcomeDatagram {
++    TaskOutcomeDatagram {
++        task_outcome: "failed",
++        session_id: "sess-013".into(),
++        task_id: "task-7".into(),
++        cwd: "/home/user/zed-patches".into(),
++        project: "zed-patches".into(),
++        thread_title: Some("Bump the series".into()),
++        task_type: "shell".into(),
++        duration_ms: 20_500,
++    }
++}
++
++// ---- send() -------------------------------------------------------------------------
++
++#[test]
++fn test_send_delivers_one_datagram_to_the_daemon_socket() {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    send(&datagram()).expect("the send succeeds");
++    let received = receive(&socket).expect("one datagram arrived");
++    assert_eq!(received["task_id"], "task-7");
++    assert_eq!(received["task_outcome"], "failed");
++    assert!(receive(&socket).is_none(), "exactly one datagram");
++    set_runtime_dir(None);
++}
++
++/// R5.4, hostile half: an absent socket must fail fast, never wait.
++#[test]
++fn test_send_to_an_absent_socket_fails_without_blocking() {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let dir = tempfile::tempdir().expect("tempdir");
++    set_runtime_dir(Some(dir.path()));
++
++    let started = Instant::now();
++    let result = send(&datagram());
++    assert!(result.is_err(), "nobody is listening: the caller is told");
++    assert!(started.elapsed() < Duration::from_secs(1));
++    set_runtime_dir(None);
++}
++
++/// R5.4, the converse: a daemon that is alive but not reading must not freeze the
++/// sender either. A blocking socket would hang here once the queue is full.
++#[test]
++fn test_send_to_a_full_socket_returns_instead_of_blocking() {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, _socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let started = Instant::now();
++    let mut refused = false;
++    for _ in 0..100_000 {
++        if send(&datagram()).is_err() {
++            refused = true;
++            break;
++        }
++    }
++    assert!(refused, "a never-read socket fills and refuses");
++    assert!(started.elapsed() < Duration::from_secs(10));
++    set_runtime_dir(None);
++}
++
++/// No runtime dir: no socket to reach, and never a fallback to a world-readable
++/// path such as /tmp.
++#[test]
++fn test_send_without_a_runtime_dir_is_a_quiet_no_op() {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    set_runtime_dir(None);
++    let tmp_socket = PathBuf::from("/tmp/zeo-systray.sock");
++    let existed = tmp_socket.exists();
++    assert!(send(&datagram()).is_ok());
++    assert_eq!(
++        tmp_socket.exists(),
++        existed,
++        "nothing is created under /tmp"
++    );
++}
++
++// ---- wiring: TaskEnded -> decide -> send ---------------------------------------------
++
++/// A watched task ending while Zeo's window is not active sends one datagram for it,
++/// carrying the thread's session, the task, the work dir and its project label.
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_a_watched_task_ending_out_of_view_reaches_the_socket(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "Bump the series", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id, cx));
++
++    cx.deactivate_window();
++    send_tasks(&a, vec![wire_task("t1", "completed", true, 1_000)], &mut cx);
++    cx.run_until_parked();
++
++    let received = receive(&socket).expect("the watched task's end was sent");
++    assert_eq!(received["task_outcome"], "completed");
++    assert_eq!(received["session_id"], sa.to_string());
++    assert_eq!(received["task_id"], "t1");
++    assert_eq!(received["thread_title"], "Bump the series");
++    assert_eq!(received["task_type"], "shell");
++    assert_eq!(received["cwd"], "/project");
++    assert_eq!(received["project"], "project");
++    assert_eq!(received["duration_ms"], 1_000);
++    assert!(receive(&socket).is_none(), "one datagram per ending");
++    set_runtime_dir(None);
++}
++
++/// Hostile halves: an unwatched completion sends nothing; a failure while the
++/// user is looking at that very thread sends nothing; and a failure in ANOTHER
++/// thread than the one shown is out of view, so it is sent.
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_only_out_of_view_endings_that_matter_reach_the_socket(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("a1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(
++        &b,
++        vec![
++            wire_task("b1", "running", true, 2_000),
++            wire_task("b2", "running", true, 3_000),
++        ],
++        &mut cx,
++    );
++    cx.update(|window, _| window.activate_window());
++    cx.run_until_parked();
++
++    // Unwatched, completed, out of view (window inactive): silence.
++    cx.deactivate_window();
++    send_tasks(
++        &b,
++        vec![
++            wire_task("b1", "completed", true, 2_000),
++            wire_task("b2", "running", true, 3_000),
++        ],
++        &mut cx,
++    );
++    assert!(
++        receive(&socket).is_none(),
++        "an unwatched completion is not notified"
++    );
++
++    // B is the thread shown and the window is active: a failure in B is in view.
++    cx.update(|window, _| window.activate_window());
++    cx.run_until_parked();
++    send_tasks(&b, vec![wire_task("b2", "failed", true, 3_000)], &mut cx);
++    assert!(
++        receive(&socket).is_none(),
++        "a failure in view is not notified"
++    );
++
++    // A is not the thread shown: its failure is out of view even with focus.
++    send_tasks(&a, vec![wire_task("a1", "failed", true, 1_000)], &mut cx);
++    let received = receive(&socket).expect("a failure in another thread is sent");
++    assert_eq!(received["task_id"], "a1");
++    assert_eq!(received["session_id"], session_of(&a, &cx).to_string());
++    assert!(receive(&socket).is_none());
++    set_runtime_dir(None);
++}
++
++/// R5.4 in the wiring: with no daemon listening, an ending that would notify is
++/// dropped — the card still shows the ended row and nothing panics or stalls.
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_an_absent_daemon_drops_the_datagram_and_the_card_carries_on(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let dir = tempfile::tempdir().expect("tempdir");
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let _b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(&a, vec![wire_task("a1", "running", true, 1_000)], &mut cx);
++    cx.deactivate_window();
++    send_tasks(&a, vec![wire_task("a1", "failed", true, 1_000)], &mut cx);
++    cx.run_until_parked();
++
++    let card = card(&panel, &cx);
++    let row = find_row(&card, &session_of(&a, &cx), "a1", &mut cx).expect("ended row on show");
++    assert!(row.error.is_none(), "a tray failure is not a task error");
++    set_runtime_dir(None);
++}
++
++/// Story 012 announces a running task that vanishes from a snapshot as
++/// `Interrupted`. A watched one, out of view, is therefore notified as interrupted
++/// — once.
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_a_watched_task_that_vanishes_is_sent_as_interrupted(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let sa = session_of(&a, &cx);
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id, cx));
++
++    cx.deactivate_window();
++    send_tasks(&a, vec![], &mut cx);
++    send_tasks(&a, vec![], &mut cx);
++
++    let received = receive(&socket).expect("the vanished task's end was sent");
++    assert_eq!(received["task_outcome"], "interrupted");
++    assert_eq!(received["task_id"], "t1");
++    assert!(receive(&socket).is_none(), "announced once");
++    set_runtime_dir(None);
++}
++
++/// A thread with no work directory still notifies: cwd "" and project "Zeo".
++#[gpui::test]
++#[allow(
++    clippy::await_holding_lock,
++    reason = "the gpui test executor is single-threaded; the lock only serialises XDG_RUNTIME_DIR against the other tests"
++)]
++async fn test_a_thread_without_a_work_dir_sends_an_empty_cwd_and_zeo(cx: &mut TestAppContext) {
++    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++    let (dir, socket) = bound_socket();
++    set_runtime_dir(Some(dir.path()));
++
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::without_work_dirs();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let _b = open_titled_thread(&panel, &TaskActionsConnection::new(), "B", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "failed", true, 1_000)], &mut cx);
++
++    let received = receive(&socket).expect("a failure out of view is sent");
++    assert_eq!(received["cwd"], "");
++    assert_eq!(received["project"], "Zeo");
++    assert_eq!(received["session_id"], session_of(&a, &cx).to_string());
++    set_runtime_dir(None);
++}
+diff --git a/crates/agent_ui/src/tasks_card/tray/wiring_tests.rs b/crates/agent_ui/src/tasks_card/tray/wiring_tests.rs
+new file mode 100644
+index 0000000..27975cb
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/tray/wiring_tests.rs
+@@ -0,0 +1,170 @@
++// Story 013 / task 6.2 review — what the card asks before telling the tray, and
++// the cap on the title it sends. Filter: `tasks_card::tray::wiring`.
++//
++// These tests ask the card's `in_view` query directly, as `tell_tray` does, rather
++// than reading a socket: `XDG_RUNTIME_DIR` is process-wide, so any test that binds
++// one must hold `send_tests.rs`'s `ENV_LOCK`. The lock is reachable from here, but
++// asking the query keeps these tests off the variable altogether — and pins the
++// in-view answer itself, not a datagram that merely failed to arrive.
++
++use acp_thread::AgentTask;
++use agent_client_protocol::schema::v1 as acp;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use project::Project;
++use workspace::MultiWorkspace;
++
++use super::{MAX_TITLE_CHARS, datagram_for};
++use crate::AgentPanel;
++use crate::tasks_card::TasksCard;
++use crate::tasks_card::test_helpers::*;
++
++/// The card's answer to "is this session's thread in front of the user?".
++fn in_view(card: &Entity<TasksCard>, session: &acp::SessionId, cx: &mut VisualTestContext) -> bool {
++    card.update(cx, |card, cx| {
++        card.in_view
++            .as_ref()
++            .is_some_and(|query| query(session, cx))
++    })
++}
++
++/// One window, two workspaces: switching the window to the other workspace keeps
++/// the first alive with its agent panel still "active", so the panel's own flag
++/// cannot tell that its thread left the screen. The displayed workspace does.
++#[gpui::test]
++async fn test_a_thread_in_a_workspace_the_window_no_longer_displays_is_out_of_view(
++    cx: &mut TestAppContext,
++) {
++    let (panel_a, workspace_a, mut cx) = setup_card_panel_in_workspace(cx).await;
++    let connection = TaskActionsConnection::new();
++    let thread = open_titled_thread(&panel_a, &connection, "T", &mut cx);
++    let session = session_of(&thread, &cx);
++    let card = card(&panel_a, &cx);
++    cx.update(|window, _| window.activate_window());
++    cx.run_until_parked();
++
++    // Control: active window, A displayed, its panel open on T.
++    assert!(in_view(&card, &session, &mut cx), "T is on screen in A");
++
++    let multi_workspace = cx
++        .update(|window, _| window.root::<MultiWorkspace>().flatten())
++        .expect("the window's root is a MultiWorkspace");
++    let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
++    let project_b = Project::test(fs, [], &mut cx).await;
++    let workspace_b = multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
++        multi_workspace.test_add_workspace(project_b, window, cx)
++    });
++    cx.run_until_parked();
++    multi_workspace.read_with(&cx, |multi_workspace, cx| {
++        assert!(
++            multi_workspace.multi_workspace_enabled(cx),
++            "A is retained, not dropped"
++        );
++        assert_eq!(multi_workspace.workspace(), &workspace_b, "B is displayed");
++    });
++    assert!(
++        panel_a.read_with(&cx, |panel, cx| panel.active_agent_thread(cx).is_some()),
++        "A's panel still holds T"
++    );
++    assert!(
++        !in_view(&card, &session, &mut cx),
++        "T left the screen with A"
++    );
++
++    // Converse: back on A, T is in view again.
++    multi_workspace.update_in(&mut cx, |multi_workspace, window, cx| {
++        multi_workspace.activate(workspace_a.clone(), None, window, cx)
++    });
++    cx.run_until_parked();
++    assert!(
++        in_view(&card, &session, &mut cx),
++        "T is back on screen with A"
++    );
++}
++
++/// R5.3: the window is active and T is the panel's active thread, but the panel is
++/// closed — T is not in front of the user. Closed through the workspace's dock path
++/// (`close_panel` → `Dock::set_open(false)` → `Panel::set_active(false)`), the same
++/// route the dock actions take, rather than by setting the panel's flag directly.
++#[gpui::test]
++async fn test_a_thread_in_a_closed_agent_panel_is_out_of_view(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_card_panel_in_workspace(cx).await;
++    let connection = TaskActionsConnection::new();
++    let thread = open_titled_thread(&panel, &connection, "T", &mut cx);
++    let session = session_of(&thread, &cx);
++    let card = card(&panel, &cx);
++    cx.update(|window, _| window.activate_window());
++    cx.run_until_parked();
++
++    // Control: active window, panel open on T.
++    assert!(in_view(&card, &session, &mut cx), "T is on screen");
++
++    workspace.update_in(&mut cx, |workspace, window, cx| {
++        workspace.close_panel::<AgentPanel>(window, cx)
++    });
++    cx.run_until_parked();
++    assert!(
++        cx.update(|window, _| window.is_window_active()),
++        "the window is still active"
++    );
++    assert!(
++        panel
++            .read_with(&cx, |panel, cx| panel.active_agent_thread(cx))
++            .is_some_and(|active| active == thread),
++        "the closed panel still holds T as its active thread"
++    );
++    assert!(
++        !in_view(&card, &session, &mut cx),
++        "T left the screen with the panel"
++    );
++
++    // Converse: reopened, T is in view again.
++    workspace.update_in(&mut cx, |workspace, window, cx| {
++        workspace.open_panel::<AgentPanel>(window, cx)
++    });
++    cx.run_until_parked();
++    assert!(
++        in_view(&card, &session, &mut cx),
++        "T is back on screen with the panel"
++    );
++}
++
++/// A task of a thread titled `title`, ended, ready for `datagram_for`.
++async fn ended_task_titled(
++    title: &str,
++    cx: &mut TestAppContext,
++) -> (AgentTask, acp::SessionId, VisualTestContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let thread = open_titled_thread(&panel, &connection, title, &mut cx);
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "failed", true, 1_000)],
++        &mut cx,
++    );
++    let task = thread
++        .read_with(&cx, |thread, _| thread.tasks().first().cloned())
++        .expect("the task is in the model");
++    (task, session_of(&thread, &cx), cx)
++}
++
++/// A title of any length leaves Zeo cut to `MAX_TITLE_CHARS` characters — on a
++/// character boundary, so a multi-byte title still serialises as valid UTF-8.
++#[gpui::test]
++async fn test_a_long_thread_title_is_capped_on_a_char_boundary(cx: &mut TestAppContext) {
++    let long = "é".repeat(100_000);
++    let (task, session, _visual) = ended_task_titled("T", cx).await;
++    let now = std::time::SystemTime::now();
++
++    let capped = datagram_for(&task, &session, None, Some(&long), now)
++        .expect("an ended task yields a datagram");
++    assert_eq!(capped.thread_title, Some("é".repeat(MAX_TITLE_CHARS)));
++    let wire = serde_json::to_vec(&capped).expect("the datagram serialises");
++    assert!(wire.len() < 64 * 1024, "fits the daemon's receive buffer");
++
++    // Converse: a title at the cap, or under it, is sent whole.
++    let at_cap = "a".repeat(MAX_TITLE_CHARS);
++    let whole = datagram_for(&task, &session, None, Some(&at_cap), now).unwrap();
++    assert_eq!(whole.thread_title.as_deref(), Some(at_cap.as_str()));
++    let short = datagram_for(&task, &session, None, Some("Bump"), now).unwrap();
++    assert_eq!(short.thread_title.as_deref(), Some("Bump"));
++}
