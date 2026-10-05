@@ -11,8 +11,13 @@
 # consent dialog, and no input can reach a display the run did not start.
 #
 # Steps use live-proof.py's JSON format -- an array of one-key objects:
-#   {"type": "<text>"} | {"key": ["<keysym>", ...]} | {"click": [x, y]} |
-#   {"move": [x, y]} | {"sleep": <seconds, at most 60>} | {"shot": "<path.png>"}
+#   {"type": "<text>"} | {"key": ["<keysym>", ...]} | {"chord": ["<mod>", ..., "<key>"]} |
+#   {"click": [x, y]} | {"move": [x, y]} | {"sleep": <seconds, at most 60>} |
+#   {"shot": "<path.png>"}
+# A live-proof.py script without focus or drag steps runs here unchanged. One
+# extension: a "key" name may be an xdotool combination ("ctrl+shift+p"), which
+# live-proof.py rejects -- use "chord" in a script meant for both. A "window" field
+# beside "shot" is accepted and ignored: the capture is always the whole screen.
 # The whole script is validated before anything starts; --dry-run stops there and
 # prints the plan.
 #
@@ -25,7 +30,8 @@
 # Wayland, not GPU rendering.
 #
 # Test hooks: XVFB_PROOF_X11_ROOT (default /tmp, where .X11-unix and .X<N>-lock
-# live), XVFB_PROOF_XVFB_TIMEOUT (5 s), XVFB_PROOF_WINDOW_TIMEOUT (60 s).
+# live), XVFB_PROOF_TMP_ROOT (default /tmp, where the zp-XXXX directory is made),
+# XVFB_PROOF_XVFB_TIMEOUT (5 s), XVFB_PROOF_WINDOW_TIMEOUT (60 s).
 #
 # Exit: 0 ok · 1 refused/failed · 2 environment problem.
 
@@ -70,12 +76,17 @@ usage() {
 parse_args() {
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
-		--steps) STEPS_FILE="${2-}" && shift ;;
+		--steps | --binary | --settings | --keymap | --keep)
+			[[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die 2 "$1 needs a value"
+			;;
+		esac
+		case "$1" in
+		--steps) STEPS_FILE="$2" && shift ;;
 		--dry-run) DRY_RUN=1 ;;
-		--binary) BINARY="${2-}" && shift ;;
-		--settings) SETTINGS="${2-}" && shift ;;
-		--keymap) KEYMAP="${2-}" && shift ;;
-		--keep) KEEP="${2-}" && shift ;;
+		--binary) BINARY="$2" && shift ;;
+		--settings) SETTINGS="$2" && shift ;;
+		--keymap) KEYMAP="$2" && shift ;;
+		--keep) KEEP="$2" && shift ;;
 		-h | --help) usage ;;
 		*) die 2 "unknown argument: $1" ;;
 		esac
@@ -90,17 +101,19 @@ parse_args() {
 # accepted beside "shot" because live-proof.py reads it there.
 # shellcheck disable=SC2016  # jq program, not shell
 readonly STEP_CHECK='
-def kinds: ["type", "key", "click", "move", "sleep", "shot"];
+def kinds: ["type", "key", "chord", "click", "move", "sleep", "shot"];
 def point: type == "array" and length == 2 and all(.[]; type == "number" and . >= 0 and . == floor);
 def check($k; $v):
   if $k == "type" then ($v | type == "string" and length > 0) // false
   elif $k == "key" then ($v | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) // false
+  elif $k == "chord" then ($v | type == "array" and length >= 2 and all(.[]; type == "string" and length > 0)) // false
   elif $k == "click" or $k == "move" then ($v | point) // false
   elif $k == "sleep" then ($v | type == "number" and . > 0 and . <= 60) // false
   elif $k == "shot" then ($v | type == "string" and length > 0) // false
   else false end;
 def need($k):
   {"type": "a non-empty string", "key": "a non-empty list of keysyms",
+   "chord": "modifiers then a key, at least two keysyms",
    "click": "[x, y] in whole pixels", "move": "[x, y] in whole pixels", "sleep": "seconds, above 0 and at most 60",
    "shot": "a file path"}[$k];
 if type != "array" then "err\t0\t-\tthe step script is not a JSON array"
@@ -274,7 +287,8 @@ guard_display() {
 launch_zeo() {
 	local log="${WORKDIR}/zeo.log"
 	[[ -x "${BINARY}" ]] || die 2 "the editor is not executable: ${BINARY}"
-	mkdir -p "${WORKDIR}/config" "${WORKDIR}/cache" "${WORKDIR}/state"
+	mkdir -p "${WORKDIR}/config" "${WORKDIR}/cache" "${WORKDIR}/state" ||
+		die 2 "cannot create config/, cache/ and state/ under ${WORKDIR}"
 	if [[ -n "${SETTINGS}" ]]; then
 		cp -- "${SETTINGS}" "${WORKDIR}/config/settings.json" || die 2 "cannot copy the settings: ${SETTINGS}"
 	fi
@@ -357,6 +371,15 @@ run_steps() {
 		key)
 			mapfile -t keys < <(jq -r --argjson i "${i}" '.[$i].key[]' "${STEPS_FILE}")
 			xdo key -- "${keys[@]}" || die 1 "step ${n} (key): xdotool failed on ${keys[*]}"
+			;;
+		chord)
+			# live-proof.py's chord: modifiers held, the last name pressed.
+			mapfile -t keys < <(jq -r --argjson i "${i}" '.[$i].chord[]' "${STEPS_FILE}")
+			value="$(
+				IFS=+
+				printf '%s' "${keys[*]}"
+			)"
+			xdo key -- "${value}" || die 1 "step ${n} (chord): xdotool failed on ${value}"
 			;;
 		click | move)
 			read -r x y <<<"$(step_value "${i}" "${kind}")"

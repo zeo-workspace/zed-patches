@@ -95,8 +95,13 @@ When the proof does not need the real session, `scripts/xvfb-proof.sh` runs it o
 display of its own. It starts `Xvfb` on the first free `:N` from `:90`, launches Zeo
 there with `--user-data-dir`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` under one
 temporary directory, replays the step script with `xdotool` and keeps the captures
-`import` takes. The step script is `live-proof.py`'s format, restricted to `type`,
-`key`, `click`, `move`, `sleep` and `shot`.
+`import` takes. The step script is `live-proof.py`'s format — `type`, `key`, `chord`,
+`click`, `move`, `sleep` and `shot`; `focus` and `drag` are rejected — so a
+`live-proof.py` script without those two runs here unchanged. The reverse holds only
+with one care: `key` here also accepts an xdotool combination such as `ctrl+shift+p`,
+which `live-proof.py` refuses, so a script meant for both writes combinations as
+`chord`. A `window` field beside `shot` is accepted and ignored: the capture is always
+the whole virtual screen.
 
 ```sh
 scripts/xvfb-proof.sh --steps scripts/examples/xvfb-proof-smoke.json   # opens the agent panel, captures it

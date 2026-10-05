@@ -1,7 +1,7 @@
 [
   {"sleep": 3},
   {"shot": "/tmp/xvfb-proof-smoke-start.png"},
-  {"key": ["ctrl+shift+p"]},
+  {"chord": ["Control_L", "Shift_L", "p"]},
   {"sleep": 1},
   {"type": "agent: toggle focus"},
   {"sleep": 1},

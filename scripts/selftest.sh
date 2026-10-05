@@ -1461,6 +1461,7 @@ test_protocol_still_reports_drift_on_an_answering_lock() {
 #
 # Behaviour switches, read by the stubs at run time:
 #   XVFB_STUB_DIE=1        Xvfb exits at once, creating no socket
+#   XVFB_STUB_NO_SOCKET=1  Xvfb stays alive but never creates its socket
 #   ZEO_STUB_NO_WINDOW=1   the editor never shows a window
 #   ZEO_STUB_IGNORE_TERM=1 the editor ignores SIGTERM and must be killed
 #   XDOTOOL_STUB_FAIL=<sub> xdotool exits 1 when its first argument is <sub>
@@ -1472,8 +1473,10 @@ make_xvfb_stubs() {
 #!/usr/bin/env bash
 printf 'DISPLAY=%s Xvfb %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
 [[ -z "${XVFB_STUB_DIE-}" ]] || exit 1
-mkdir -p "${XVFB_PROOF_X11_ROOT}/.X11-unix"
-: >"${XVFB_PROOF_X11_ROOT}/.X11-unix/X${1#:}"
+if [[ -z "${XVFB_STUB_NO_SOCKET-}" ]]; then
+	mkdir -p "${XVFB_PROOF_X11_ROOT}/.X11-unix"
+	: >"${XVFB_PROOF_X11_ROOT}/.X11-unix/X${1#:}"
+fi
 printf '%s\n' "$$" >>"${STUB_PIDS}"
 exec sleep 300
 STUB
@@ -1874,6 +1877,60 @@ test_xvfb_proof_lifecycle_keep_reuses_and_preserves() {
 	rm -rf "${tmp}"
 }
 
+test_xvfb_proof_steps_chord_needs_two_names() {
+	case_start "xvfb-proof: a chord with fewer than two names exits 1 naming index and kind (R2.2)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	printf '[{"chord": ["Control_L", "Shift_L", "p"]}, {"chord": ["p"]}]' >"${tmp}/steps.json"
+	out="$(run_xvfb_proof "${tmp}" --steps "${tmp}/steps.json" --dry-run)"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "step 2 (chord)" &&
+		assert_not_contains "${out}" "step 1" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drive_sends_a_chord_as_one_combination() {
+	case_start "xvfb-proof: live-proof.py's chord becomes one xdotool key with + (R2.1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"chord": ["Control_L", "Shift_L", "p"]}]')")"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_contains "$(stub_log "${tmp}")" "DISPLAY=:90 xdotool key -- Control_L+Shift_L+p" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_steps_option_without_value_exits_2() {
+	case_start "xvfb-proof: an option given without its value exits 2 naming the option"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps)"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "--steps" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_display_socketless_xvfb_times_out() {
+	case_start "xvfb-proof: an Xvfb alive without its socket exits 2 naming the timeout, and is stopped (R1.1)"
+	local tmp out status pid
+	tmp="$(mktemp -d)"
+	out="$(XVFB_STUB_NO_SOCKET=1 run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "within 2 s" &&
+		assert_not_contains "$(stub_log "${tmp}")" " zeo " && {
+		pid="$(head -n 1 "${tmp}/stub.pids")"
+		! kill -0 "${pid}" 2>/dev/null || {
+			kill -KILL "${pid}"
+			no "the socketless Xvfb outlived the run"
+			false
+		}
+	} && ok
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
 # main [<filter>] — run every case, or only those whose function name contains
@@ -1973,6 +2030,12 @@ main() {
 		test_xvfb_proof_lifecycle_stops_everything_on_failure
 		test_xvfb_proof_lifecycle_stops_everything_on_sigterm
 		test_xvfb_proof_lifecycle_keep_reuses_and_preserves
+
+		test_xvfb_proof_steps_chord_needs_two_names
+		test_xvfb_proof_drive_sends_a_chord_as_one_combination
+
+		test_xvfb_proof_steps_option_without_value_exits_2
+		test_xvfb_proof_display_socketless_xvfb_times_out
 	)
 
 	for t in "${tests[@]}"; do
