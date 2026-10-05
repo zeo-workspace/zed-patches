@@ -226,6 +226,13 @@
 0035-agent-tasks-panel.patch
 # after 0035: one-line labels in 0037's card and 0035's panel, and the panel's Rename (story 022).
 0039-agent-task-labels.patch
+# 0040: one router, agent_ui::open_agent_session, opens a session in the
+# window that holds its project's folders (exact set, else a new window),
+# raising it; the tray link (0024) and the Agent Tasks panel (0035) both call
+# it, and the panel no longer re-enters itself from its click listener
+# (story 024). After 0035 and 0039, whose open_task and rows it changes, so
+# it rides this flag BY DEPENDENCY.
+0040-agent-route-sessions-to-their-project-window.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
