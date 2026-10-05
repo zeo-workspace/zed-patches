@@ -1,0 +1,11 @@
+[
+  {"sleep": 3},
+  {"shot": "/tmp/xvfb-proof-smoke-start.png"},
+  {"key": ["ctrl+shift+p"]},
+  {"sleep": 1},
+  {"type": "agent: toggle focus"},
+  {"sleep": 1},
+  {"key": ["Return"]},
+  {"sleep": 3},
+  {"shot": "/tmp/xvfb-proof-smoke.png"}
+]

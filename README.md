@@ -66,6 +66,7 @@ isolation — the default run applies **every** patch, which is the strictest ca
 | `scripts/patch-branches.sh <PF> [--force]` | rebuild one branch per patch in the prepared tree, so a patch can be fixed as code |
 | `scripts/selftest.sh` | unit coverage, entirely on temporary fixtures — never touches the overlay or the real distfile |
 | `scripts/live-proof.py script <steps.json>` | drive a running Zed through the desktop portal and capture what a patch renders — the half `verify.sh` cannot answer |
+| `scripts/xvfb-proof.sh --steps <steps.json> [--dry-run] [--binary <path>] [--settings <f>] [--keymap <f>] [--keep <dir>]` | the same proof on a private `Xvfb` with an isolated Zeo — no consent dialog, and no input can reach the operator's desktop; see [Proving a patch in a running editor](#proving-a-patch-in-a-running-editor) |
 | `scripts/kwin-window.sh active\|list\|focus\|desktop\|setdesktop` | query or switch KWin windows and virtual desktops without injecting input |
 
 Exit codes are uniform: `0` success · `1` a patch did not apply · `2` environment
@@ -87,6 +88,46 @@ not need:
   evidence.
 - **Windows are matched by project, never by caption.** A caption is
   `<project> — <open file>` and the file half changes when a tab does.
+
+#### Without touching the desktop: `xvfb-proof.sh`
+
+When the proof does not need the real session, `scripts/xvfb-proof.sh` runs it on a
+display of its own. It starts `Xvfb` on the first free `:N` from `:90`, launches Zeo
+there with `--user-data-dir`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` under one
+temporary directory, replays the step script with `xdotool` and keeps the captures
+`import` takes. The step script is `live-proof.py`'s format, restricted to `type`,
+`key`, `click`, `move`, `sleep` and `shot`.
+
+```sh
+scripts/xvfb-proof.sh --steps scripts/examples/xvfb-proof-smoke.json   # opens the agent panel, captures it
+scripts/xvfb-proof.sh --steps my.json --dry-run                        # validate and print the plan only
+scripts/xvfb-proof.sh --steps my.json --binary work/<tree>/target/release/zed   # a freshly built tree
+scripts/xvfb-proof.sh --steps my.json --keep /tmp/zp-mine              # keep state; a second run reopens its threads
+scripts/selftest.sh xvfb_proof                                         # its tests, every tool stubbed
+```
+
+Its guards:
+
+- **Input goes only to the display it started.** Every input step re-checks that the
+  target is the live `Xvfb` of this run and not the operator's `$DISPLAY`, and exits
+  1 otherwise.
+- **The whole step script is validated before anything starts**: an unknown kind or
+  a missing field exits 1 naming the step, with no display and no Zeo created.
+- **A separate instance, never an attach.** `--user-data-dir` gives it its own CLI
+  socket, so it runs beside the operator's Zeo. `ZED_STATELESS` is stripped, not
+  set, so `--keep` really keeps threads. The directory must stay within 60 bytes
+  (a Unix socket lives under it), or the run exits 2.
+- **Captures are verified**: one under 200 px on a side is deleted and the run exits 1.
+- **Nothing outlives the run.** On success, failure or a signal it stops Zeo — as a
+  process group, so its agent servers go too — and `Xvfb`, escalating to `SIGKILL`
+  after 5 s, and removes the temporary directory unless `--keep` named it.
+
+What it does not cover: **X11 only** (`WAYLAND_DISPLAY` is emptied) and **software
+rendering** (`llvmpipe`, with `ZED_ALLOW_EMULATED_GPU=1` silencing the GPU dialog), so
+a Wayland- or GPU-specific defect stays `live-proof.py`'s to catch. There is no window
+manager either: the window opens at Zeo's default size rather than maximised,
+coordinates are screen coordinates, and keyboard focus follows the pointer on the
+root window — which is enough for the smoke script to reach the editor.
 
 Captures belong under `docs/assets/` in the orchestration repository, versioned
 beside the report that cites them — never under `.epic/`, which is gitignored, and
