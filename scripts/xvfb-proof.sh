@@ -42,6 +42,22 @@ SETTINGS=""
 KEYMAP=""
 KEEP=""
 
+X11_ROOT="${XVFB_PROOF_X11_ROOT:-/tmp}"
+TMP_ROOT="${XVFB_PROOF_TMP_ROOT:-/tmp}"
+XVFB_TIMEOUT="${XVFB_PROOF_XVFB_TIMEOUT:-5}"
+WINDOW_TIMEOUT="${XVFB_PROOF_WINDOW_TIMEOUT:-60}"
+
+# Zeo's sockets live under its data dir, and a Unix socket path is capped near
+# 108 bytes; 60 leaves room for the names Zeo appends.
+readonly MAX_WORKDIR_BYTES=60
+
+# Run state: only what this run started is ever driven or stopped.
+WORKDIR=""
+XVFB_DISPLAY=""
+XVFB_PID=""
+ZEO_PID=""
+WINDOW_ID=""
+
 # One entry per step, filled by validate_steps; values are read back from the file.
 STEP_KINDS=()
 
@@ -134,12 +150,129 @@ print_plan() {
 	done
 }
 
+# --- isolation ----------------------------------------------------------------
+
+setup_workdir() {
+	WORKDIR="$(mktemp -d "${TMP_ROOT}/zp-XXXX")" || die 2 "cannot create a temporary directory under ${TMP_ROOT}"
+	printf 'workdir: %s\n' "${WORKDIR}"
+	[[ "${#WORKDIR}" -le "${MAX_WORKDIR_BYTES}" ]] ||
+		die 2 "the isolated directory is ${#WORKDIR} bytes, over the ${MAX_WORKDIR_BYTES} bytes a Unix socket under it allows: ${WORKDIR}"
+}
+
+cleanup() {
+	[[ -z "${ZEO_PID}" ]] || kill -TERM "${ZEO_PID}" 2>/dev/null || true
+	[[ -z "${XVFB_PID}" ]] || kill -TERM "${XVFB_PID}" 2>/dev/null || true
+	[[ -z "${WORKDIR}" ]] || rm -rf "${WORKDIR}"
+}
+
+# display_number <display> — the N of [host]:N[.screen], empty when there is none.
+display_number() {
+	local d="${1##*:}"
+	d="${d%%.*}"
+	[[ "${d}" =~ ^[0-9]+$ ]] && printf '%s' "${d}"
+	return 0
+}
+
+# pick_display — the first :N (N >= 90) with neither a socket nor a lock file.
+pick_display() {
+	local n
+	for ((n = 90; n < 200; n++)); do
+		[[ -e "${X11_ROOT}/.X11-unix/X${n}" || -e "${X11_ROOT}/.X${n}-lock" ]] && continue
+		printf ':%d' "${n}"
+		return 0
+	done
+	die 2 "no free display between :90 and :199 under ${X11_ROOT}"
+}
+
+start_xvfb() {
+	local display log tries
+	display="$(pick_display)"
+	log="${WORKDIR}/xvfb.log"
+	Xvfb "${display}" -screen 0 1920x1080x24 >"${log}" 2>&1 &
+	XVFB_PID=$!
+	XVFB_DISPLAY="${display}"
+	for ((tries = XVFB_TIMEOUT * 10; tries > 0; tries--)); do
+		kill -0 "${XVFB_PID}" 2>/dev/null ||
+			die 2 "Xvfb exited while starting on ${display} (log: ${log})"
+		[[ -e "${X11_ROOT}/.X11-unix/X${display#:}" ]] && {
+			printf 'display: %s (Xvfb pid %s)\n' "${display}" "${XVFB_PID}"
+			return 0
+		}
+		sleep 0.1
+	done
+	die 2 "Xvfb did not start on ${display} within ${XVFB_TIMEOUT} s (log: ${log})"
+}
+
+# guard_display <display> — exit 1 unless <display> is the live Xvfb this run
+# started and is not the operator's own DISPLAY. Called before Zeo is launched
+# onto it and again before every input step.
+guard_display() {
+	local target="$1" mine
+	[[ -n "${XVFB_DISPLAY}" && "${target}" == "${XVFB_DISPLAY}" ]] ||
+		die 1 "refusing input on ${target}: this run did not start it"
+	mine="$(display_number "${DISPLAY-}")"
+	[[ -z "${mine}" || "${mine}" != "$(display_number "${target}")" ]] ||
+		die 1 "refusing input on ${target}: it is the operator's DISPLAY (${DISPLAY})"
+	kill -0 "${XVFB_PID}" 2>/dev/null ||
+		die 1 "refusing input on ${target}: the Xvfb this run started is gone"
+}
+
+# launch_zeo — start the editor on the private display with state of its own.
+#
+# --user-data-dir alone makes it a separate instance: on Linux the socket a second
+# launch would hand its arguments to lives under the data dir. ZED_STATELESS is
+# stripped rather than set, so a --keep directory keeps its threads.
+launch_zeo() {
+	local log="${WORKDIR}/zeo.log"
+	[[ -x "${BINARY}" ]] || die 2 "the editor is not executable: ${BINARY}"
+	mkdir -p "${WORKDIR}/config" "${WORKDIR}/cache" "${WORKDIR}/state"
+	if [[ -n "${SETTINGS}" ]]; then
+		cp -- "${SETTINGS}" "${WORKDIR}/config/settings.json" || die 2 "cannot copy the settings: ${SETTINGS}"
+	fi
+	if [[ -n "${KEYMAP}" ]]; then
+		cp -- "${KEYMAP}" "${WORKDIR}/config/keymap.json" || die 2 "cannot copy the keymap: ${KEYMAP}"
+	fi
+	guard_display "${XVFB_DISPLAY}"
+	env -u ZED_STATELESS \
+		WAYLAND_DISPLAY= \
+		DISPLAY="${XVFB_DISPLAY}" \
+		ZED_ALLOW_EMULATED_GPU=1 \
+		XDG_CACHE_HOME="${WORKDIR}/cache" \
+		XDG_STATE_HOME="${WORKDIR}/state" \
+		"${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
+	ZEO_PID=$!
+	printf 'zeo: pid %s, log %s\n' "${ZEO_PID}" "${log}"
+}
+
+# wait_for_window — the first visible window on the private display, or exit 2.
+wait_for_window() {
+	local log="${WORKDIR}/zeo.log" tries
+	for ((tries = WINDOW_TIMEOUT * 2; tries > 0; tries--)); do
+		kill -0 "${ZEO_PID}" 2>/dev/null ||
+			die 2 "Zeo exited before showing a window (log: ${log})"
+		WINDOW_ID="$(DISPLAY="${XVFB_DISPLAY}" xdotool search --onlyvisible --name . 2>/dev/null | head -n 1)" || true
+		if [[ -n "${WINDOW_ID}" ]]; then
+			printf 'window: %s\n' "${WINDOW_ID}"
+			return 0
+		fi
+		sleep 0.5
+	done
+	die 2 "no Zeo window appeared within ${WINDOW_TIMEOUT} s (log: ${log})"
+}
+
 main() {
 	parse_args "$@"
 	validate_steps
 	print_plan
 	[[ "${DRY_RUN}" -eq 0 ]] || exit 0
-	die 2 "only --dry-run is implemented"
+	trap cleanup EXIT
+	command -v Xvfb >/dev/null || die 2 "Xvfb is not on PATH"
+	command -v xdotool >/dev/null || die 2 "xdotool is not on PATH"
+	setup_workdir
+	start_xvfb
+	launch_zeo
+	wait_for_window
+	die 2 "driving is not implemented"
 }
 
 main "$@"

@@ -1482,6 +1482,11 @@ printf 'DISPLAY=%s zeo %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
 printf 'env WAYLAND_DISPLAY=[%s] XDG_CACHE_HOME=%s XDG_STATE_HOME=%s ZED_ALLOW_EMULATED_GPU=%s ZED_STATELESS=%s\n' \
 	"${WAYLAND_DISPLAY-unset}" "${XDG_CACHE_HOME-unset}" "${XDG_STATE_HOME-unset}" \
 	"${ZED_ALLOW_EMULATED_GPU-unset}" "${ZED_STATELESS-unset}" >>"${STUB_LOG}"
+udd=""
+for ((i = 1; i < $#; i++)); do
+	[[ "${!i}" == --user-data-dir ]] && j=$((i + 1)) && udd="${!j}"
+done
+printf 'config: %s\n' "$(cat "${udd}/config/settings.json" "${udd}/config/keymap.json" 2>/dev/null)" >>"${STUB_LOG}"
 echo "zeo stub started"
 [[ -n "${ZEO_STUB_NO_WINDOW-}" ]] || : >"${STUB_WINDOW}"
 printf '%s\n' "$$" >>"${STUB_PIDS}"
@@ -1596,6 +1601,115 @@ test_xvfb_proof_steps_unreadable_file_exits_2() {
 	rm -rf "${tmp}"
 }
 
+# one_step <tmp> <json> — a step script holding <json>, its path on stdout.
+one_step() {
+	printf '%s' "$2" >"$1/steps.json"
+	printf '%s' "$1/steps.json"
+}
+
+test_xvfb_proof_display_skips_a_locked_display() {
+	case_start "xvfb-proof: a display with a lock file is skipped; Xvfb starts on the next one (R1.1)"
+	local tmp out
+	tmp="$(mktemp -d)"
+	mkdir -p "${tmp}/x"
+	: >"${tmp}/x/.X90-lock"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	assert_contains "$(stub_log "${tmp}")" "Xvfb :91 -screen 0 1920x1080x24" &&
+		assert_not_contains "$(stub_log "${tmp}")" "Xvfb :90" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_display_refuses_the_operators_display() {
+	case_start "xvfb-proof: a target equal to \$DISPLAY is refused with exit 1 and no input (R1.2)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	# The operator's display is one the selection would pick: nothing on disk
+	# marks :90 as taken, so only the guard stands between the run and it.
+	out="$(XVFB_TEST_DISPLAY=:90 run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"key": ["Return"]}]')")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "refus" &&
+		assert_contains "${out}" ":90" &&
+		assert_not_contains "$(stub_log "${tmp}")" "xdotool key" &&
+		assert_not_contains "$(stub_log "${tmp}")" " zeo " && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_display_exits_2_when_xvfb_dies() {
+	case_start "xvfb-proof: an Xvfb that dies at start exits 2 naming the display (R1.1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(XVFB_STUB_DIE=1 run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" ":90" &&
+		assert_not_contains "$(stub_log "${tmp}")" " zeo " && ok
+	rm -rf "${tmp}"
+}
+
+# workdir_of <output> — the isolated directory the run announced.
+workdir_of() {
+	sed -n 's/^workdir: //p' <<<"$1" | head -n 1
+}
+
+test_xvfb_proof_launch_isolates_the_editor() {
+	case_start "xvfb-proof: Zeo gets its own data, cache and state dirs on the private display, X11 forced (R1.3, R1.4)"
+	local tmp out wd log
+	tmp="$(mktemp -d)"
+	out="$(ZED_STATELESS=1 run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	wd="$(workdir_of "${out}")"
+	log="$(stub_log "${tmp}")"
+	# ZED_STATELESS is exported on purpose: --keep only works if the harness
+	# strips it, because a stateless Zeo writes no threads to reopen.
+	[[ -n "${wd}" && "${#wd}" -le 60 ]] || no "workdir missing or over 60 bytes: [${wd}]"
+	[[ -n "${wd}" && "${#wd}" -le 60 ]] &&
+		assert_contains "${log}" "DISPLAY=:90 zeo --user-data-dir ${wd}" &&
+		assert_contains "${log}" "WAYLAND_DISPLAY=[]" &&
+		assert_contains "${log}" "XDG_CACHE_HOME=${wd}/cache" &&
+		assert_contains "${log}" "XDG_STATE_HOME=${wd}/state" &&
+		assert_contains "${log}" "ZED_ALLOW_EMULATED_GPU=1" &&
+		assert_contains "${log}" "ZED_STATELESS=unset" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_launch_copies_settings_and_keymap() {
+	case_start "xvfb-proof: --settings and --keymap land in the isolated config/ before launch (R1.5)"
+	local tmp
+	tmp="$(mktemp -d)"
+	printf '{"SETTINGS": 1}' >"${tmp}/settings.json"
+	printf '[{"KEYMAP": 1}]' >"${tmp}/keymap.json"
+	run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')" \
+		--settings "${tmp}/settings.json" --keymap "${tmp}/keymap.json" >/dev/null
+	assert_contains "$(stub_log "${tmp}")" 'config: {"SETTINGS": 1}[{"KEYMAP": 1}]' && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_launch_window_timeout_names_the_log() {
+	case_start "xvfb-proof: no window within the timeout exits 2 naming the timeout and Zeo's log (R2.3)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(ZEO_STUB_NO_WINDOW=1 XVFB_TEST_WINDOW_TIMEOUT=1 run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "within 1 s" &&
+		assert_contains "${out}" "$(workdir_of "${out}")/zeo.log" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_launch_refuses_an_overlong_path() {
+	case_start "xvfb-proof: an isolated directory over 60 bytes exits 2 before anything starts (R1.3)"
+	local tmp out status long
+	tmp="$(mktemp -d)"
+	long="${tmp}/$(printf 'd%.0s' {1..60})"
+	mkdir -p "${long}"
+	out="$(XVFB_PROOF_TMP_ROOT="${long}" run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "60 bytes" &&
+		assert_equal "" "$(stub_log "${tmp}")" && ok
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
 # main [<filter>] — run every case, or only those whose function name contains
@@ -1677,6 +1791,15 @@ main() {
 		test_xvfb_proof_steps_unknown_kind_names_index
 		test_xvfb_proof_steps_missing_field_exits_1
 		test_xvfb_proof_steps_unreadable_file_exits_2
+
+		test_xvfb_proof_display_skips_a_locked_display
+		test_xvfb_proof_display_refuses_the_operators_display
+		test_xvfb_proof_display_exits_2_when_xvfb_dies
+
+		test_xvfb_proof_launch_isolates_the_editor
+		test_xvfb_proof_launch_copies_settings_and_keymap
+		test_xvfb_proof_launch_window_timeout_names_the_log
+		test_xvfb_proof_launch_refuses_an_overlong_path
 	)
 
 	for t in "${tests[@]}"; do
