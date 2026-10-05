@@ -2408,6 +2408,24 @@ test_release_refuses_unreadable_changelog_as_environment() {
 	rm -rf "${tmp}"
 }
 
+# The release scripts print their own header comment as their help, so a
+# header that grows must not lose its last lines (story 028).
+test_release_help_prints_whole_header() {
+	case_start "release help: make-bin-release and release-zeo-bin print their whole header, exit 2"
+	local mbr zeo s1 s2
+	mbr="$(bash "${SCRIPTS}/make-bin-release.sh" 2>&1)"
+	s1=$?
+	zeo="$(bash "${SCRIPTS}/release-zeo-bin.sh" --help 2>&1)"
+	s2=$?
+	assert_status 2 "${s1}" && assert_status 2 "${s2}" &&
+		assert_contains "${mbr}" "Exit: 0 written or already published" &&
+		assert_contains "${mbr}" "name is already published with other bytes" &&
+		assert_contains "${zeo}" "Environment: ZP_RELEASE_TMPDIR" &&
+		assert_contains "${zeo}" "Exit: 0 written" &&
+		assert_not_contains "${mbr}${zeo}" "#!/usr/bin/env bash" &&
+		assert_not_contains "${mbr}${zeo}" "source " && ok
+}
+
 # --- runner -----------------------------------------------------------------
 
 # main [<filter>...] — run every case, or only those whose function name contains
@@ -2484,6 +2502,7 @@ main() {
 
 		test_release_refuses_version_without_changelog
 		test_release_refuses_unreadable_changelog_as_environment
+		test_release_help_prints_whole_header
 
 		test_refresh_preserves_source_set
 		test_refresh_refuses_existing_destination

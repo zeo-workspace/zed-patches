@@ -36,7 +36,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 RELEASE_USE="X wayland mimalloc claude-agent-acp-plus claude-agent-acp-tui claude-code-ide -test"
 
 usage() {
-	sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	# The whole leading comment block, so the help cannot fall behind the header.
+	awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 	exit 2
 }
 
