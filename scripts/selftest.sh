@@ -1464,6 +1464,8 @@ test_protocol_still_reports_drift_on_an_answering_lock() {
 #   XVFB_STUB_NO_SOCKET=1  Xvfb stays alive but never creates its socket
 #   ZEO_STUB_NO_WINDOW=1   the editor never shows a window
 #   ZEO_STUB_IGNORE_TERM=1 the editor ignores SIGTERM and must be killed
+#   ZEO_STUB_CRASH_CHILD=<file> the editor forks a child, records its PID in
+#                          <file> and exits at once, as a crash would
 #   XDOTOOL_STUB_FAIL=<sub> xdotool exits 1 when its first argument is <sub>
 #   IDENTIFY_STUB_GEOM     what identify reports ("1920 1080" when unset)
 make_xvfb_stubs() {
@@ -1493,6 +1495,11 @@ done
 printf 'config: %s\n' "$(cat "${udd}/config/settings.json" "${udd}/config/keymap.json" 2>/dev/null)" >>"${STUB_LOG}"
 echo "zeo stub started"
 [[ -n "${ZEO_STUB_NO_WINDOW-}" ]] || : >"${STUB_WINDOW}"
+if [[ -n "${ZEO_STUB_CRASH_CHILD-}" ]]; then
+	sleep 300 &
+	printf '%s\n' "$!" >"${ZEO_STUB_CRASH_CHILD}"
+	exit 3
+fi
 printf '%s\n' "$$" >>"${STUB_PIDS}"
 # An ignored signal stays ignored across exec: the sleep below then shrugs off
 # SIGTERM the way a hung editor would.
@@ -1931,6 +1938,36 @@ test_xvfb_proof_display_socketless_xvfb_times_out() {
 	rm -rf "${tmp}"
 }
 
+test_xvfb_proof_drive_sends_punctuation_as_keysyms() {
+	case_start "xvfb-proof: a one-character punctuation key reaches xdotool as its keysym, in key and chord (R2.1)"
+	local tmp out status log
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"key": ["/", "a", "Return"]}, {"chord": ["Control_L", "."]}]')")"
+	status=$?
+	log="$(stub_log "${tmp}")"
+	assert_status 0 "${status}" &&
+		assert_contains "${log}" "xdotool key -- 0x2f a Return" &&
+		assert_contains "${log}" "xdotool key -- Control_L+0x2e" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_lifecycle_stops_the_group_of_a_crashed_editor() {
+	case_start "xvfb-proof: a Zeo that crashed early leaves no child behind (R4.1)"
+	local tmp child
+	tmp="$(mktemp -d)"
+	(ZEO_STUB_CRASH_CHILD="${tmp}/child" run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.5}]')" >/dev/null)
+	child="$(cat "${tmp}/child" 2>/dev/null)"
+	if [[ -z "${child}" ]]; then
+		no "the crashing stub recorded no child"
+	elif kill -0 "${child}" 2>/dev/null; then
+		kill -KILL "${child}"
+		no "the crashed editor's child ${child} outlived the run"
+	else
+		ok
+	fi
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
 # main [<filter>] — run every case, or only those whose function name contains
@@ -2036,6 +2073,9 @@ main() {
 
 		test_xvfb_proof_steps_option_without_value_exits_2
 		test_xvfb_proof_display_socketless_xvfb_times_out
+
+		test_xvfb_proof_drive_sends_punctuation_as_keysyms
+		test_xvfb_proof_lifecycle_stops_the_group_of_a_crashed_editor
 	)
 
 	for t in "${tests[@]}"; do

@@ -96,11 +96,13 @@ display of its own. It starts `Xvfb` on the first free `:N` from `:90`, launches
 there with `--user-data-dir`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` under one
 temporary directory, replays the step script with `xdotool` and keeps the captures
 `import` takes. The step script is `live-proof.py`'s format — `type`, `key`, `chord`,
-`click`, `move`, `sleep` and `shot`; `focus` and `drag` are rejected — so a
-`live-proof.py` script without those two runs here unchanged. The reverse holds only
-with one care: `key` here also accepts an xdotool combination such as `ctrl+shift+p`,
-which `live-proof.py` refuses, so a script meant for both writes combinations as
-`chord`. A `window` field beside `shot` is accepted and ignored: the capture is always
+`click`, `move`, `sleep` and `shot`. A one-character key name that is not a letter
+or digit (`/`) is sent as its keysym, as `live-proof.py` sends it by codepoint —
+`xdotool` knows it by no name and would type nothing while exiting 0. What still
+differs: `focus` and `drag` are rejected, coordinates must be whole pixels, a `chord`
+needs two or more names, and `key` here also accepts an xdotool combination such as
+`ctrl+shift+p`, which `live-proof.py` refuses — so a script meant for both writes
+combinations as `chord`. A `window` field beside `shot` is accepted and ignored: the capture is always
 the whole virtual screen.
 
 ```sh

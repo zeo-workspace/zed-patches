@@ -14,9 +14,11 @@
 #   {"type": "<text>"} | {"key": ["<keysym>", ...]} | {"chord": ["<mod>", ..., "<key>"]} |
 #   {"click": [x, y]} | {"move": [x, y]} | {"sleep": <seconds, at most 60>} |
 #   {"shot": "<path.png>"}
-# A live-proof.py script without focus or drag steps runs here unchanged. One
-# extension: a "key" name may be an xdotool combination ("ctrl+shift+p"), which
-# live-proof.py rejects -- use "chord" in a script meant for both. A "window" field
+# A one-character key name that is not a letter or digit ("/") is sent as its
+# keysym, as live-proof.py does. What still differs from live-proof.py: focus and
+# drag are rejected, coordinates must be whole pixels, a chord needs two or more
+# names, and a "key" name may also be an xdotool combination ("ctrl+shift+p"),
+# which live-proof.py rejects -- use "chord" in a script meant for both. A "window" field
 # beside "shot" is accepted and ignored: the capture is always the whole screen.
 # The whole script is validated before anything starts; --dry-run stops there and
 # prints the plan.
@@ -62,6 +64,7 @@ WORKDIR=""
 XVFB_DISPLAY=""
 XVFB_PID=""
 ZEO_PID=""
+ZEO_PGID=""
 SLEEP_PID=""
 WINDOW_ID=""
 
@@ -169,7 +172,7 @@ print_plan() {
 setup_workdir() {
 	if [[ -n "${KEEP}" ]]; then
 		mkdir -p -- "${KEEP}" || die 2 "cannot create the --keep directory: ${KEEP}"
-		WORKDIR="$(cd -- "${KEEP}" && pwd)"
+		WORKDIR="$(cd -- "${KEEP}" && pwd)" || die 2 "cannot enter the --keep directory: ${KEEP}"
 		printf 'workdir: %s\n' "${WORKDIR}"
 		printf 'kept: %s survives this run\n' "${WORKDIR}"
 	else
@@ -215,12 +218,30 @@ stop() {
 	wait "${pid}" 2>/dev/null || true
 }
 
+# stop_group <pgid> — the rest of a process group this run created, once its
+# leader is gone: a Zeo that crashed leaves its agent servers in it. The group
+# is only signalled while its session is still the one setsid made at launch,
+# so a recycled number is never touched.
+stop_group() {
+	local pgid="$1" tries
+	[[ -n "${pgid}" ]] || return 0
+	pgrep -g "${pgid}" -s "${pgid}" >/dev/null 2>&1 || return 0
+	kill -TERM -- "-${pgid}" 2>/dev/null || true
+	for ((tries = 50; tries > 0; tries--)); do
+		pgrep -g "${pgid}" -s "${pgid}" >/dev/null 2>&1 || return 0
+		sleep 0.1
+	done
+	printf 'warning: process group %s ignored SIGTERM for 5 s; killing it\n' "${pgid}" >&2
+	kill -KILL -- "-${pgid}" 2>/dev/null || true
+}
+
 # cleanup — on every exit: stop what this run started, newest first, then drop
 # the temporary directory unless --keep named it.
 cleanup() {
 	trap - EXIT INT TERM
 	stop "${SLEEP_PID}"
 	stop "${ZEO_PID}" group
+	stop_group "${ZEO_PGID}"
 	stop "${XVFB_PID}"
 	if [[ -n "${WORKDIR}" && -z "${KEEP}" ]]; then
 		rm -rf -- "${WORKDIR}"
@@ -306,6 +327,7 @@ launch_zeo() {
 		XDG_STATE_HOME="${WORKDIR}/state" \
 		setsid "${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
 	ZEO_PID=$!
+	ZEO_PGID="${ZEO_PID}"
 	printf 'zeo: pid %s, log %s\n' "${ZEO_PID}" "${log}"
 }
 
@@ -330,6 +352,17 @@ wait_for_window() {
 # A capture smaller than this on either side is not evidence: a 1x1 PNG once sat
 # among committed proofs looking exactly like one.
 readonly MIN_CAPTURE_PX=200
+
+# keysym <name> — <name> as xdotool understands it. One character that is not a
+# letter or digit goes as its hex keysym, as live-proof.py sends it by codepoint:
+# xdotool knows "/" by no name, warns, exits 0 and types nothing.
+keysym() {
+	if [[ "${#1}" -eq 1 && "$1" != [[:alnum:]] ]]; then
+		printf '0x%x' "'$1"
+	else
+		printf '%s' "$1"
+	fi
+}
 
 # xdo <args...> — xdotool on the private display, after the guard.
 xdo() {
@@ -358,7 +391,7 @@ take_shot() {
 }
 
 run_steps() {
-	local i n kind value x y keys=()
+	local i k n kind value x y keys=()
 	for i in "${!STEP_KINDS[@]}"; do
 		n=$((i + 1))
 		kind="${STEP_KINDS[i]}"
@@ -370,11 +403,13 @@ run_steps() {
 			;;
 		key)
 			mapfile -t keys < <(jq -r --argjson i "${i}" '.[$i].key[]' "${STEPS_FILE}")
+			for k in "${!keys[@]}"; do keys[k]="$(keysym "${keys[k]}")"; done
 			xdo key -- "${keys[@]}" || die 1 "step ${n} (key): xdotool failed on ${keys[*]}"
 			;;
 		chord)
 			# live-proof.py's chord: modifiers held, the last name pressed.
 			mapfile -t keys < <(jq -r --argjson i "${i}" '.[$i].chord[]' "${STEPS_FILE}")
+			for k in "${!keys[@]}"; do keys[k]="$(keysym "${keys[k]}")"; done
 			value="$(
 				IFS=+
 				printf '%s' "${keys[*]}"
@@ -418,6 +453,7 @@ main() {
 	command -v import >/dev/null || die 2 "import (ImageMagick) is not on PATH"
 	command -v identify >/dev/null || die 2 "identify (ImageMagick) is not on PATH"
 	command -v setsid >/dev/null || die 2 "setsid (util-linux) is not on PATH"
+	command -v pgrep >/dev/null || die 2 "pgrep (procps) is not on PATH"
 	setup_workdir
 	start_xvfb
 	launch_zeo
