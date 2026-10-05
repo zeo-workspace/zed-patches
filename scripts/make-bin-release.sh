@@ -93,6 +93,7 @@ main() {
 	{
 		printf 'zeo-bin %s -- provenance\n\n' "${pv}"
 		printf 'built from     app-editors/zeo %s\n' "${pf}"
+		printf 'zeo version    %s (CHANGELOG.md section)\n' "$(zeo_version_of "${pf}")"
 		printf 'zed version    %s\n' "$(sed -n 's/^version = "\(.*\)"$/\1/p' "${ZP_WORKTREE}/crates/zed/Cargo.toml" | head -n1)"
 		printf 'zed commit     %s\n' "${ZP_COMMIT}"
 		printf 'zed source     https://github.com/zed-industries/zed/archive/%s.tar.gz\n' "${ZP_COMMIT}"
@@ -148,7 +149,7 @@ next, once publishing is authorized (zeo-workspace/zeo releases):
   2. in a scratch directory:
      tar -xOJf ${out} ${name}/PROVENANCE.txt > PROVENANCE-${pv}.txt
      sha256sum ${out##*/} PROVENANCE-${pv}.txt > SHA256SUMS-${pv}   # with the tarball copied beside them
-     gh release create v${pv} -R zeo-workspace/zeo --verify-tag -t "Zeo ${pv}" -F <notes.md> \\
+     gh release create v${pv} -R zeo-workspace/zeo --verify-tag -t "Zeo ${pv}" -F <(bash ${ZP_REPO}/scripts/changelog-notes.sh ${pf}) \\
        ${name}-amd64.tar.xz PROVENANCE-${pv}.txt SHA256SUMS-${pv}
   3. curl -sfL ${url} | sha256sum   # expect ${local_sum}
   4. ebuild <overlay>/app-editors/zeo-bin/${name}.ebuild manifest

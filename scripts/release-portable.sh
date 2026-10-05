@@ -21,6 +21,9 @@
 # cargo-home/ are shared by every version, so a new one starts warm and downloads
 # no crate twice. --skip-build reuses the staged tree outright.
 #
+# A version with no CHANGELOG.md section is refused before anything is built
+# (check-changelog.sh): its release would have no notes to carry.
+#
 # It never publishes. The artefacts land in ${ZP_PORTABLE_DIR}/<PF>/out/dist,
 # ready for `gh release upload` once a human authorises it.
 #
@@ -41,6 +44,8 @@ main() {
 	done
 	[[ -n "${pf}" ]] || die 2 "usage: release-portable.sh <PF> [--skip-build] [--no-flatpak]"
 	resolve_version "${pf}"
+	bash "${ZP_REPO}/scripts/check-changelog.sh" "${pf}" ||
+		die 1 "refusing to release ${pf}: write its CHANGELOG.md section first (zeo/docs/RELEASING.md)"
 
 	local pvr="${pf#zeo-}" pv
 	pv="${pvr%-r[0-9]*}"

@@ -123,6 +123,7 @@ done
 {
 	printf 'zeo %s -- provenance\n\n' "${ZEO_PVR}"
 	printf 'built from     zed-patches release/portable (Debian 12 container), series zeo-%s\n' "${ZEO_PVR}"
+	printf 'zeo version    %s (CHANGELOG.md section)\n' "${ZEO_PV%%_p*}"
 	printf 'zed version    %s\n' "$(grep -m1 '^version' crates/zed/Cargo.toml | cut -d'"' -f2)"
 	printf 'zed commit     %s\n' "${ZEO_COMMIT}"
 	printf 'zed source     https://github.com/zed-industries/zed/archive/%s.tar.gz\n' "${ZEO_COMMIT}"

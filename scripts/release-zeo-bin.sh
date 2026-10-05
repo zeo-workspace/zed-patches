@@ -16,6 +16,9 @@
 # A build directory left by an earlier run of the same PF is reused, so a failed
 # install does not cost the 20-minute compile again; --fresh discards it.
 #
+# A version with no CHANGELOG.md section is refused before the build starts
+# (check-changelog.sh): the release body is that section (changelog-notes.sh).
+#
 # It never uploads and never touches the zeo-bin Manifest: the Manifest must
 # describe the bytes the Zeo GitHub release serves, so it is regenerated only
 # after the upload, which a human authorizes each time. The steps are printed at the end.
@@ -48,6 +51,8 @@ main() {
 	done
 	[[ -n "${pf}" ]] || usage
 	resolve_version "${pf}"
+	bash "${ZP_REPO}/scripts/check-changelog.sh" "${pf}" ||
+		die 1 "refusing to release ${pf}: write its CHANGELOG.md section first (zeo/docs/RELEASING.md)"
 
 	local configroot="${ZP_REPO}/release/configroot"
 	[[ -f "${configroot}/etc/portage/make.conf" ]] || die 2 "no release configuration at ${configroot}"
