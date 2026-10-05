@@ -1450,79 +1450,245 @@ test_protocol_still_reports_drift_on_an_answering_lock() {
 	rm -rf "${tmp}"
 }
 
+# --- xvfb-proof.sh: a private display and an isolated Zeo (story 021) --------
+#
+# Every tool the harness drives is a stub on PATH: no X server starts, no Zeo
+# runs. Each stub appends what it was asked to STUB_LOG, prefixed with the
+# DISPLAY it saw, and the long-lived ones (Xvfb, the editor) record their PID in
+# STUB_PIDS and exec into a sleep, so a case can prove they were stopped.
+
+# make_xvfb_stubs <bindir> — Xvfb, xdotool, import, identify and a fake editor.
+#
+# Behaviour switches, read by the stubs at run time:
+#   XVFB_STUB_DIE=1        Xvfb exits at once, creating no socket
+#   ZEO_STUB_NO_WINDOW=1   the editor never shows a window
+#   XDOTOOL_STUB_FAIL=<sub> xdotool exits 1 when its first argument is <sub>
+#   IDENTIFY_STUB_GEOM     what identify reports ("1920 1080" when unset)
+make_xvfb_stubs() {
+	local bindir="$1"
+	mkdir -p "${bindir}"
+	cat >"${bindir}/Xvfb" <<'STUB'
+#!/usr/bin/env bash
+printf 'DISPLAY=%s Xvfb %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
+[[ -z "${XVFB_STUB_DIE-}" ]] || exit 1
+mkdir -p "${XVFB_PROOF_X11_ROOT}/.X11-unix"
+: >"${XVFB_PROOF_X11_ROOT}/.X11-unix/X${1#:}"
+printf '%s\n' "$$" >>"${STUB_PIDS}"
+exec sleep 300
+STUB
+	cat >"${bindir}/zeo-editor" <<'STUB'
+#!/usr/bin/env bash
+printf 'DISPLAY=%s zeo %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
+printf 'env WAYLAND_DISPLAY=[%s] XDG_CACHE_HOME=%s XDG_STATE_HOME=%s ZED_ALLOW_EMULATED_GPU=%s ZED_STATELESS=%s\n' \
+	"${WAYLAND_DISPLAY-unset}" "${XDG_CACHE_HOME-unset}" "${XDG_STATE_HOME-unset}" \
+	"${ZED_ALLOW_EMULATED_GPU-unset}" "${ZED_STATELESS-unset}" >>"${STUB_LOG}"
+echo "zeo stub started"
+[[ -n "${ZEO_STUB_NO_WINDOW-}" ]] || : >"${STUB_WINDOW}"
+printf '%s\n' "$$" >>"${STUB_PIDS}"
+exec sleep 300
+STUB
+	cat >"${bindir}/xdotool" <<'STUB'
+#!/usr/bin/env bash
+printf 'DISPLAY=%s xdotool %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
+[[ "${1-}" != "${XDOTOOL_STUB_FAIL-}" ]] || exit 1
+if [[ "${1-}" == search ]]; then
+	[[ -e "${STUB_WINDOW}" ]] || exit 1
+	echo 4194307
+fi
+exit 0
+STUB
+	cat >"${bindir}/import" <<'STUB'
+#!/usr/bin/env bash
+printf 'DISPLAY=%s import %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
+printf 'PNG' >"${!#}"
+STUB
+	cat >"${bindir}/identify" <<'STUB'
+#!/usr/bin/env bash
+printf 'DISPLAY=%s identify %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
+printf '%s' "${IDENTIFY_STUB_GEOM:-1920 1080}"
+STUB
+	chmod +x "${bindir}"/*
+}
+
+# run_xvfb_proof <tmp> <args...> — the harness against the stubs in <tmp>/bin.
+# DISPLAY defaults to :0, the operator's display the harness must never drive.
+run_xvfb_proof() {
+	local tmp="$1"
+	shift
+	[[ -x "${tmp}/bin/Xvfb" ]] || make_xvfb_stubs "${tmp}/bin"
+	PATH="${tmp}/bin:${PATH}" \
+		DISPLAY="${XVFB_TEST_DISPLAY-:0}" \
+		STUB_LOG="${tmp}/stub.log" \
+		STUB_PIDS="${tmp}/stub.pids" \
+		STUB_WINDOW="${tmp}/window" \
+		XVFB_PROOF_X11_ROOT="${tmp}/x" \
+		XVFB_PROOF_XVFB_TIMEOUT=2 \
+		XVFB_PROOF_WINDOW_TIMEOUT="${XVFB_TEST_WINDOW_TIMEOUT:-5}" \
+		bash "${SCRIPTS}/xvfb-proof.sh" --binary "${tmp}/bin/zeo-editor" "$@" 2>&1
+}
+
+# stub_log <tmp> — what the stubs were asked, or nothing when none ran.
+stub_log() {
+	[[ -f "$1/stub.log" ]] && cat "$1/stub.log"
+	return 0
+}
+
+test_xvfb_proof_steps_valid_prints_plan() {
+	case_start "xvfb-proof: --dry-run validates every kind and prints the plan, starting nothing (R2.1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	cat >"${tmp}/steps.json" <<'JSON'
+[
+  {"type": "agent: toggle focus"},
+  {"key": ["ctrl+shift+p", "Return"]},
+  {"click": [10, 20]},
+  {"move": [30, 40]},
+  {"sleep": 0.5},
+  {"shot": "out/panel.png", "window": true}
+]
+JSON
+	out="$(run_xvfb_proof "${tmp}" --steps "${tmp}/steps.json" --dry-run)"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_contains "${out}" "6 steps" &&
+		assert_contains "${out}" "1 type" &&
+		assert_contains "${out}" "6 shot" &&
+		assert_equal "" "$(stub_log "${tmp}")" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_steps_unknown_kind_names_index() {
+	case_start "xvfb-proof: an unknown kind exits 1 naming index and kind, before anything starts (R2.2)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	printf '[{"type": "a"}, {"focus": "zed"}]' >"${tmp}/steps.json"
+	# No --dry-run: a broken script must stop before the display or Zeo exist.
+	out="$(run_xvfb_proof "${tmp}" --steps "${tmp}/steps.json")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "step 2" &&
+		assert_contains "${out}" "focus" &&
+		assert_equal "" "$(stub_log "${tmp}")" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_steps_missing_field_exits_1() {
+	case_start "xvfb-proof: a step missing its field exits 1 naming index and kind (R2.2)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	printf '[{"sleep": 0.1}, {"click": [10]}]' >"${tmp}/steps.json"
+	out="$(run_xvfb_proof "${tmp}" --steps "${tmp}/steps.json" --dry-run)"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "step 2" &&
+		assert_contains "${out}" "click" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_steps_unreadable_file_exits_2() {
+	case_start "xvfb-proof: an unreadable step script exits 2"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "${tmp}/absent.json" --dry-run)"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "absent.json" && ok
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
+# main [<filter>] — run every case, or only those whose function name contains
+# <filter>. A filter matching nothing fails rather than reporting a green zero.
 main() {
+	local filter="${1:-}" t ran=0
 	if [[ ! -f "${SCRIPTS}/lib.sh" ]]; then
 		printf 'scripts not found under %s — nothing implemented yet\n' "${SCRIPTS}" >&2
 	fi
 
-	test_lib_resolves_commit
-	test_lib_rejects_ebuild_without_commit
-	test_lib_falls_back_to_default_distdir
-	test_lib_names_distfile_from_src_uri
-	test_lib_distfile_expands_pf
-	test_lib_rejects_ebuild_without_archive_rename
-	test_lib_reads_overlay_from_config
-	test_lib_env_overrides_config
-	test_lib_rejects_config_naming_missing_dir
-	test_lib_rejects_empty_config
+	local tests=(
+		test_lib_resolves_commit
+		test_lib_rejects_ebuild_without_commit
+		test_lib_falls_back_to_default_distdir
+		test_lib_names_distfile_from_src_uri
+		test_lib_distfile_expands_pf
+		test_lib_rejects_ebuild_without_archive_rename
+		test_lib_reads_overlay_from_config
+		test_lib_env_overrides_config
+		test_lib_rejects_config_naming_missing_dir
+		test_lib_rejects_empty_config
 
-	test_series_preserves_order
-	test_series_group_carries_forward
-	test_series_filter_returns_only_its_group
-	test_series_lists_every_missing_entry
+		test_series_preserves_order
+		test_series_group_carries_forward
+		test_series_filter_returns_only_its_group
+		test_series_lists_every_missing_entry
 
-	test_prepare_refuses_missing_distfile
-	test_prepare_refuses_mismatched_root
-	test_prepare_is_idempotent
-	test_prepare_leaves_pristine_baseline
-	test_prepare_regenerates_a_patch
+		test_prepare_refuses_missing_distfile
+		test_prepare_refuses_mismatched_root
+		test_prepare_is_idempotent
+		test_prepare_leaves_pristine_baseline
+		test_prepare_regenerates_a_patch
 
-	test_verify_passes_whole_series
-	test_verify_reports_failing_patch
-	test_verify_requires_prepared_tree
-	test_verify_leaves_tree_untouched
-	test_verify_feature_filter
-	test_verify_restores_baseline_tree
-	test_verify_refuses_modified_tree
-	test_verify_applies_series_cumulatively
+		test_verify_passes_whole_series
+		test_verify_reports_failing_patch
+		test_verify_requires_prepared_tree
+		test_verify_leaves_tree_untouched
+		test_verify_feature_filter
+		test_verify_restores_baseline_tree
+		test_verify_refuses_modified_tree
+		test_verify_applies_series_cumulatively
 
-	test_sync_refuses_unverified
-	test_sync_copies_verified_series
-	test_sync_dry_run_writes_nothing
-	test_sync_reports_orphans
-	test_sync_reports_zero_orphans_when_aligned
+		test_sync_refuses_unverified
+		test_sync_copies_verified_series
+		test_sync_dry_run_writes_nothing
+		test_sync_reports_orphans
+		test_sync_reports_zero_orphans_when_aligned
 
-	test_branches_one_per_patch
-	test_branches_leave_tree_on_baseline
+		test_branches_one_per_patch
+		test_branches_leave_tree_on_baseline
 
-	test_checksync_reports_in_sync
-	test_checksync_detects_overlay_drift
-	test_checksync_detects_ebuild_drift
+		test_checksync_reports_in_sync
+		test_checksync_detects_overlay_drift
+		test_checksync_detects_ebuild_drift
 
-	test_refresh_preserves_source_set
-	test_refresh_refuses_existing_destination
-	test_refresh_stops_on_conflict
+		test_refresh_preserves_source_set
+		test_refresh_refuses_existing_destination
+		test_refresh_stops_on_conflict
 
-	test_advisory_skips_when_scanner_absent
-	test_advisory_skips_when_offline
-	test_advisory_reports_clean
-	test_advisory_reports_findings_without_touching_the_exit_code
-	test_advisory_reports_scan_failure_distinctly_from_clean
-	test_advisory_skips_only_the_missing_lockfile
+		test_advisory_skips_when_scanner_absent
+		test_advisory_skips_when_offline
+		test_advisory_reports_clean
+		test_advisory_reports_findings_without_touching_the_exit_code
+		test_advisory_reports_scan_failure_distinctly_from_clean
+		test_advisory_skips_only_the_missing_lockfile
 
-	test_status_calls_the_advisory_step_in_its_own_body
+		test_status_calls_the_advisory_step_in_its_own_body
 
-	test_protocol_picks_a_lock_that_answers
-	test_protocol_skips_when_no_lock_answers
-	test_protocol_refuses_a_lock_name_that_is_not_a_port
-	test_protocol_still_reports_drift_on_an_answering_lock
+		test_protocol_picks_a_lock_that_answers
+		test_protocol_skips_when_no_lock_answers
+		test_protocol_refuses_a_lock_name_that_is_not_a_port
+		test_protocol_still_reports_drift_on_an_answering_lock
 
-	test_status_installed_agreeing_is_ok
-	test_status_installed_behind_is_drift
-	test_status_installed_absent_is_named
+		test_status_installed_agreeing_is_ok
+		test_status_installed_behind_is_drift
+		test_status_installed_absent_is_named
 
+		test_xvfb_proof_steps_valid_prints_plan
+		test_xvfb_proof_steps_unknown_kind_names_index
+		test_xvfb_proof_steps_missing_field_exits_1
+		test_xvfb_proof_steps_unreadable_file_exits_2
+	)
+
+	for t in "${tests[@]}"; do
+		[[ -z "${filter}" || "${t}" == *"${filter}"* ]] || continue
+		ran=$((ran + 1))
+		"${t}"
+	done
+
+	if [[ "${ran}" -eq 0 ]]; then
+		printf 'no case matches the filter: %s\n' "${filter}" >&2
+		return 1
+	fi
 	printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 	[[ "${FAIL}" -eq 0 ]]
 }
