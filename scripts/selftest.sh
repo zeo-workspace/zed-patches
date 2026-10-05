@@ -1710,6 +1710,61 @@ test_xvfb_proof_launch_refuses_an_overlong_path() {
 	rm -rf "${tmp}"
 }
 
+test_xvfb_proof_drive_sends_every_step_to_the_private_display() {
+	case_start "xvfb-proof: each kind becomes its xdotool/import call, all on the private display (R2.1, R3.1)"
+	local tmp out status log
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" "[
+		{\"type\": \"agent: toggle focus\"},
+		{\"key\": [\"ctrl+shift+p\", \"Return\"]},
+		{\"click\": [10, 20]},
+		{\"move\": [30, 40]},
+		{\"sleep\": 0.01},
+		{\"shot\": \"${tmp}/caps/panel.png\"}]")")"
+	status=$?
+	log="$(stub_log "${tmp}")"
+	assert_status 0 "${status}" &&
+		assert_contains "${log}" "DISPLAY=:90 xdotool type --delay 20 -- agent: toggle focus" &&
+		assert_contains "${log}" "DISPLAY=:90 xdotool key -- ctrl+shift+p Return" &&
+		assert_contains "${log}" "DISPLAY=:90 xdotool mousemove 10 20 click 1" &&
+		assert_contains "${log}" "DISPLAY=:90 xdotool mousemove 30 40" &&
+		assert_contains "${log}" "DISPLAY=:90 import -window root ${tmp}/caps/panel.png" &&
+		assert_not_contains "${log}" "DISPLAY=:0 xdotool" &&
+		assert_contains "${out}" "1920x1080" && {
+		[[ -s "${tmp}/caps/panel.png" ]] || no "the capture was not kept"
+		[[ -s "${tmp}/caps/panel.png" ]]
+	} && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drive_deletes_a_degenerate_capture() {
+	case_start "xvfb-proof: a capture under 200 px is deleted and exits 1 naming file and geometry (R3.2)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(IDENTIFY_STUB_GEOM="1 1" run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" "[{\"shot\": \"${tmp}/tiny.png\"}]")")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "${tmp}/tiny.png" &&
+		assert_contains "${out}" "1x1" && {
+		[[ ! -e "${tmp}/tiny.png" ]] || no "the 1x1 capture was left behind"
+		[[ ! -e "${tmp}/tiny.png" ]]
+	} && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drive_failing_xdotool_names_the_step() {
+	case_start "xvfb-proof: a failing xdotool exits 1 naming the step index; later steps never run"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(XDOTOOL_STUB_FAIL=key run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" "[
+		{\"sleep\": 0.01}, {\"key\": [\"Return\"]}, {\"shot\": \"${tmp}/never.png\"}]")")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "step 2" &&
+		assert_not_contains "$(stub_log "${tmp}")" "import" && ok
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
 # main [<filter>] — run every case, or only those whose function name contains
@@ -1800,6 +1855,10 @@ main() {
 		test_xvfb_proof_launch_copies_settings_and_keymap
 		test_xvfb_proof_launch_window_timeout_names_the_log
 		test_xvfb_proof_launch_refuses_an_overlong_path
+
+		test_xvfb_proof_drive_sends_every_step_to_the_private_display
+		test_xvfb_proof_drive_deletes_a_degenerate_capture
+		test_xvfb_proof_drive_failing_xdotool_names_the_step
 	)
 
 	for t in "${tests[@]}"; do

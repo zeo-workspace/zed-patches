@@ -90,7 +90,7 @@ parse_args() {
 # shellcheck disable=SC2016  # jq program, not shell
 readonly STEP_CHECK='
 def kinds: ["type", "key", "click", "move", "sleep", "shot"];
-def point: type == "array" and length == 2 and all(.[]; type == "number" and . >= 0);
+def point: type == "array" and length == 2 and all(.[]; type == "number" and . >= 0 and . == floor);
 def check($k; $v):
   if $k == "type" then ($v | type == "string" and length > 0) // false
   elif $k == "key" then ($v | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) // false
@@ -100,7 +100,7 @@ def check($k; $v):
   else false end;
 def need($k):
   {"type": "a non-empty string", "key": "a non-empty list of keysyms",
-   "click": "[x, y]", "move": "[x, y]", "sleep": "seconds, above 0 and at most 60",
+   "click": "[x, y] in whole pixels", "move": "[x, y] in whole pixels", "sleep": "seconds, above 0 and at most 60",
    "shot": "a file path"}[$k];
 if type != "array" then "err\t0\t-\tthe step script is not a JSON array"
 else
@@ -260,6 +260,72 @@ wait_for_window() {
 	die 2 "no Zeo window appeared within ${WINDOW_TIMEOUT} s (log: ${log})"
 }
 
+# --- driving -------------------------------------------------------------------
+
+# A capture smaller than this on either side is not evidence: a 1x1 PNG once sat
+# among committed proofs looking exactly like one.
+readonly MIN_CAPTURE_PX=200
+
+# xdo <args...> — xdotool on the private display, after the guard.
+xdo() {
+	guard_display "${XVFB_DISPLAY}"
+	DISPLAY="${XVFB_DISPLAY}" xdotool "$@"
+}
+
+# take_shot <n> <path> — capture the virtual screen and keep it only if sane.
+take_shot() {
+	local n="$1" path="$2" geom w h
+	mkdir -p -- "$(dirname -- "${path}")" || die 1 "step ${n} (shot): cannot create the directory of ${path}"
+	guard_display "${XVFB_DISPLAY}"
+	DISPLAY="${XVFB_DISPLAY}" import -window root "${path}" ||
+		die 1 "step ${n} (shot): import failed for ${path}"
+	geom="$(identify -format '%w %h' "${path}" 2>/dev/null)" || {
+		rm -f -- "${path}"
+		die 1 "step ${n} (shot): ${path} does not decode as an image; deleted"
+	}
+	read -r w h <<<"${geom}"
+	if ! [[ "${w}" =~ ^[0-9]+$ && "${h}" =~ ^[0-9]+$ ]] ||
+		((w < MIN_CAPTURE_PX || h < MIN_CAPTURE_PX)); then
+		rm -f -- "${path}"
+		die 1 "step ${n} (shot): ${path} is ${w}x${h}, under ${MIN_CAPTURE_PX} px on a side; deleted"
+	fi
+	printf 'step %d: shot %s (%sx%s)\n' "${n}" "${path}" "${w}" "${h}"
+}
+
+run_steps() {
+	local i n kind value x y keys=()
+	for i in "${!STEP_KINDS[@]}"; do
+		n=$((i + 1))
+		kind="${STEP_KINDS[i]}"
+		[[ "${kind}" == shot ]] || printf 'step %d: %s\n' "${n}" "${kind}"
+		case "${kind}" in
+		type)
+			value="$(jq -j --argjson i "${i}" '.[$i].type' "${STEPS_FILE}")"
+			xdo type --delay 20 -- "${value}" || die 1 "step ${n} (type): xdotool failed"
+			;;
+		key)
+			mapfile -t keys < <(jq -r --argjson i "${i}" '.[$i].key[]' "${STEPS_FILE}")
+			xdo key -- "${keys[@]}" || die 1 "step ${n} (key): xdotool failed on ${keys[*]}"
+			;;
+		click | move)
+			read -r x y <<<"$(step_value "${i}" "${kind}")"
+			if [[ "${kind}" == click ]]; then
+				xdo mousemove "${x}" "${y}" click 1 || die 1 "step ${n} (click): xdotool failed at ${x},${y}"
+			else
+				xdo mousemove "${x}" "${y}" || die 1 "step ${n} (move): xdotool failed at ${x},${y}"
+			fi
+			;;
+		sleep)
+			sleep "$(step_value "${i}" sleep)"
+			;;
+		shot)
+			take_shot "${n}" "$(step_value "${i}" shot)"
+			;;
+		esac
+	done
+	printf 'done: %d steps on %s\n' "${#STEP_KINDS[@]}" "${XVFB_DISPLAY}"
+}
+
 main() {
 	parse_args "$@"
 	validate_steps
@@ -268,11 +334,13 @@ main() {
 	trap cleanup EXIT
 	command -v Xvfb >/dev/null || die 2 "Xvfb is not on PATH"
 	command -v xdotool >/dev/null || die 2 "xdotool is not on PATH"
+	command -v import >/dev/null || die 2 "import (ImageMagick) is not on PATH"
+	command -v identify >/dev/null || die 2 "identify (ImageMagick) is not on PATH"
 	setup_workdir
 	start_xvfb
 	launch_zeo
 	wait_for_window
-	die 2 "driving is not implemented"
+	run_steps
 }
 
 main "$@"
