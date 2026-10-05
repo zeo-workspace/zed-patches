@@ -1,0 +1,3822 @@
+From 3534d03dd92803e185861dffd41da13e483375b4 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sun, 4 Oct 2026 09:37:27 -0300
+Subject: [PATCH] feat(agent_servers): reopen a thread in the config it was
+ left in
+
+Reopening an ACP thread -- session/load or session/resume, after a restart or
+from the history -- ran the same step a brand-new thread runs:
+apply_default_config_options sent every entry default in the agent's
+default_config_options, unconditionally, once the agent had answered. A thread
+left on Plan with a non-default model came back on the entry's mode and model,
+and the plus adapter's own restoration of the mode (0.23.5) was overwritten a
+moment after it happened. Nothing on screen said so.
+
+Option A, skipping the defaults on load, was rejected: an agent that restores
+nothing itself -- Codex, and most others -- would then reopen on the agent's
+bare defaults instead of the entry's, which is the opposite regression. So the
+client remembers, per thread, the last state it saw, and prefers it.
+
+Store. One JSON record per (agent id, session id) in the key-value store
+upstream already ships (db::kvp::KeyValueStore, namespace acp_thread_config),
+the way agent_ui keeps unsent prompts. The key is the JSON array
+[agent_id, session_id], never a concatenation: an agent id is free text and a
+separator inside it must not make two threads share a record. No table and no
+migration is added, so neither an upgrade nor a downgrade can meet a migration
+this patch wrote, and refresh.sh has no positional migration array to
+collide with -- an older release simply never reads the namespace.
+
+Recorder. One task per live session wakes on the config-options watch that
+already fires on every accepted change (a user pick, an agent
+ConfigOptionUpdate, the adopted response 0009 introduced) and on a new mode
+trigger, which set_mode, the CurrentModeUpdate branch and new_session's mode
+default now fire. It snapshots the cells as they are when it wakes -- the
+watch coalesces -- and writes. It never reads a cell right after an optimistic
+write: a rejected pick changes nothing and signals nothing, and every revert
+path now signals, so a snapshot taken while a rejection was pending is
+replaced by the next one. Writes are detached, so closing a session right
+after a change does not lose it, and chained, so two writes started close
+together cannot land out of order.
+
+Restoration. apply_default_config_options becomes
+apply_session_config_options and takes the record, which open_or_create_session
+reads before sending session/load, because an agent may replay updates during
+the load. Per option, a pure choose_value decides: a recorded value the agent
+offers and already reports is skipped (no request for an unchanged value); one
+it offers and does not report is sent; one it no longer offers is dropped with
+a warning naming the option, the value, the agent and the session, and the
+entry default applies, exactly as before. With no record the behaviour is the
+old one. A legacy-mode agent also gets its recorded mode back. new_session
+passes no record, so a new or forked thread starts from the defaults. The
+optimistic write, the revert on error and 0009's adoption are unchanged; only
+the value's source is new.
+
+Delete. ThreadMetadataStore::delete removes the thread's record beside its
+draft prompt, so no record outlives its thread; delete_all goes through it.
+
+Generic ACP, no adapter key read, but it changes what the plus adapter's
+threads do on every reopen and was proved there, so it rides
+claude-agent-acp-plus BY CHOICE, like 0009 and 0010. Proved in a built Zeo: a
+Plus thread on Plan and Sonnet 5.5, restarted and reopened, came back on
+Auto and the default model without this patch and on Plan and Sonnet 5.5
+with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/Cargo.lock b/Cargo.lock
+index a39082d..49160fc 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -388,6 +388,7 @@ dependencies = [
+  "chrono",
+  "client",
+  "collections",
++ "db",
+  "env_logger 0.11.8",
+  "feature_flags",
+  "fs",
+diff --git a/crates/agent_servers/Cargo.toml b/crates/agent_servers/Cargo.toml
+index 9ce7a7e..dc2d50d 100644
+--- a/crates/agent_servers/Cargo.toml
++++ b/crates/agent_servers/Cargo.toml
+@@ -34,6 +34,7 @@ base64.workspace = true
+ chrono.workspace = true
+ client.workspace = true
+ collections.workspace = true
++db.workspace = true
+ env_logger = { workspace = true, optional = true }
+ fs.workspace = true
+ futures.workspace = true
+@@ -64,6 +65,7 @@ zed_credentials_provider.workspace = true
+ 
+ [dev-dependencies]
+ client = { workspace = true, features = ["test-support"] }
++db = { workspace = true, features = ["test-support"] }
+ env_logger.workspace = true
+ fs.workspace = true
+ 
+diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
+index 51e7a2c..21c90e5 100644
+--- a/crates/agent_servers/src/acp.rs
++++ b/crates/agent_servers/src/acp.rs
+@@ -45,12 +45,16 @@ use util::path_list::PathList;
+ use util::process::Child;
+ 
+ use anyhow::{Context as _, Result};
+-use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString, Subscription, Task, WeakEntity};
++use gpui::{
++    App, AppContext as _, AsyncApp, Entity, SharedString, Subscription, Task, TaskExt as _,
++    WeakEntity,
++};
+ 
+ use acp_thread::{AcpThread, AuthRequired, LoadError, TerminalProviderEvent};
+ use terminal::TerminalBuilder;
+ use terminal::terminal_settings::{AlternateScroll, CursorShape};
+ 
++use crate::thread_config_store::{self, RecordedConfig, RecordedValue};
+ use crate::{CURSOR_ID, GEMINI_ID};
+ 
+ pub const GEMINI_TERMINAL_AUTH_METHOD_ID: &str = "spawn-gemini-cli";
+@@ -393,11 +397,136 @@ impl ConfigOptions {
+     }
+ }
+ 
++/// Signals that a session's mode cell changed, so its recorder can snapshot
++/// it. Modes have no watch of their own, unlike config options. Every holder
++/// clones the `Rc`, as the config-options watch does with its sender.
++#[derive(Clone)]
++struct ModeTrigger(Rc<RefCell<watch::Sender<()>>>);
++
++impl ModeTrigger {
++    fn new() -> Self {
++        let (tx, _rx) = watch::channel(());
++        Self(Rc::new(RefCell::new(tx)))
++    }
++
++    fn fire(&self) {
++        // No receiver alive means no recorder, so there is nothing to record.
++        self.0.borrow_mut().send(()).ok();
++    }
++}
++
++/// Records a session's config each time it changes, so a reopened thread can
++/// be restored. It is woken only by the config-options watch and the mode
++/// trigger, which are signalled once the agent has answered (or a pending
++/// change was reverted), never by an optimistic write. The task lives in the
++/// session and ends with it.
++struct ConfigRecorder {
++    _task: Task<()>,
++}
++
++impl ConfigRecorder {
++    fn start(
++        agent_id: AgentId,
++        session_id: acp::SessionId,
++        config_options: Option<&ConfigOptions>,
++        modes: Option<Rc<RefCell<acp::SessionModeState>>>,
++        mode_rx: watch::Receiver<()>,
++        cx: &App,
++    ) -> Self {
++        // Taken from the sender, the receiver starts at the current version:
++        // only changes signalled from now on wake the recorder.
++        let mut options_rx = config_options.map(|options| options.tx.borrow().receiver());
++        let options = config_options.map(|options| options.config_options.clone());
++        let mut mode_rx = Some(mode_rx);
++        let task = cx.spawn(async move |cx| {
++            let mut previous_write: Option<futures::channel::oneshot::Receiver<()>> = None;
++            while either_changed(&mut options_rx, &mut mode_rx).await {
++                // The watch coalesces wakes, so the cells are read as they are
++                // now rather than per signal.
++                let recorded = {
++                    let options = options.as_ref().map(|options| options.borrow());
++                    let mode = modes
++                        .as_ref()
++                        .map(|modes| modes.borrow().current_mode_id.clone());
++                    thread_config_store::snapshot(
++                        options.as_deref().map_or(&[], Vec::as_slice),
++                        mode.as_ref(),
++                    )
++                };
++
++                // Detached, so closing the session right after a change does
++                // not cancel its write. Each write waits for the previous one,
++                // so an older snapshot never lands over a newer one.
++                let (written_tx, written_rx) = futures::channel::oneshot::channel();
++                let previous = previous_write.replace(written_rx);
++                let write = cx.spawn({
++                    let agent_id = agent_id.clone();
++                    let session_id = session_id.clone();
++                    async move |cx| {
++                        if let Some(previous) = previous {
++                            previous.await.ok();
++                        }
++                        let result = cx
++                            .update(|cx| {
++                                thread_config_store::write(&agent_id, &session_id, &recorded, cx)
++                            })
++                            .await;
++                        written_tx.send(()).ok();
++                        result
++                    }
++                });
++                cx.update(|cx| write.detach_and_log_err(cx));
++            }
++        });
++        Self { _task: task }
++    }
++}
++
++/// Waits until either receiver signals a change. Returns `false` once both
++/// senders are gone. A closed receiver is set to `None`, since its `changed`
++/// would stay ready forever.
++async fn either_changed(
++    first: &mut Option<watch::Receiver<()>>,
++    second: &mut Option<watch::Receiver<()>>,
++) -> bool {
++    loop {
++        let (first_closed, second_closed) = match (first.as_mut(), second.as_mut()) {
++            (Some(first_rx), Some(second_rx)) => {
++                match futures::future::select(
++                    std::pin::pin!(first_rx.changed()),
++                    std::pin::pin!(second_rx.changed()),
++                )
++                .await
++                {
++                    futures::future::Either::Left((result, _)) => (result.is_err(), false),
++                    futures::future::Either::Right((result, _)) => (false, result.is_err()),
++                }
++            }
++            (Some(first_rx), None) => (first_rx.changed().await.is_err(), false),
++            (None, Some(second_rx)) => (false, second_rx.changed().await.is_err()),
++            (None, None) => return false,
++        };
++        if first_closed {
++            *first = None;
++        }
++        if second_closed {
++            *second = None;
++        }
++        if !first_closed && !second_closed {
++            return true;
++        }
++    }
++}
++
+ pub struct AcpSession {
+     thread: WeakEntity<AcpThread>,
+     suppress_abort_err: bool,
+     session_modes: Option<Rc<RefCell<acp::SessionModeState>>>,
+     config_options: Option<ConfigOptions>,
++    mode_trigger: ModeTrigger,
++    /// `None` until the session's config cells are attached and their
++    /// restoration has been dispatched.
++    _config_recorder: Option<ConfigRecorder>,
+     _release_subscription: Subscription,
+ }
+ 
+@@ -1031,6 +1160,7 @@ impl AcpConnection {
+         thread: &Entity<AcpThread>,
+         session_modes: Option<Rc<RefCell<acp::SessionModeState>>>,
+         config_options: Option<ConfigOptions>,
++        mode_trigger: ModeTrigger,
+         cx: &mut App,
+     ) {
+         let release_subscription = cx.observe_release(thread, {
+@@ -1050,11 +1180,33 @@ impl AcpConnection {
+                 suppress_abort_err: false,
+                 session_modes,
+                 config_options,
++                mode_trigger,
++                _config_recorder: None,
+                 _release_subscription: release_subscription,
+             },
+         );
+     }
+ 
++    /// Starts recording a registered session's config. Call it only once the
++    /// session's config cells are attached and their restoration (or the
++    /// entry defaults) has been dispatched, so nothing an agent replays before
++    /// the record was read can be written over it.
++    fn start_config_recorder(&self, session_id: &acp::SessionId, cx: &App) {
++        let mut sessions = self.sessions.borrow_mut();
++        let Some(session) = sessions.get_mut(session_id) else {
++            return;
++        };
++        let mode_rx = session.mode_trigger.0.borrow().receiver();
++        session._config_recorder = Some(ConfigRecorder::start(
++            self.id.clone(),
++            session_id.clone(),
++            session.config_options.as_ref(),
++            session.session_modes.clone(),
++            mode_rx,
++            cx,
++        ));
++    }
++
+     fn remove_session(&self, session_id: &acp::SessionId, thread_id: gpui::EntityId) {
+         let mut sessions = self.sessions.borrow_mut();
+         if sessions
+@@ -1196,7 +1348,14 @@ impl AcpConnection {
+                 cx,
+             )
+         });
+-        self.register_session(session_id.clone(), &thread, None, None, cx);
++        self.register_session(
++            session_id.clone(),
++            &thread,
++            None,
++            None,
++            ModeTrigger::new(),
++            cx,
++        );
+ 
+         // The connection owns this task, so retaining the thread (which owns the
+         // connection) here would keep both alive after all callers abandon the load.
+@@ -1208,6 +1367,7 @@ impl AcpConnection {
+                 let connection = self.connection.clone();
+                 let dispatch_tx = self.dispatch_tx.clone();
+                 let supports_close = self.agent_supports_session_close();
++                let agent_id = self.id.clone();
+                 async move |cx| {
+                     if thread.upgrade().is_none() {
+                         if let Some(this) = this.upgrade() {
+@@ -1217,6 +1377,10 @@ impl AcpConnection {
+                         return Ok(());
+                     }
+ 
++                    // Read before the request: an agent may replay updates
++                    // while `session/load` is in flight.
++                    let recorded =
++                        cx.update(|cx| thread_config_store::read(&agent_id, &session_id, cx));
+                     let response =
+                         rpc_call(connection.clone(), session_id.clone(), directories).await;
+                     if response.is_err() {
+@@ -1240,7 +1404,7 @@ impl AcpConnection {
+ 
+                     if let Some(_thread) = thread.upgrade() {
+                         let config_options = config_options.map(ConfigOptions::new);
+-                        {
++                        let mode_trigger = {
+                             let mut sessions = connection_state.sessions.borrow_mut();
+                             let Some(session) = sessions
+                                 .get_mut(&session_id)
+@@ -1252,16 +1416,32 @@ impl AcpConnection {
+                                     "session was closed or replaced before load completed"
+                                 )));
+                             };
+-                            session.session_modes = modes;
++                            session.session_modes = modes.clone();
+                             session.config_options = config_options.clone();
+-                        }
++                            session.mode_trigger.clone()
++                        };
+                         if let Some(config_opts) = config_options.as_ref() {
+-                            connection_state.apply_default_config_options(
++                            connection_state.apply_session_config_options(
+                                 &session_id,
+                                 config_opts,
++                                recorded.as_ref(),
++                                cx,
++                            );
++                        }
++                        let recorded_mode = recorded
++                            .as_ref()
++                            .and_then(|recorded| recorded.mode.as_deref());
++                        if let (Some(modes), Some(recorded_mode)) = (modes.as_ref(), recorded_mode)
++                        {
++                            connection_state.apply_recorded_mode(
++                                &session_id,
++                                modes,
++                                recorded_mode,
++                                &mode_trigger,
+                                 cx,
+                             );
+                         }
++                        cx.update(|cx| connection_state.start_config_recorder(&session_id, cx));
+                         connection_state.remove_pending_session(&session_id, thread.entity_id());
+                         return Ok(());
+                     }
+@@ -1297,83 +1477,89 @@ impl AcpConnection {
+         })
+     }
+ 
+-    fn apply_default_config_options(
++    /// Applies the config options of a session as it opens: for each option
++    /// the agent offers, the thread's recorded value when the agent offers it,
++    /// otherwise the entry's default. `recorded` is `None` for a newly created
++    /// session, a fork included, so a new thread always starts from defaults.
++    fn apply_session_config_options(
+         &self,
+         session_id: &acp::SessionId,
+         config_options: &ConfigOptions,
++        recorded: Option<&RecordedConfig>,
+         cx: &mut AsyncApp,
+     ) {
+         let id = self.id.clone();
+         let watch_tx = config_options.tx.clone();
+         let config_options = &config_options.config_options;
+-        let defaults_to_apply: Vec<_> = {
++        let values_to_apply: Vec<_> = {
+             let config_opts_ref = config_options.borrow();
+             config_opts_ref
+                 .iter()
+                 .filter_map(|config_option| {
+-                    let default_value = self
+-                        .defaults
+-                        .config_option(config_option.config_id.0.as_ref())?;
++                    let config_id = config_option.config_id.0.as_ref();
++                    let recorded_value =
++                        recorded.and_then(|recorded| recorded.options.get(config_id));
++                    if let Some(recorded_value) = recorded_value
++                        && !recorded_is_offered(config_option, recorded_value)
++                    {
++                        log::warn!(
++                            "dropping recorded value `{}` of config option `{}` in {} session {}: \
++                             the agent does not offer it, applying the default instead",
++                            recorded_value_label(recorded_value),
++                            config_id,
++                            id,
++                            session_id.0
++                        );
++                    }
+ 
+-                    let value_to_apply = match &config_option.kind {
+-                        acp_v2::SessionConfigKind::Select(select) => {
+-                            let value_id = default_value.as_value_id()?;
+-                            match &select.options {
+-                                acp_v2::SessionConfigSelectOptions::Ungrouped(options) => options
+-                                    .iter()
+-                                    .any(|opt| &*opt.value.0 == value_id)
+-                                    .then(|| {
+-                                        acp_v2::SessionConfigOptionValue::id(value_id.to_string())
+-                                    }),
+-                                acp_v2::SessionConfigSelectOptions::Grouped(groups) => groups
+-                                    .iter()
+-                                    .any(|group| {
+-                                        group.options.iter().any(|opt| &*opt.value.0 == value_id)
+-                                    })
+-                                    .then(|| {
+-                                        acp_v2::SessionConfigOptionValue::id(value_id.to_string())
+-                                    }),
+-                                _ => None,
++                    let default_value = self.defaults.config_option(config_id);
++                    let value_to_apply =
++                        match choose_value(config_option, recorded_value, default_value.clone()) {
++                            Choice::Send(value) => value,
++                            Choice::Skip => return None,
++                            Choice::None => {
++                                let default_value = default_value?;
++                                // A boolean default on a select option has always
++                                // been skipped silently, while every other
++                                // invalid default warns.
++                                let silent = matches!(
++                                    config_option.kind,
++                                    acp_v2::SessionConfigKind::Select(_)
++                                ) && default_value.as_value_id().is_none();
++                                if !silent {
++                                    log::warn!(
++                                        "`{}` is not a valid value for config option `{}` in {}",
++                                        default_value,
++                                        config_id,
++                                        id
++                                    );
++                                }
++                                return None;
+                             }
++                        };
++
++                    let initial_value = match &config_option.kind {
++                        acp_v2::SessionConfigKind::Select(select) => {
++                            acp_v2::SessionConfigOptionValue::id(select.current_value.clone())
+                         }
+-                        acp_v2::SessionConfigKind::Boolean(_) => default_value
+-                            .as_bool()
+-                            .map(acp_v2::SessionConfigOptionValue::boolean),
+-                        _ => None,
++                        acp_v2::SessionConfigKind::Boolean(boolean) => {
++                            acp_v2::SessionConfigOptionValue::boolean(boolean.current_value)
++                        }
++                        _ => return None,
+                     };
+ 
+-                    if let Some(value_to_apply) = value_to_apply {
+-                        let initial_value = match &config_option.kind {
+-                            acp_v2::SessionConfigKind::Select(select) => {
+-                                acp_v2::SessionConfigOptionValue::id(select.current_value.clone())
+-                            }
+-                            acp_v2::SessionConfigKind::Boolean(boolean) => {
+-                                acp_v2::SessionConfigOptionValue::boolean(boolean.current_value)
+-                            }
+-                            _ => return None,
+-                        };
+-
+-                        Some((
+-                            config_option.config_id.clone(),
+-                            value_to_apply,
+-                            initial_value,
+-                        ))
+-                    } else {
+-                        log::warn!(
+-                            "`{}` is not a valid value for config option `{}` in {}",
+-                            default_value,
+-                            config_option.config_id.0,
+-                            id
+-                        );
+-                        None
+-                    }
++                    Some((
++                        config_option.config_id.clone(),
++                        value_to_apply,
++                        initial_value,
++                    ))
+                 })
+                 .collect()
+         };
+ 
+-        for (config_id, default_value, initial_value) in defaults_to_apply {
++        for (config_id, value_to_apply, initial_value) in values_to_apply {
+             let Some(wire_value) =
+-                acp_thread::config_options::value_to_v1(default_value.clone()).log_err()
++                acp_thread::config_options::value_to_v1(value_to_apply.clone()).log_err()
+             else {
+                 continue;
+             };
+@@ -1409,27 +1595,33 @@ impl AcpConnection {
+                         *config_opts.borrow_mut() = options;
+                         watch_tx.borrow_mut().send(()).ok();
+                     } else {
+-                        let mut opts = config_opts.borrow_mut();
+-                        if let Some(opt) = opts
+-                            .iter_mut()
+-                            .find(|option| option.config_id == config_id_clone)
+                         {
+-                            match (&mut opt.kind, &initial_value) {
+-                                (
+-                                    acp_v2::SessionConfigKind::Select(select),
+-                                    acp_v2::SessionConfigOptionValue::Id { value },
+-                                ) => {
+-                                    select.current_value = value.clone();
+-                                }
+-                                (
+-                                    acp_v2::SessionConfigKind::Boolean(boolean),
+-                                    acp_v2::SessionConfigOptionValue::Boolean { value },
+-                                ) => {
+-                                    boolean.current_value = *value;
++                            let mut opts = config_opts.borrow_mut();
++                            if let Some(opt) = opts
++                                .iter_mut()
++                                .find(|option| option.config_id == config_id_clone)
++                            {
++                                match (&mut opt.kind, &initial_value) {
++                                    (
++                                        acp_v2::SessionConfigKind::Select(select),
++                                        acp_v2::SessionConfigOptionValue::Id { value },
++                                    ) => {
++                                        select.current_value = value.clone();
++                                    }
++                                    (
++                                        acp_v2::SessionConfigKind::Boolean(boolean),
++                                        acp_v2::SessionConfigOptionValue::Boolean { value },
++                                    ) => {
++                                        boolean.current_value = *value;
++                                    }
++                                    _ => {}
+                                 }
+-                                _ => {}
+                             }
+                         }
++                        // Signal the revert too, so anything that observed the
++                        // optimistic value while the request was pending sees
++                        // the agent's value again.
++                        watch_tx.borrow_mut().send(()).ok();
+                     }
+                 }
+             })
+@@ -1437,7 +1629,7 @@ impl AcpConnection {
+ 
+             let mut opts = config_options.borrow_mut();
+             if let Some(opt) = opts.iter_mut().find(|option| option.config_id == config_id) {
+-                match (&mut opt.kind, &default_value) {
++                match (&mut opt.kind, &value_to_apply) {
+                     (
+                         acp_v2::SessionConfigKind::Select(select),
+                         acp_v2::SessionConfigOptionValue::Id { value },
+@@ -1455,8 +1647,203 @@ impl AcpConnection {
+             }
+         }
+     }
++
++    /// Restores a loaded thread's recorded mode when the agent offers it and
++    /// reports another. The entry's mode default is never applied here: it
++    /// stays new-session only, as upstream has it. The request is detached,
++    /// so the load never waits on its answer.
++    fn apply_recorded_mode(
++        &self,
++        session_id: &acp::SessionId,
++        modes: &Rc<RefCell<acp::SessionModeState>>,
++        recorded_mode: &str,
++        mode_trigger: &ModeTrigger,
++        cx: &mut AsyncApp,
++    ) {
++        let recorded_mode = acp::SessionModeId::new(recorded_mode.to_string());
++        let agent_mode = {
++            let mut state = modes.borrow_mut();
++            if !state
++                .available_modes
++                .iter()
++                .any(|mode| mode.id == recorded_mode)
++            {
++                log::warn!(
++                    "dropping recorded mode `{}` in {} session {}: the agent does not offer it",
++                    recorded_mode,
++                    self.id,
++                    session_id.0
++                );
++                return;
++            }
++            if state.current_mode_id == recorded_mode {
++                return;
++            }
++            std::mem::replace(&mut state.current_mode_id, recorded_mode.clone())
++        };
++
++        cx.spawn({
++            let agent_id = self.id.clone();
++            let session_id = session_id.clone();
++            let modes = modes.clone();
++            let mode_trigger = mode_trigger.clone();
++            let connection = self.connection.clone();
++            async move |_| {
++                let result = connection
++                    .send_request(acp::SetSessionModeRequest::new(
++                        session_id.clone(),
++                        recorded_mode.clone(),
++                    ))
++                    .block_task()
++                    .await;
++                let Err(error) = result else {
++                    return;
++                };
++                {
++                    let mut state = modes.borrow_mut();
++                    // A mode reported or picked while the request was pending
++                    // is newer than the one the agent had at load; keep it.
++                    if state.current_mode_id == recorded_mode {
++                        state.current_mode_id = agent_mode.clone();
++                    }
++                }
++                mode_trigger.fire();
++                log::warn!(
++                    "{} rejected recorded mode `{}` in session {}, keeping `{}`: {:?}",
++                    agent_id,
++                    recorded_mode,
++                    session_id.0,
++                    agent_mode,
++                    error
++                );
++            }
++        })
++        .detach();
++    }
++}
++
++/// What restoring one config option asks of the agent.
++#[derive(Debug, Clone, PartialEq)]
++enum Choice {
++    /// Request this value: the recorded one, or the entry default.
++    Send(acp_v2::SessionConfigOptionValue),
++    /// The agent already holds the recorded value; no request is needed.
++    Skip,
++    /// Nothing to apply: no usable record and no valid default.
++    None,
++}
++
++/// Whether a select option offers `value_id`, in any group when grouped.
++fn select_offers(select: &acp_v2::SessionConfigSelect, value_id: &str) -> bool {
++    match &select.options {
++        acp_v2::SessionConfigSelectOptions::Ungrouped(options) => {
++            options.iter().any(|opt| &*opt.value.0 == value_id)
++        }
++        acp_v2::SessionConfigSelectOptions::Grouped(groups) => groups
++            .iter()
++            .any(|group| group.options.iter().any(|opt| &*opt.value.0 == value_id)),
++        _ => false,
++    }
+ }
+ 
++/// The entry default to send for `option`, or `None` when the default is not
++/// a value the option offers (wrong kind, unknown id, or an unknown option
++/// kind). This is the validity check the default path has always applied.
++fn default_config_value(
++    option: &acp_v2::SessionConfigOption,
++    default: &AgentConfigOptionValue,
++) -> Option<acp_v2::SessionConfigOptionValue> {
++    match &option.kind {
++        acp_v2::SessionConfigKind::Select(select) => {
++            let value_id = default.as_value_id()?;
++            select_offers(select, value_id)
++                .then(|| acp_v2::SessionConfigOptionValue::id(value_id.to_string()))
++        }
++        acp_v2::SessionConfigKind::Boolean(_) => default
++            .as_bool()
++            .map(acp_v2::SessionConfigOptionValue::boolean),
++        _ => None,
++    }
++}
++
++/// Whether the agent offers `recorded` for `option`. A value of the wrong
++/// kind (a select id against a boolean, or the reverse) is not offered.
++fn recorded_is_offered(option: &acp_v2::SessionConfigOption, recorded: &RecordedValue) -> bool {
++    match (&option.kind, recorded) {
++        (acp_v2::SessionConfigKind::Select(select), RecordedValue::Id(value_id)) => {
++            select_offers(select, value_id)
++        }
++        (acp_v2::SessionConfigKind::Boolean(_), RecordedValue::Bool(_)) => true,
++        _ => false,
++    }
++}
++
++/// Decides what restoring `option` asks of the agent. A recorded value the
++/// agent offers wins over the default: `Skip` when it is already the current
++/// value, `Send` otherwise. A recorded value the agent does not offer is
++/// dropped (the caller warns, having the agent and session ids, after
++/// checking `recorded_is_offered`) and the entry default applies as on the
++/// default path. A default that is not offered yields `None`.
++fn choose_value(
++    option: &acp_v2::SessionConfigOption,
++    recorded: Option<&RecordedValue>,
++    default: Option<AgentConfigOptionValue>,
++) -> Choice {
++    if let Some(recorded) = recorded.filter(|recorded| recorded_is_offered(option, recorded)) {
++        return match (&option.kind, recorded) {
++            (acp_v2::SessionConfigKind::Select(select), RecordedValue::Id(value_id))
++                if &*select.current_value.0 == value_id.as_str() =>
++            {
++                Choice::Skip
++            }
++            (acp_v2::SessionConfigKind::Boolean(boolean), RecordedValue::Bool(value))
++                if boolean.current_value == *value =>
++            {
++                Choice::Skip
++            }
++            (_, RecordedValue::Id(value_id)) => {
++                Choice::Send(acp_v2::SessionConfigOptionValue::id(value_id.clone()))
++            }
++            (_, RecordedValue::Bool(value)) => {
++                Choice::Send(acp_v2::SessionConfigOptionValue::boolean(*value))
++            }
++        };
++    }
++
++    default
++        .and_then(|default| default_config_value(option, &default))
++        .map_or(Choice::None, Choice::Send)
++}
++
++/// A recorded value as the user would recognise it in a log line.
++fn recorded_value_label(recorded: &RecordedValue) -> String {
++    match recorded {
++        RecordedValue::Id(value_id) => value_id.clone(),
++        RecordedValue::Bool(value) => value.to_string(),
++    }
++}
++
++#[cfg(test)]
++mod choose_value_tests;
++
++#[cfg(test)]
++mod thread_config_test_support;
++
++#[cfg(test)]
++mod restore_options_tests;
++
++#[cfg(test)]
++mod restore_mode_tests;
++
++#[cfg(test)]
++mod recorder_tests;
++
++#[cfg(test)]
++mod recorder_mode_tests;
++
++#[cfg(test)]
++mod round_trip_tests;
++
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ struct SessionDirectories {
+     cwd: PathBuf,
+@@ -1636,6 +2023,9 @@ impl AgentConnection for AcpConnection {
+             .map_err(map_acp_error)?;
+ 
+             let (modes, config_options) = config_state(response.modes, response.config_options)?;
++            // Created before the session is registered, so the mode default's
++            // request can signal it once the agent answers.
++            let mode_trigger = ModeTrigger::new();
+ 
+             let default_mode = self.defaults.mode();
+             if let Some(default_mode) = default_mode {
+@@ -1653,6 +2043,7 @@ impl AgentConnection for AcpConnection {
+                             let default_mode = default_mode.clone();
+                             let session_id = response.session_id.clone();
+                             let modes = modes.clone();
++                            let mode_trigger = mode_trigger.clone();
+                             let conn = self.connection.clone();
+                             async move |_| {
+                                 let result = conn
+@@ -1667,6 +2058,9 @@ impl AgentConnection for AcpConnection {
+                                 if result.is_none() {
+                                     modes.borrow_mut().current_mode_id = initial_mode_id;
+                                 }
++                                // After the answer, and after the revert on
++                                // error, so the record holds the agent's mode.
++                                mode_trigger.fire();
+                             }
+                         })
+                         .detach();
+@@ -1689,7 +2083,7 @@ impl AgentConnection for AcpConnection {
+ 
+             let config_options = config_options.map(ConfigOptions::new);
+             if let Some(config_opts) = config_options.as_ref() {
+-                self.apply_default_config_options(&response.session_id, config_opts, cx);
++                self.apply_session_config_options(&response.session_id, config_opts, None, cx);
+             }
+ 
+             let action_log = cx.new(|_| ActionLog::new(project.clone()));
+@@ -1712,12 +2106,14 @@ impl AgentConnection for AcpConnection {
+ 
+             cx.update(|cx| {
+                 self.register_session(
+-                    response.session_id,
++                    response.session_id.clone(),
+                     &thread,
+                     modes,
+                     config_options,
++                    mode_trigger,
+                     cx,
+-                )
++                );
++                self.start_config_recorder(&response.session_id, cx);
+             });
+ 
+             Ok(thread)
+@@ -1983,6 +2379,7 @@ impl AgentConnection for AcpConnection {
+                 connection: self.connection.clone(),
+                 session_id: session_id.clone(),
+                 state: modes.clone(),
++                on_change: Some(session.mode_trigger.clone()),
+             }) as _)
+         } else {
+             None
+@@ -4109,9 +4506,10 @@ mod tests {
+         ])));
+ 
+         let mut async_cx = cx.to_async();
+-        connection.apply_default_config_options(
++        connection.apply_session_config_options(
+             &acp::SessionId::new("session-config-defaults"),
+             &config_options,
++            None,
+             &mut async_cx,
+         );
+         drop(async_cx);
+@@ -5872,6 +6270,8 @@ struct AcpSessionModes {
+     session_id: acp::SessionId,
+     connection: ConnectionTo<Agent>,
+     state: Rc<RefCell<acp::SessionModeState>>,
++    /// The session's mode trigger, fired once the agent has answered a change.
++    on_change: Option<ModeTrigger>,
+ }
+ 
+ impl acp_thread::AgentSessionModes for AcpSessionModes {
+@@ -5893,6 +6293,7 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
+             state.current_mode_id = mode_id.clone();
+         };
+         let state = self.state.clone();
++        let on_change = self.on_change.clone();
+         cx.foreground_executor().spawn(async move {
+             let result = connection
+                 .send_request(acp::SetSessionModeRequest::new(session_id, mode_id))
+@@ -5902,6 +6303,12 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
+             if result.is_err() {
+                 state.borrow_mut().current_mode_id = old_mode_id;
+             }
++            // Never before the request: the cell is written optimistically, so
++            // only after the answer (and the revert on error) does it hold the
++            // agent's mode.
++            if let Some(on_change) = on_change {
++                on_change.fire();
++            }
+ 
+             result?;
+ 
+@@ -6236,7 +6643,7 @@ fn handle_session_notification(
+     ctx: &ClientContext,
+ ) {
+     // Extract everything we need from the session while briefly borrowing.
+-    let (thread, session_modes, config_opts_data) = {
++    let (thread, session_modes, mode_trigger, config_opts_data) = {
+         let sessions = ctx.sessions.borrow();
+         let Some(session) = sessions.get(&notification.session_id) else {
+             log::warn!(
+@@ -6248,6 +6655,7 @@ fn handle_session_notification(
+         (
+             session.thread.clone(),
+             session.session_modes.clone(),
++            session.mode_trigger.clone(),
+             session
+                 .config_options
+                 .as_ref()
+@@ -6263,6 +6671,7 @@ fn handle_session_notification(
+     {
+         if let Some(session_modes) = &session_modes {
+             session_modes.borrow_mut().current_mode_id = current_mode_id.clone();
++            mode_trigger.fire();
+         }
+     }
+ 
+diff --git a/crates/agent_servers/src/acp/choose_value_tests.rs b/crates/agent_servers/src/acp/choose_value_tests.rs
+new file mode 100644
+index 0000000..2415630
+--- /dev/null
++++ b/crates/agent_servers/src/acp/choose_value_tests.rs
+@@ -0,0 +1,266 @@
++//! Task 2.1 — `choose_value`, the pure per-option decision (story 015, patch `0036`).
++//!
++//! Materialize with `#[cfg(test)] mod choose_value_tests;` in `acp.rs`.
++//! Contract (design.md, Restoration): `choose_value(option, recorded, default) -> Choice`
++//! with `Choice::{Send(SessionConfigOptionValue), Skip, None}`; the entry default,
++//! when it is what gets applied, comes back as `Send(default)`. The caller
++//! detects a dropped record with `recorded_is_offered(option, &RecordedValue)`.
++//! Hostile halves first: a recorded value that must NOT be sent, then the
++//! equal-to-current value that must NOT trigger a request, then the benign cases.
++
++use super::*;
++use crate::thread_config_store::RecordedValue;
++
++fn v2(option: acp::SessionConfigOption) -> acp_v2::SessionConfigOption {
++    acp_thread::config_options::from_v1(vec![option])
++        .expect("v1 option converts")
++        .remove(0)
++}
++
++fn select(id: &str, current: &str, values: &[&str]) -> acp_v2::SessionConfigOption {
++    v2(acp::SessionConfigOption::select(
++        id.to_string(),
++        id.to_string(),
++        current.to_string(),
++        values
++            .iter()
++            .map(|value| acp::SessionConfigSelectOption::new(value.to_string(), value.to_string()))
++            .collect::<Vec<_>>(),
++    ))
++}
++
++fn grouped(id: &str, current: &str, groups: &[(&str, &[&str])]) -> acp_v2::SessionConfigOption {
++    v2(acp::SessionConfigOption::select(
++        id.to_string(),
++        id.to_string(),
++        current.to_string(),
++        groups
++            .iter()
++            .map(|(group, values)| {
++                acp::SessionConfigSelectGroup::new(
++                    group.to_string(),
++                    group.to_string(),
++                    values
++                        .iter()
++                        .map(|value| {
++                            acp::SessionConfigSelectOption::new(
++                                value.to_string(),
++                                value.to_string(),
++                            )
++                        })
++                        .collect::<Vec<_>>(),
++                )
++            })
++            .collect::<Vec<_>>(),
++    ))
++}
++
++fn boolean(id: &str, current: bool) -> acp_v2::SessionConfigOption {
++    v2(acp::SessionConfigOption::boolean(
++        id.to_string(),
++        id.to_string(),
++        current,
++    ))
++}
++
++fn rec_id(value: &str) -> RecordedValue {
++    RecordedValue::Id(value.to_string())
++}
++
++fn default_id(value: &str) -> Option<AgentConfigOptionValue> {
++    Some(AgentConfigOptionValue::ValueId(value.to_string()))
++}
++
++fn describe(choice: &Choice) -> String {
++    #[allow(unreachable_patterns)]
++    match choice {
++        Choice::Send(value) => format!("Send({value:?})"),
++        Choice::Skip => "Skip".to_string(),
++        Choice::None => "None".to_string(),
++        _ => "an unexpected variant".to_string(),
++    }
++}
++
++fn assert_send(choice: Choice, expected: acp_v2::SessionConfigOptionValue) {
++    let shown = describe(&choice);
++    match choice {
++        Choice::Send(value) => assert_eq!(value, expected),
++        _ => panic!("expected Send({expected:?}), got {shown}"),
++    }
++}
++
++fn assert_skip(choice: Choice) {
++    assert!(
++        matches!(choice, Choice::Skip),
++        "expected Skip, got {}",
++        describe(&choice)
++    );
++}
++
++fn assert_nothing(choice: Choice) {
++    assert!(
++        matches!(choice, Choice::None),
++        "expected None, got {}",
++        describe(&choice)
++    );
++}
++
++// ---------------------------------------------------------------- hostile: must not send the record
++
++#[test]
++fn choose_value_drops_a_recorded_id_the_agent_no_longer_offers() {
++    // R2.4: the record names a model the agent retired — the default applies.
++    let option = select("model", "sonnet", &["sonnet", "haiku"]);
++    assert_send(
++        choose_value(&option, Some(&rec_id("opus-retired")), default_id("haiku")),
++        acp_v2::SessionConfigOptionValue::id("haiku"),
++    );
++    // ...and with no usable default there is nothing to send.
++    assert_nothing(choose_value(&option, Some(&rec_id("opus-retired")), None));
++    assert_nothing(choose_value(
++        &option,
++        Some(&rec_id("opus-retired")),
++        default_id("also-not-offered"),
++    ));
++}
++
++#[test]
++fn choose_value_drops_a_recorded_value_of_the_wrong_kind() {
++    // Collapse hazard: the select value id "true" is not the boolean `true`.
++    let toggle = boolean("fast_mode", false);
++    assert_nothing(choose_value(&toggle, Some(&rec_id("true")), None));
++    assert_send(
++        choose_value(
++            &toggle,
++            Some(&rec_id("true")),
++            Some(AgentConfigOptionValue::Boolean(false)),
++        ),
++        acp_v2::SessionConfigOptionValue::boolean(false),
++    );
++
++    let model = select("model", "sonnet", &["sonnet", "true"]);
++    assert_send(
++        choose_value(
++            &model,
++            Some(&RecordedValue::Bool(true)),
++            default_id("sonnet"),
++        ),
++        acp_v2::SessionConfigOptionValue::id("sonnet"),
++    );
++}
++
++// ---------------------------------------------------------------- hostile: must not request what the agent already has
++
++#[test]
++fn choose_value_skips_a_recorded_value_equal_to_the_agents_current_one() {
++    // R2.3, and the default must not win over a record that already holds.
++    assert_skip(choose_value(
++        &select("model", "opus", &["sonnet", "opus", "haiku"]),
++        Some(&rec_id("opus")),
++        default_id("haiku"),
++    ));
++    assert_skip(choose_value(
++        &boolean("fast_mode", true),
++        Some(&RecordedValue::Bool(true)),
++        Some(AgentConfigOptionValue::Boolean(false)),
++    ));
++    assert_skip(choose_value(
++        &grouped("effort", "high", &[("fast", &["low"]), ("deep", &["high"])]),
++        Some(&rec_id("high")),
++        None,
++    ));
++}
++
++// ---------------------------------------------------------------- split hazard: grouped and ungrouped offer alike
++
++#[test]
++fn choose_value_finds_a_recorded_id_inside_any_group() {
++    let option = grouped(
++        "model",
++        "sonnet",
++        &[("anthropic", &["sonnet", "haiku"]), ("frontier", &["opus"])],
++    );
++    assert_send(
++        choose_value(&option, Some(&rec_id("opus")), default_id("haiku")),
++        acp_v2::SessionConfigOptionValue::id("opus"),
++    );
++    // A default inside a group is valid too, as on the default path today.
++    assert_send(
++        choose_value(&option, None, default_id("opus")),
++        acp_v2::SessionConfigOptionValue::id("opus"),
++    );
++}
++
++// ---------------------------------------------------------------- benign
++
++#[test]
++fn choose_value_sends_the_recorded_value_over_the_default() {
++    // R2.1
++    assert_send(
++        choose_value(
++            &select("model", "sonnet", &["sonnet", "opus", "haiku"]),
++            Some(&rec_id("opus")),
++            default_id("haiku"),
++        ),
++        acp_v2::SessionConfigOptionValue::id("opus"),
++    );
++    assert_send(
++        choose_value(
++            &boolean("fast_mode", false),
++            Some(&RecordedValue::Bool(true)),
++            Some(AgentConfigOptionValue::Boolean(false)),
++        ),
++        acp_v2::SessionConfigOptionValue::boolean(true),
++    );
++}
++
++#[test]
++fn choose_value_without_a_record_applies_the_default_as_before() {
++    // R2.5, R2.6: the default path's own rules, unchanged.
++    let model = select("model", "sonnet", &["sonnet", "haiku"]);
++    assert_send(
++        choose_value(&model, None, default_id("haiku")),
++        acp_v2::SessionConfigOptionValue::id("haiku"),
++    );
++    // dev-0033 sends a valid default even when it equals the current value.
++    assert_send(
++        choose_value(&model, None, default_id("sonnet")),
++        acp_v2::SessionConfigOptionValue::id("sonnet"),
++    );
++    assert_nothing(choose_value(&model, None, default_id("not-offered")));
++    assert_nothing(choose_value(
++        &model,
++        None,
++        Some(AgentConfigOptionValue::Boolean(true)),
++    ));
++    assert_nothing(choose_value(&model, None, None));
++    assert_send(
++        choose_value(
++            &boolean("web_search", false),
++            None,
++            Some(AgentConfigOptionValue::Boolean(true)),
++        ),
++        acp_v2::SessionConfigOptionValue::boolean(true),
++    );
++}
++
++// ---------------------------------------------------------------- recorded_is_offered
++
++#[test]
++fn choose_value_recorded_is_offered_only_for_values_the_agent_offers() {
++    // Hostile half: values the agent does not offer for this option.
++    let model = select("model", "sonnet", &["sonnet", "haiku"]);
++    assert!(!recorded_is_offered(&model, &rec_id("opus-retired")));
++    assert!(!recorded_is_offered(&model, &RecordedValue::Bool(true)));
++    let toggle = boolean("fast_mode", false);
++    assert!(!recorded_is_offered(&toggle, &rec_id("true")));
++    let groups = grouped("effort", "high", &[("fast", &["low"]), ("deep", &["high"])]);
++    assert!(!recorded_is_offered(&groups, &rec_id("medium")));
++
++    // Benign half: what the agent does offer, ungrouped, grouped or boolean.
++    assert!(recorded_is_offered(&model, &rec_id("haiku")));
++    assert!(recorded_is_offered(&model, &rec_id("sonnet")));
++    assert!(recorded_is_offered(&groups, &rec_id("low")));
++    assert!(recorded_is_offered(&toggle, &RecordedValue::Bool(true)));
++    assert!(recorded_is_offered(&toggle, &RecordedValue::Bool(false)));
++}
+diff --git a/crates/agent_servers/src/acp/recorder_mode_tests.rs b/crates/agent_servers/src/acp/recorder_mode_tests.rs
+new file mode 100644
+index 0000000..53170e8
+--- /dev/null
++++ b/crates/agent_servers/src/acp/recorder_mode_tests.rs
+@@ -0,0 +1,168 @@
++//! Task 3.2 — mode changes reach the recorder (story 015, patch `0036`).
++//!
++//! Materialize with `#[cfg(test)] mod recorder_mode_tests;` in `acp.rs`.
++
++use super::thread_config_test_support::*;
++use super::*;
++
++const AGENT: &str = "Mode Agent";
++
++fn mode_script() -> AgentScript {
++    AgentScript {
++        agent_id: AGENT,
++        new_session_id: "rm-created",
++        modes: Some(modes("default", &["default", "plan", "acceptEdits"])),
++        rejected_modes: vec!["plan"],
++        ..Default::default()
++    }
++}
++
++#[gpui::test]
++async fn recorder_mode_ignores_a_rejected_mode_and_records_an_accepted_one(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.8 (hostile: `set_mode` writes the mode optimistically before the
++    // agent answers), then R1.2.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    let _thread = agent.load("rm-pick", cx).await;
++
++    assert!(agent.pick_mode("rm-pick", "plan", cx).await.is_err());
++    assert_ne!(
++        recorded(AGENT, "rm-pick", cx)
++            .and_then(|config| config.mode)
++            .as_deref(),
++        Some("plan"),
++        "a rejected mode must not be recorded"
++    );
++
++    agent
++        .pick_mode("rm-pick", "acceptEdits", cx)
++        .await
++        .expect("accepted mode");
++    let config = recorded(AGENT, "rm-pick", cx).expect("an accepted mode is recorded");
++    assert_eq!(config.mode.as_deref(), Some("acceptEdits"));
++
++    assert!(agent.pick_mode("rm-pick", "plan", cx).await.is_err());
++    assert_eq!(
++        recorded(AGENT, "rm-pick", cx)
++            .expect("record kept")
++            .mode
++            .as_deref(),
++        Some("acceptEdits"),
++        "a rejected mode leaves the recorded mode unchanged"
++    );
++}
++
++#[gpui::test]
++async fn recorder_mode_records_a_current_mode_update_from_the_agent(cx: &mut gpui::TestAppContext) {
++    // R1.4
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    let _thread = agent.load("rm-update", cx).await;
++
++    agent.notify(
++        "rm-update",
++        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
++            acp::SessionModeId::new("plan"),
++        )),
++        cx,
++    );
++
++    let config = recorded(AGENT, "rm-update", cx).expect("an agent mode update is recorded");
++    assert_eq!(config.mode.as_deref(), Some("plan"));
++    assert!(
++        config.options.is_empty(),
++        "a modes-only agent records no options"
++    );
++}
++
++#[gpui::test]
++async fn recorder_mode_keeps_the_reverted_mode_when_a_rejection_lands_after_an_accepted_one(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.8 — two mode picks in flight: `acceptEdits` is accepted and answered
++    // first while the cell already holds the optimistic `plan`; `plan` is then
++    // rejected and reverted. The final record must follow the reverted cell.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            gated: true,
++            ..mode_script()
++        },
++        project,
++        cx,
++    )
++    .await;
++    let _thread = agent.load("rm-race", cx).await;
++
++    let picks = agent.start_mode_picks("rm-race", &["acceptEdits", "plan"], cx);
++    cx.run_until_parked();
++    agent.open_gate(cx);
++    let mut results = Vec::new();
++    for pick in picks {
++        results.push(pick.await.is_ok());
++    }
++    cx.run_until_parked();
++
++    assert_eq!(
++        results,
++        vec![true, false],
++        "acceptEdits accepted, plan rejected"
++    );
++    assert_eq!(
++        agent.current_mode("rm-race").as_deref(),
++        Some("acceptEdits")
++    );
++    assert_eq!(
++        recorded(AGENT, "rm-race", cx)
++            .expect("recorded")
++            .mode
++            .as_deref(),
++        Some("acceptEdits"),
++        "the rejected optimistic mode must not survive in the record"
++    );
++}
++
++#[gpui::test]
++async fn recorder_mode_records_the_agents_mode_when_a_new_sessions_default_mode_is_rejected(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.6 hostile half: the entry's default mode is written optimistically,
++    // rejected and reverted — the record holds the agent's mode.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    agent.set_defaults(Some("plan"), Vec::new());
++
++    let _thread = agent.new_session(cx).await;
++
++    assert_eq!(agent.current_mode("rm-created").as_deref(), Some("default"));
++    assert_eq!(
++        recorded(AGENT, "rm-created", cx)
++            .expect("the reverted default mode is recorded")
++            .mode
++            .as_deref(),
++        Some("default")
++    );
++}
++
++#[gpui::test]
++async fn recorder_mode_records_an_accepted_default_mode_of_a_new_session(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.6
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    agent.set_defaults(Some("acceptEdits"), Vec::new());
++
++    let _thread = agent.new_session(cx).await;
++
++    assert_eq!(agent.mode_requests(), vec!["acceptEdits".to_string()]);
++    assert_eq!(
++        recorded(AGENT, "rm-created", cx)
++            .expect("an accepted default mode is recorded")
++            .mode
++            .as_deref(),
++        Some("acceptEdits")
++    );
++}
+diff --git a/crates/agent_servers/src/acp/recorder_tests.rs b/crates/agent_servers/src/acp/recorder_tests.rs
+new file mode 100644
+index 0000000..dc02398
+--- /dev/null
++++ b/crates/agent_servers/src/acp/recorder_tests.rs
+@@ -0,0 +1,191 @@
++//! Task 3.1 — `ConfigRecorder`: every accepted config change is recorded
++//! (story 015, patch `0036`).
++//!
++//! Materialize with `#[cfg(test)] mod recorder_tests;` in `acp.rs`.
++//! Hostile half first in each test: the change that must NOT be recorded.
++
++use super::thread_config_test_support::*;
++use super::*;
++use crate::thread_config_store::RecordedValue;
++
++const PLUS: &str = "Claude Agent (Plus)";
++
++fn script() -> AgentScript {
++    AgentScript {
++        agent_id: PLUS,
++        new_session_id: "rec-created",
++        config_options: Some(vec![
++            select("model", "sonnet", &["sonnet", "opus", "haiku"]),
++            select("effort", "high", &["low", "high"]),
++            boolean("web_search", false),
++        ]),
++        rejected_values: vec![("model", serde_json::json!("haiku"))],
++        side_effect: Some(("model", "opus", boolean("fast_mode", false))),
++        ..Default::default()
++    }
++}
++
++#[gpui::test]
++async fn recorder_ignores_a_rejected_pick_and_records_an_accepted_one(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.8 (hostile), then R1.1. R1.7: a Shift pick reaches this same
++    // `set_config_option`, so it is recorded the same way.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(script(), project, cx).await;
++    let _thread = agent.load("rec-pick", cx).await;
++
++    assert!(
++        agent
++            .pick("rec-pick", "model", id_value("haiku"), cx)
++            .await
++            .is_err()
++    );
++    let after_rejection = recorded(PLUS, "rec-pick", cx);
++    assert_ne!(
++        after_rejection
++            .as_ref()
++            .and_then(|config| recorded_id(config, "model"))
++            .as_deref(),
++        Some("haiku"),
++        "a rejected pick must not be recorded"
++    );
++
++    agent
++        .pick("rec-pick", "model", id_value("opus"), cx)
++        .await
++        .expect("accepted pick");
++    let after_pick = recorded(PLUS, "rec-pick", cx).expect("an accepted pick is recorded");
++    assert_eq!(recorded_id(&after_pick, "model").as_deref(), Some("opus"));
++    assert_eq!(recorded_id(&after_pick, "effort").as_deref(), Some("high"));
++    assert_eq!(recorded_bool(&after_pick, "web_search"), Some(false));
++
++    assert!(
++        agent
++            .pick("rec-pick", "model", id_value("haiku"), cx)
++            .await
++            .is_err()
++    );
++    let after_second_rejection = recorded(PLUS, "rec-pick", cx).expect("record kept");
++    assert_eq!(
++        recorded_id(&after_second_rejection, "model").as_deref(),
++        Some("opus"),
++        "a rejected pick leaves the recorded value unchanged"
++    );
++}
++
++#[gpui::test]
++async fn recorder_records_options_that_appear_as_a_side_effect(cx: &mut gpui::TestAppContext) {
++    // R1.5: the agent's full list after the change, not just the picked option.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(script(), project, cx).await;
++    let _thread = agent.load("rec-side", cx).await;
++
++    agent
++        .pick("rec-side", "model", id_value("opus"), cx)
++        .await
++        .expect("accepted pick");
++
++    let config = recorded(PLUS, "rec-side", cx).expect("recorded");
++    assert_eq!(recorded_bool(&config, "fast_mode"), Some(false));
++    assert_eq!(recorded_id(&config, "model").as_deref(), Some("opus"));
++}
++
++#[gpui::test]
++async fn recorder_records_a_config_option_update_from_the_agent(cx: &mut gpui::TestAppContext) {
++    // R1.3
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(script(), project, cx).await;
++    let _thread = agent.load("rec-update", cx).await;
++
++    agent.notify(
++        "rec-update",
++        acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(vec![
++            select("model", "haiku", &["sonnet", "opus", "haiku"]),
++            select("effort", "low", &["low", "high"]),
++            boolean("web_search", true),
++        ])),
++        cx,
++    );
++
++    let config = recorded(PLUS, "rec-update", cx).expect("an agent update is recorded");
++    assert_eq!(recorded_id(&config, "model").as_deref(), Some("haiku"));
++    assert_eq!(recorded_id(&config, "effort").as_deref(), Some("low"));
++    assert_eq!(recorded_bool(&config, "web_search"), Some(true));
++}
++
++#[gpui::test]
++async fn recorder_records_the_defaults_a_new_session_adopted_but_not_a_rejected_one(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.6, with the hostile half from the design's gotcha: the default for
++    // `model` is rejected and reverted, so the optimistic `haiku` must never
++    // reach the record; the accepted `web_search` default must.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(script(), project, cx).await;
++    agent.set_defaults(
++        None,
++        vec![
++            ("model", AgentConfigOptionValue::ValueId("haiku".into())),
++            ("web_search", AgentConfigOptionValue::Boolean(true)),
++        ],
++    );
++
++    let _thread = agent.new_session(cx).await;
++
++    let config = recorded(PLUS, "rec-created", cx).expect("a new session's defaults are recorded");
++    assert_eq!(recorded_bool(&config, "web_search"), Some(true));
++    assert_eq!(
++        recorded_id(&config, "model").as_deref(),
++        Some("sonnet"),
++        "the rejected default is not recorded; the agent's value is"
++    );
++}
++
++#[gpui::test]
++async fn recorder_keeps_the_agents_value_when_a_rejection_lands_after_an_accepted_change(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.8, R2.7 — two restored values in flight: `model` is accepted and
++    // answered first, `effort` is rejected and its answer is held back. The
++    // final record must hold the agent's `effort`, never the rejected `low`.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            rejected_values: vec![("effort", serde_json::json!("low"))],
++            gated: true,
++            ..script()
++        },
++        project,
++        cx,
++    )
++    .await;
++    record(
++        PLUS,
++        "rec-race",
++        recorded_config(
++            None,
++            vec![
++                ("model", RecordedValue::Id("opus".into())),
++                ("effort", RecordedValue::Id("low".into())),
++            ],
++        ),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("rec-race", cx).await;
++    agent.open_gate(cx);
++
++    assert_eq!(
++        agent.option_value("rec-race", "effort"),
++        Some(serde_json::json!("high"))
++    );
++    let config = recorded(PLUS, "rec-race", cx).expect("recorded");
++    assert_eq!(recorded_id(&config, "model").as_deref(), Some("opus"));
++    assert_eq!(
++        recorded_id(&config, "effort").as_deref(),
++        Some("high"),
++        "the rejected restored value must not survive in the record"
++    );
++}
+diff --git a/crates/agent_servers/src/acp/restore_mode_tests.rs b/crates/agent_servers/src/acp/restore_mode_tests.rs
+new file mode 100644
+index 0000000..a65df31
+--- /dev/null
++++ b/crates/agent_servers/src/acp/restore_mode_tests.rs
+@@ -0,0 +1,174 @@
++//! Task 2.3 — restoring the recorded session mode on load (story 015, patch `0036`).
++//!
++//! Materialize with `#[cfg(test)] mod restore_mode_tests;` in `acp.rs`.
++//! The agent exposes legacy modes and no config options, the only shape in
++//! which Zeo keeps `SessionModeState` (`config_state`).
++
++use super::thread_config_test_support::*;
++use crate::test_log_capture::logged;
++
++const AGENT: &str = "Mode Agent";
++
++fn mode_script() -> AgentScript {
++    AgentScript {
++        agent_id: AGENT,
++        new_session_id: "mode-created",
++        modes: Some(modes("default", &["default", "plan", "acceptEdits"])),
++        ..Default::default()
++    }
++}
++
++#[gpui::test]
++async fn restore_mode_does_not_resend_the_mode_the_agent_already_reports(
++    cx: &mut gpui::TestAppContext,
++) {
++    // Hostile half: R2.3 for modes — the agent restored the same mode itself.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            modes: Some(modes("plan", &["default", "plan", "acceptEdits"])),
++            ..mode_script()
++        },
++        project,
++        cx,
++    )
++    .await;
++    record(
++        AGENT,
++        "m-same",
++        recorded_config(Some("plan"), Vec::new()),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("m-same", cx).await;
++
++    assert!(
++        agent.mode_requests().is_empty(),
++        "sent {:?}",
++        agent.mode_requests()
++    );
++    assert_eq!(agent.current_mode("m-same").as_deref(), Some("plan"));
++
++    // Benign half: a recorded mode that differs from the agent's IS sent.
++    record(
++        AGENT,
++        "m-differs",
++        recorded_config(Some("acceptEdits"), Vec::new()),
++        cx,
++    )
++    .await;
++    let _other = agent.load("m-differs", cx).await;
++    assert_eq!(agent.mode_requests(), vec!["acceptEdits".to_string()]);
++}
++
++#[gpui::test]
++async fn restore_mode_ignores_an_unoffered_mode_and_applies_no_mode_default_on_load(
++    cx: &mut gpui::TestAppContext,
++) {
++    // Hostile half: neither the retired recorded mode nor the entry's mode
++    // default may be sent on load — mode defaults stay new-session only.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    agent.set_defaults(Some("acceptEdits"), Vec::new());
++    record(
++        AGENT,
++        "m-retired",
++        recorded_config(Some("restore_mode_retired"), Vec::new()),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("m-retired", cx).await;
++
++    assert!(
++        agent.mode_requests().is_empty(),
++        "sent {:?}",
++        agent.mode_requests()
++    );
++    assert_eq!(agent.current_mode("m-retired").as_deref(), Some("default"));
++    assert!(
++        logged(&["restore_mode_retired"]),
++        "a warning must name the dropped mode"
++    );
++}
++
++#[gpui::test]
++async fn restore_mode_sends_the_recorded_mode_on_load(cx: &mut gpui::TestAppContext) {
++    // R2.2
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    record(
++        AGENT,
++        "m-plan",
++        recorded_config(Some("plan"), Vec::new()),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("m-plan", cx).await;
++
++    assert_eq!(agent.mode_requests(), vec!["plan".to_string()]);
++    assert_eq!(agent.current_mode("m-plan").as_deref(), Some("plan"));
++}
++
++#[gpui::test]
++async fn restore_mode_rejected_keeps_the_agents_mode_and_the_session_open(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R2.7 for modes.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            rejected_modes: vec!["plan"],
++            ..mode_script()
++        },
++        project,
++        cx,
++    )
++    .await;
++    record(
++        AGENT,
++        "m-reject",
++        recorded_config(Some("plan"), Vec::new()),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("m-reject", cx).await;
++
++    assert_eq!(agent.mode_requests(), vec!["plan".to_string()]);
++    assert_eq!(
++        agent.current_mode("m-reject").as_deref(),
++        Some("default"),
++        "the optimistic mode is reverted to the agent's"
++    );
++    assert!(agent.is_open("m-reject"));
++}
++
++#[gpui::test]
++async fn restore_mode_without_a_record_sends_no_mode_on_load(cx: &mut gpui::TestAppContext) {
++    // R2.6: as dev-0033, a load with no record sends no mode at all.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(mode_script(), project, cx).await;
++    agent.set_defaults(Some("plan"), Vec::new());
++    record(
++        AGENT,
++        "m-other-thread",
++        recorded_config(Some("acceptEdits"), Vec::new()),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("m-no-record", cx).await;
++
++    assert!(
++        agent.mode_requests().is_empty(),
++        "sent {:?}",
++        agent.mode_requests()
++    );
++
++    // Benign half: the thread that owns the record gets its mode back.
++    let _other = agent.load("m-other-thread", cx).await;
++    assert_eq!(agent.mode_requests(), vec!["acceptEdits".to_string()]);
++}
+diff --git a/crates/agent_servers/src/acp/restore_options_tests.rs b/crates/agent_servers/src/acp/restore_options_tests.rs
+new file mode 100644
+index 0000000..09f3e90
+--- /dev/null
++++ b/crates/agent_servers/src/acp/restore_options_tests.rs
+@@ -0,0 +1,377 @@
++//! Task 2.2 — restoring recorded config options on load (story 015, patch `0036`).
++//!
++//! Materialize with `#[cfg(test)] mod restore_options_tests;` in `acp.rs`
++//! (needs `thread_config_test_support` and `crate::test_log_capture`).
++//! Each test drives a real `session/load` against a scripted agent and asserts
++//! the exact `session/set_config_option` requests that went over the wire.
++
++use super::thread_config_test_support::*;
++use super::*;
++use crate::test_log_capture::logged;
++use crate::thread_config_store::RecordedValue;
++
++const PLUS: &str = "Claude Agent (Plus)";
++
++fn plus_script() -> AgentScript {
++    AgentScript {
++        agent_id: PLUS,
++        new_session_id: "created-session",
++        config_options: Some(vec![
++            select("model", "sonnet", &["sonnet", "opus", "haiku"]),
++            select("effort", "high", &["low", "high"]),
++            boolean("web_search", false),
++        ]),
++        side_effect: Some(("model", "opus", boolean("fast_mode", false))),
++        ..Default::default()
++    }
++}
++
++fn plus_defaults(agent: &ConfigAgent) {
++    agent.set_defaults(
++        None,
++        vec![
++            ("model", AgentConfigOptionValue::ValueId("haiku".into())),
++            ("effort", AgentConfigOptionValue::ValueId("low".into())),
++            ("web_search", AgentConfigOptionValue::Boolean(true)),
++        ],
++    );
++}
++
++#[gpui::test]
++async fn load_with_a_record_sends_only_what_differs_and_defaults_only_what_is_unrecorded(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R2.1, R2.3, R2.5, R2.8. Hostile half first: `effort` is recorded at the
++    // value the agent restored, and its default differs — the default must
++    // not be sent over the record, and the record must not be re-sent.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(plus_script(), project, cx).await;
++    plus_defaults(&agent);
++    record(
++        PLUS,
++        "s-restore",
++        recorded_config(
++            None,
++            vec![
++                ("model", RecordedValue::Id("opus".into())),
++                ("effort", RecordedValue::Id("high".into())),
++            ],
++        ),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("s-restore", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![
++            wire("model", serde_json::json!("opus")),
++            wire("web_search", serde_json::json!(true)),
++        ],
++        "only the differing recorded value and the unrecorded option's default are sent"
++    );
++    assert_eq!(
++        agent.option_value("s-restore", "model"),
++        Some(serde_json::json!("opus"))
++    );
++    assert_eq!(
++        agent.option_value("s-restore", "effort"),
++        Some(serde_json::json!("high"))
++    );
++    assert!(
++        agent.option_value("s-restore", "fast_mode").is_some(),
++        "R2.8: the full list the agent returned after the restored value is adopted"
++    );
++}
++
++#[gpui::test]
++async fn load_with_an_unavailable_recorded_value_applies_the_default_and_warns(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R2.4: the dropped value is never sent; the default takes its place and
++    // a warning names the option and the dropped value.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            agent_id: PLUS,
++            config_options: Some(vec![select("r24_model", "sonnet", &["sonnet", "haiku"])]),
++            ..Default::default()
++        },
++        project,
++        cx,
++    )
++    .await;
++    agent.set_defaults(
++        None,
++        vec![("r24_model", AgentConfigOptionValue::ValueId("haiku".into()))],
++    );
++    record(
++        PLUS,
++        "s-unavailable",
++        recorded_config(
++            None,
++            vec![("r24_model", RecordedValue::Id("r24_retired".into()))],
++        ),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("s-unavailable", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![wire("r24_model", serde_json::json!("haiku"))]
++    );
++    assert!(
++        logged(&["r24_model", "r24_retired", PLUS, "s-unavailable"]),
++        "one warning must name the option, the dropped value, the agent and the session"
++    );
++    assert!(agent.is_open("s-unavailable"));
++}
++
++#[gpui::test]
++async fn load_reads_only_the_record_of_its_own_agent(cx: &mut gpui::TestAppContext) {
++    // R3.1 hostile half: another agent recorded state under the same session id.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(plus_script(), project, cx).await;
++    plus_defaults(&agent);
++    record(
++        "Codex",
++        "s-shared",
++        recorded_config(
++            None,
++            vec![
++                ("model", RecordedValue::Id("opus".into())),
++                ("effort", RecordedValue::Id("high".into())),
++                ("web_search", RecordedValue::Bool(false)),
++            ],
++        ),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("s-shared", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![
++            wire("effort", serde_json::json!("low")),
++            wire("model", serde_json::json!("haiku")),
++            wire("web_search", serde_json::json!(true)),
++        ],
++        "a thread with no record of its own gets the entry defaults, not another agent's state"
++    );
++
++    // Benign half: the same session id under this agent's own record is restored.
++    let other = ConfigAgent::connect(plus_script(), agent.project.clone(), cx).await;
++    record(
++        PLUS,
++        "s-shared-own",
++        recorded_config(None, vec![("model", RecordedValue::Id("opus".into()))]),
++        cx,
++    )
++    .await;
++    let _own = other.load("s-shared-own", cx).await;
++    assert_eq!(
++        other.config_requests(),
++        vec![wire("model", serde_json::json!("opus"))]
++    );
++}
++
++#[gpui::test]
++async fn new_session_ignores_a_record_under_its_session_id(cx: &mut gpui::TestAppContext) {
++    // R3.1, R3.3 (a fork arrives through session/new): new threads start from
++    // the entry defaults even when a record already sits under the same key.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(plus_script(), project, cx).await;
++    agent.set_defaults(
++        None,
++        vec![("model", AgentConfigOptionValue::ValueId("haiku".into()))],
++    );
++    record(
++        PLUS,
++        "created-session",
++        recorded_config(
++            None,
++            vec![
++                ("model", RecordedValue::Id("opus".into())),
++                ("web_search", RecordedValue::Bool(true)),
++            ],
++        ),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.new_session(cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![wire("model", serde_json::json!("haiku"))]
++    );
++
++    // Benign half: the same kind of record IS restored when a thread is loaded.
++    let loader = ConfigAgent::connect(plus_script(), agent.project.clone(), cx).await;
++    loader.set_defaults(
++        None,
++        vec![("model", AgentConfigOptionValue::ValueId("haiku".into()))],
++    );
++    record(
++        PLUS,
++        "s-loaded-not-new",
++        recorded_config(None, vec![("model", RecordedValue::Id("opus".into()))]),
++        cx,
++    )
++    .await;
++    let _loaded = loader.load("s-loaded-not-new", cx).await;
++    assert_eq!(
++        loader.config_requests(),
++        vec![wire("model", serde_json::json!("opus"))]
++    );
++}
++
++#[gpui::test]
++async fn load_without_a_record_applies_the_entry_defaults_as_before(cx: &mut gpui::TestAppContext) {
++    // R2.6, R4.1: an existing thread with no record behaves as dev-0033 —
++    // every valid default is sent, including one equal to the current value.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(plus_script(), project, cx).await;
++    agent.set_defaults(
++        None,
++        vec![
++            ("model", AgentConfigOptionValue::ValueId("haiku".into())),
++            ("effort", AgentConfigOptionValue::ValueId("high".into())),
++            ("web_search", AgentConfigOptionValue::Boolean(true)),
++        ],
++    );
++
++    // A record of ANOTHER thread must not count as this thread's record.
++    record(
++        PLUS,
++        "s-some-other-thread",
++        recorded_config(None, vec![("model", RecordedValue::Id("opus".into()))]),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("s-no-record", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![
++            wire("effort", serde_json::json!("high")),
++            wire("model", serde_json::json!("haiku")),
++            wire("web_search", serde_json::json!(true)),
++        ]
++    );
++
++    // Benign half: the thread that owns that record gets it back.
++    let loader = ConfigAgent::connect(plus_script(), agent.project.clone(), cx).await;
++    let _other = loader.load("s-some-other-thread", cx).await;
++    assert_eq!(
++        loader.config_requests(),
++        vec![wire("model", serde_json::json!("opus"))]
++    );
++}
++
++#[gpui::test]
++async fn rejected_restored_value_keeps_the_agents_value_and_the_session_open(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R2.7
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            rejected_values: vec![("model", serde_json::json!("opus"))],
++            ..plus_script()
++        },
++        project,
++        cx,
++    )
++    .await;
++    record(
++        PLUS,
++        "s-rejected",
++        recorded_config(None, vec![("model", RecordedValue::Id("opus".into()))]),
++        cx,
++    )
++    .await;
++
++    let thread = agent.load("s-rejected", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![wire("model", serde_json::json!("opus"))]
++    );
++    assert_eq!(
++        agent.option_value("s-rejected", "model"),
++        Some(serde_json::json!("sonnet")),
++        "the optimistic restored value is reverted to what the agent reports"
++    );
++    assert!(agent.is_open("s-rejected"));
++
++    // The thread stays usable: a later pick goes through.
++    agent
++        .pick("s-rejected", "model", id_value("haiku"), cx)
++        .await
++        .expect("a pick on the still-open session succeeds");
++    assert_eq!(
++        agent.option_value("s-rejected", "model"),
++        Some(serde_json::json!("haiku"))
++    );
++    drop(thread);
++}
++
++#[gpui::test]
++async fn thread_config_store_corrupt_record_is_logged_and_load_applies_defaults(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R3.4 (task 1.1's store, proved through the load path): an unreadable
++    // record is logged with both ids and the load proceeds as "no record".
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(
++        AgentScript {
++            agent_id: "r34 agent",
++            config_options: Some(vec![select("model", "sonnet", &["sonnet", "haiku"])]),
++            ..Default::default()
++        },
++        project,
++        cx,
++    )
++    .await;
++    agent.set_defaults(
++        None,
++        vec![("model", AgentConfigOptionValue::ValueId("haiku".into()))],
++    );
++    let raw_key = crate::thread_config_store::key(
++        &AgentId::new("r34 agent"),
++        &acp::SessionId::new("r34-session"),
++    )
++    .expect("key renders");
++    cx.update(|cx| {
++        let store = db::kvp::KeyValueStore::global(cx);
++        cx.background_spawn(async move {
++            store
++                .scoped("acp_thread_config")
++                .write(raw_key, "{not json".to_string())
++                .await
++        })
++    })
++    .await
++    .expect("raw write succeeds");
++
++    let _thread = agent.load("r34-session", cx).await;
++
++    assert!(
++        agent.is_open("r34-session"),
++        "a bad record must not block the load"
++    );
++    assert_eq!(
++        agent.config_requests(),
++        vec![wire("model", serde_json::json!("haiku"))]
++    );
++    assert!(
++        logged(&["r34 agent", "r34-session"]),
++        "the read failure must be logged with the agent and the session id"
++    );
++}
+diff --git a/crates/agent_servers/src/acp/round_trip_tests.rs b/crates/agent_servers/src/acp/round_trip_tests.rs
+new file mode 100644
+index 0000000..df1cda0
+--- /dev/null
++++ b/crates/agent_servers/src/acp/round_trip_tests.rs
+@@ -0,0 +1,152 @@
++//! Task 5.1 — what is recorded is what is restored, across a restart
++//! (story 015, patch `0036`): the producer (`snapshot` through the recorder)
++//! against the consumer (`choose_value` through restoration).
++//!
++//! Materialize with `#[cfg(test)] mod round_trip_tests;` in `acp.rs`.
++//! "Restart" = the first connection and its threads are dropped, and a fresh
++//! connection with a fresh agent opens the same test key-value store.
++
++use super::thread_config_test_support::*;
++use super::*;
++
++const PLUS: &str = "Claude Agent (Plus)";
++const CODEX: &str = "Codex";
++
++fn script(agent_id: &'static str) -> AgentScript {
++    AgentScript {
++        agent_id,
++        config_options: Some(vec![
++            select("model", "sonnet", &["sonnet", "opus", "haiku"]),
++            select("effort", "high", &["low", "high"]),
++            boolean("web_search", false),
++        ]),
++        ..Default::default()
++    }
++}
++
++fn entry_defaults(agent: &ConfigAgent) {
++    agent.set_defaults(
++        None,
++        vec![
++            ("model", AgentConfigOptionValue::ValueId("haiku".into())),
++            ("web_search", AgentConfigOptionValue::Boolean(true)),
++        ],
++    );
++}
++
++#[gpui::test]
++async fn round_trip_two_agents_sharing_a_session_id_restore_their_own_state(
++    cx: &mut gpui::TestAppContext,
++) {
++    // Hostile half (R3.1): one session id, two agents, two different states.
++    let project = init(cx).await;
++    {
++        let plus = ConfigAgent::connect(script(PLUS), project.clone(), cx).await;
++        let codex = ConfigAgent::connect(script(CODEX), project.clone(), cx).await;
++        let plus_thread = plus.load("shared", cx).await;
++        let codex_thread = codex.load("shared", cx).await;
++        plus.pick("shared", "model", id_value("opus"), cx)
++            .await
++            .expect("Plus pick");
++        codex
++            .pick("shared", "model", id_value("haiku"), cx)
++            .await
++            .expect("Codex pick");
++        drop(plus_thread);
++        drop(codex_thread);
++        release(cx);
++    }
++
++    let plus = ConfigAgent::connect(script(PLUS), project.clone(), cx).await;
++    let codex = ConfigAgent::connect(script(CODEX), project, cx).await;
++    let _plus_thread = plus.load("shared", cx).await;
++    let _codex_thread = codex.load("shared", cx).await;
++
++    assert_eq!(
++        plus.config_requests(),
++        vec![wire("model", serde_json::json!("opus"))]
++    );
++    assert_eq!(
++        codex.config_requests(),
++        vec![wire("model", serde_json::json!("haiku"))]
++    );
++}
++
++#[gpui::test]
++async fn round_trip_restores_picked_and_agent_reported_values_after_a_restart(
++    cx: &mut gpui::TestAppContext,
++) {
++    // R1.9, R2.1, R2.3: after the restart only the changed options are sent;
++    // `web_search`, recorded at the value the agent restores, is skipped even
++    // though the entry default differs.
++    let project = init(cx).await;
++    {
++        let agent = ConfigAgent::connect(script(PLUS), project.clone(), cx).await;
++        let thread = agent.load("s-trip", cx).await;
++        agent
++            .pick("s-trip", "model", id_value("opus"), cx)
++            .await
++            .expect("pick");
++        agent.notify(
++            "s-trip",
++            acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(vec![
++                select("model", "opus", &["sonnet", "opus", "haiku"]),
++                select("effort", "low", &["low", "high"]),
++                boolean("web_search", false),
++            ])),
++            cx,
++        );
++        drop(thread);
++        release(cx);
++    }
++
++    let agent = ConfigAgent::connect(script(PLUS), project, cx).await;
++    entry_defaults(&agent);
++    let _thread = agent.load("s-trip", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![
++            wire("effort", serde_json::json!("low")),
++            wire("model", serde_json::json!("opus")),
++        ]
++    );
++    assert_eq!(
++        agent.option_value("s-trip", "model"),
++        Some(serde_json::json!("opus"))
++    );
++    assert_eq!(
++        agent.option_value("s-trip", "effort"),
++        Some(serde_json::json!("low"))
++    );
++    assert_eq!(
++        agent.option_value("s-trip", "web_search"),
++        Some(serde_json::json!(false))
++    );
++}
++
++#[gpui::test]
++async fn round_trip_restores_the_mode_after_a_restart(cx: &mut gpui::TestAppContext) {
++    let mode_script = AgentScript {
++        agent_id: PLUS,
++        modes: Some(modes("default", &["default", "plan"])),
++        ..Default::default()
++    };
++    let project = init(cx).await;
++    {
++        let agent = ConfigAgent::connect(mode_script.clone(), project.clone(), cx).await;
++        let thread = agent.load("s-mode-trip", cx).await;
++        agent
++            .pick_mode("s-mode-trip", "plan", cx)
++            .await
++            .expect("mode pick");
++        drop(thread);
++        release(cx);
++    }
++
++    let agent = ConfigAgent::connect(mode_script, project, cx).await;
++    let _thread = agent.load("s-mode-trip", cx).await;
++
++    assert_eq!(agent.mode_requests(), vec!["plan".to_string()]);
++    assert_eq!(agent.current_mode("s-mode-trip").as_deref(), Some("plan"));
++}
+diff --git a/crates/agent_servers/src/acp/thread_config_test_support.rs b/crates/agent_servers/src/acp/thread_config_test_support.rs
+new file mode 100644
+index 0000000..0b62abb
+--- /dev/null
++++ b/crates/agent_servers/src/acp/thread_config_test_support.rs
+@@ -0,0 +1,619 @@
++//! Shared harness for the thread-config tests of patch `0036` (story 015):
++//! a scripted ACP agent over the real wire and the production client handler
++//! set, so picks, agent updates and loads travel exactly as in Zeo.
++//!
++//! Materialize with `#[cfg(test)] mod thread_config_test_support;` in `acp.rs`,
++//! beside `mod debug_log;`. The test files of tasks 2.2, 2.3, 3.1, 3.2 and 5.1
++//! sit beside it as sibling modules of `acp` and reach its private items.
++
++use std::sync::Mutex;
++
++use super::*;
++use crate::thread_config_store::{self, RecordedConfig, RecordedValue};
++
++pub(super) const WORK_DIR: &str = "/a";
++
++/// What the fake agent reports on `session/new` and `session/load`, and what it refuses.
++#[derive(Clone, Default)]
++pub(super) struct AgentScript {
++    /// The id Zeo knows the agent by — half of the record's key.
++    pub(super) agent_id: &'static str,
++    /// The session id the agent answers to `session/new`.
++    pub(super) new_session_id: &'static str,
++    pub(super) config_options: Option<Vec<acp::SessionConfigOption>>,
++    pub(super) modes: Option<acp::SessionModeState>,
++    /// `(config id, wire value)` pairs answered with an error.
++    pub(super) rejected_values: Vec<(&'static str, serde_json::Value)>,
++    pub(super) rejected_modes: Vec<&'static str>,
++    /// Setting `(config id, value id)` makes this option appear in the agent's list.
++    pub(super) side_effect: Option<(&'static str, &'static str, acp::SessionConfigOption)>,
++    /// Hold every rejection until `open_gate`, so an accepted answer sent
++    /// later reaches Zeo first.
++    pub(super) gated: bool,
++}
++
++pub(super) struct ConfigAgent {
++    pub(super) connection: Rc<AcpConnection>,
++    pub(super) project: Entity<Project>,
++    pub(super) agent: ConnectionTo<Client>,
++    requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
++    gate_tx: RefCell<Option<async_channel::Sender<()>>>,
++    _keep_alive: Task<()>,
++}
++
++/// Settings, an isolated key-value store and the log capture, once per test.
++pub(super) async fn init(cx: &mut gpui::TestAppContext) -> Entity<Project> {
++    crate::test_log_capture::install();
++    cx.update(|cx| {
++        let store = settings::SettingsStore::test(cx);
++        cx.set_global(store);
++        cx.set_global(db::AppDatabase::test_new());
++    });
++    let fs = fs::FakeFs::new(cx.executor());
++    fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
++    project::Project::test(fs, [std::path::Path::new(WORK_DIR)], cx).await
++}
++
++const SET_CONFIG: &str = "session/set_config_option";
++const SET_MODE: &str = "session/set_mode";
++
++impl ConfigAgent {
++    pub(super) async fn connect(
++        script: AgentScript,
++        project: Entity<Project>,
++        cx: &mut gpui::TestAppContext,
++    ) -> Self {
++        let requests: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
++            Arc::new(Mutex::new(Vec::new()));
++        let options = Arc::new(Mutex::new(script.config_options.clone()));
++        let modes = Arc::new(Mutex::new(script.modes.clone()));
++        let agent_id = script.agent_id;
++        let (gate_tx, gate_rx) = async_channel::bounded::<()>(1);
++        let gate_rx = script.gated.then_some(gate_rx);
++        let script = Arc::new(script);
++
++        let (client_transport, agent_transport) = agent_client_protocol::Channel::duplex();
++        let (agent_tx, agent_rx) = futures::channel::oneshot::channel::<ConnectionTo<Client>>();
++
++        let agent_future = Agent
++            .builder()
++            .name("thread-config-agent")
++            .on_receive_request(
++                async move |req: acp::InitializeRequest, responder, _cx| {
++                    responder.respond(
++                        acp::InitializeResponse::new(req.protocol_version).agent_capabilities(
++                            acp::AgentCapabilities::default()
++                                .load_session(true)
++                                .session_capabilities(
++                                    acp::SessionCapabilities::default()
++                                        .close(acp::SessionCloseCapabilities::new()),
++                                ),
++                        ),
++                    )
++                },
++                agent_client_protocol::on_receive_request!(),
++            )
++            .on_receive_request(
++                {
++                    let options = options.clone();
++                    let modes = modes.clone();
++                    let script = script.clone();
++                    async move |_req: acp::NewSessionRequest, responder, _cx| {
++                        let current_options = options.lock().expect("agent options").clone();
++                        let current_modes = modes.lock().expect("agent modes").clone();
++                        responder.respond(
++                            acp::NewSessionResponse::new(acp::SessionId::new(
++                                script.new_session_id,
++                            ))
++                            .config_options(current_options)
++                            .modes(current_modes),
++                        )
++                    }
++                },
++                agent_client_protocol::on_receive_request!(),
++            )
++            .on_receive_request(
++                {
++                    let options = options.clone();
++                    let modes = modes.clone();
++                    async move |_req: acp::LoadSessionRequest, responder, _cx| {
++                        let current_options = options.lock().expect("agent options").clone();
++                        let current_modes = modes.lock().expect("agent modes").clone();
++                        responder.respond(
++                            acp::LoadSessionResponse::new()
++                                .config_options(current_options)
++                                .modes(current_modes),
++                        )
++                    }
++                },
++                agent_client_protocol::on_receive_request!(),
++            )
++            .on_receive_request(
++                {
++                    let options = options.clone();
++                    let script = script.clone();
++                    let requests = requests.clone();
++                    let gate_rx = gate_rx.clone();
++                    async move |req: acp::SetSessionConfigOptionRequest, responder, _cx| {
++                        let params = serde_json::to_value(&req).expect("set config params");
++                        requests
++                            .lock()
++                            .expect("requests")
++                            .push((SET_CONFIG.to_string(), params.clone()));
++                        let config_id = params["configId"].as_str().unwrap_or_default().to_string();
++                        let value = params["value"].clone();
++                        if script
++                            .rejected_values
++                            .iter()
++                            .any(|(id, rejected)| *id == config_id && *rejected == value)
++                        {
++                            if let Some(gate) = gate_rx.as_ref() {
++                                gate.recv().await.ok();
++                            }
++                            return responder
++                                .respond_with_error(acp::ErrorCode::InternalError.into());
++                        }
++                        let list = {
++                            let mut guard = options.lock().expect("agent options");
++                            let list = guard.get_or_insert_with(Vec::new);
++                            for option in list.iter_mut() {
++                                if option.id.0.as_ref() != config_id {
++                                    continue;
++                                }
++                                match &mut option.kind {
++                                    acp::SessionConfigKind::Select(select) => {
++                                        if let Some(id) = value.as_str() {
++                                            select.current_value =
++                                                acp::SessionConfigValueId::new(id.to_string());
++                                        }
++                                    }
++                                    acp::SessionConfigKind::Boolean(boolean) => {
++                                        if let Some(flag) = value.as_bool() {
++                                            boolean.current_value = flag;
++                                        }
++                                    }
++                                    #[allow(unreachable_patterns)]
++                                    _ => {}
++                                }
++                            }
++                            if let Some((id, trigger, extra)) = &script.side_effect
++                                && *id == config_id
++                                && value.as_str() == Some(*trigger)
++                                && !list.iter().any(|option| option.id == extra.id)
++                            {
++                                list.push(extra.clone());
++                            }
++                            list.clone()
++                        };
++                        responder.respond(acp::SetSessionConfigOptionResponse::new(list))
++                    }
++                },
++                agent_client_protocol::on_receive_request!(),
++            )
++            .on_receive_request(
++                {
++                    let modes = modes.clone();
++                    let script = script.clone();
++                    let requests = requests.clone();
++                    let gate_rx = gate_rx.clone();
++                    async move |req: acp::SetSessionModeRequest, responder, _cx| {
++                        let params = serde_json::to_value(&req).expect("set mode params");
++                        requests
++                            .lock()
++                            .expect("requests")
++                            .push((SET_MODE.to_string(), params));
++                        if script
++                            .rejected_modes
++                            .iter()
++                            .any(|mode| *mode == req.mode_id.0.as_ref())
++                        {
++                            if let Some(gate) = gate_rx.as_ref() {
++                                gate.recv().await.ok();
++                            }
++                            return responder
++                                .respond_with_error(acp::ErrorCode::InternalError.into());
++                        }
++                        if let Some(state) = modes.lock().expect("agent modes").as_mut() {
++                            state.current_mode_id = req.mode_id.clone();
++                        }
++                        responder.respond(acp::SetSessionModeResponse::new())
++                    }
++                },
++                agent_client_protocol::on_receive_request!(),
++            )
++            .on_receive_request(
++                async move |_req: acp::CloseSessionRequest, responder, _cx| {
++                    responder.respond(acp::CloseSessionResponse::new())
++                },
++                agent_client_protocol::on_receive_request!(),
++            )
++            .on_receive_notification(
++                async move |_notif: acp::CancelNotification, _cx| Ok(()),
++                agent_client_protocol::on_receive_notification!(),
++            )
++            .connect_with(agent_transport, async move |agent| {
++                agent_tx.send(agent).ok();
++                futures::future::pending::<Result<(), agent_client_protocol::Error>>().await
++            });
++        let agent_io_task = cx.background_spawn(agent_future);
++
++        let sessions: Rc<RefCell<HashMap<acp::SessionId, AcpSession>>> =
++            Rc::new(RefCell::new(HashMap::default()));
++        let client_session_list: Rc<RefCell<Option<Rc<AcpSessionList>>>> =
++            Rc::new(RefCell::new(None));
++        let (dispatch_tx, dispatch_rx) = mpsc::unbounded::<ForegroundWork>();
++        let (connection_tx, connection_rx) = futures::channel::oneshot::channel();
++        let client_future = connect_client_future(
++            "zed-test",
++            client_transport,
++            dispatch_tx.clone(),
++            connection_tx,
++        );
++        let client_io_task = cx.background_spawn(async move {
++            client_future.await.ok();
++        });
++        let client_conn: ConnectionTo<Agent> = connection_rx
++            .await
++            .expect("failed to receive ACP connection handle");
++        let response = client_conn
++            .send_request(acp::InitializeRequest::new(ProtocolVersion::V1))
++            .block_task()
++            .await
++            .expect("failed to initialize ACP connection");
++        let agent = agent_rx.await.expect("receive fake agent handle");
++
++        let request_elicitations = cx.new(|_| ElicitationStore::default());
++        let dispatch_context = ClientContext {
++            sessions: sessions.clone(),
++            session_list: client_session_list.clone(),
++            request_elicitations: request_elicitations.clone(),
++        };
++        let dispatch_task = cx.spawn({
++            let mut dispatch_rx = dispatch_rx;
++            move |cx| async move {
++                let mut cx = cx;
++                while let Some(work) = dispatch_rx.next().await {
++                    work.run(&mut cx, &dispatch_context);
++                }
++            }
++        });
++        let agent_server_store =
++            project.read_with(cx, |project, _| project.agent_server_store().downgrade());
++        let mut connection = cx.update(|cx| {
++            AcpConnection::new_for_test(
++                client_conn,
++                sessions,
++                response.agent_capabilities,
++                request_elicitations,
++                agent_server_store,
++                client_io_task,
++                dispatch_tx,
++                dispatch_task,
++                cx,
++            )
++        });
++        connection.id = AgentId::new(agent_id);
++
++        let keep_alive = cx.background_spawn(async move {
++            agent_io_task.await.ok();
++        });
++
++        Self {
++            connection: Rc::new(connection),
++            project,
++            agent,
++            requests,
++            gate_tx: RefCell::new(Some(gate_tx)),
++            _keep_alive: keep_alive,
++        }
++    }
++
++    /// The entry's `default_mode` and `default_config_options`.
++    pub(super) fn set_defaults(
++        &self,
++        mode: Option<&str>,
++        options: Vec<(&str, AgentConfigOptionValue)>,
++    ) {
++        self.connection.defaults.set(
++            mode.map(|mode| acp::SessionModeId::new(mode.to_string())),
++            options
++                .into_iter()
++                .map(|(id, value)| (id.to_string(), value))
++                .collect(),
++        );
++    }
++
++    pub(super) async fn load(
++        &self,
++        session_id: &str,
++        cx: &mut gpui::TestAppContext,
++    ) -> Entity<AcpThread> {
++        let thread = cx
++            .update(|cx| {
++                self.connection.clone().load_session(
++                    acp::SessionId::new(session_id.to_string()),
++                    self.project.clone(),
++                    PathList::new(&[std::path::Path::new(WORK_DIR)]),
++                    None,
++                    cx,
++                )
++            })
++            .await
++            .expect("session should load");
++        cx.run_until_parked();
++        thread
++    }
++
++    pub(super) async fn new_session(&self, cx: &mut gpui::TestAppContext) -> Entity<AcpThread> {
++        let thread = cx
++            .update(|cx| {
++                self.connection.clone().new_session(
++                    self.project.clone(),
++                    PathList::new(&[std::path::Path::new(WORK_DIR)]),
++                    cx,
++                )
++            })
++            .await
++            .expect("session should be created");
++        cx.run_until_parked();
++        thread
++    }
++
++    /// A menu pick, through the same entry point the UI uses.
++    pub(super) async fn pick(
++        &self,
++        session_id: &str,
++        config_id: &str,
++        value: acp_v2::SessionConfigOptionValue,
++        cx: &mut gpui::TestAppContext,
++    ) -> Result<()> {
++        let options = cx
++            .update(|cx| {
++                self.connection
++                    .session_config_options(&acp::SessionId::new(session_id.to_string()), cx)
++            })
++            .expect("the session exposes config options");
++        let result = cx
++            .update(|cx| {
++                options.set_config_option(
++                    acp_v2::SessionConfigId::new(config_id.to_string()),
++                    value,
++                    cx,
++                )
++            })
++            .await;
++        cx.run_until_parked();
++        result.map(|_| ())
++    }
++
++    /// A mode pick, through the same entry point the UI uses.
++    pub(super) async fn pick_mode(
++        &self,
++        session_id: &str,
++        mode_id: &str,
++        cx: &mut gpui::TestAppContext,
++    ) -> Result<()> {
++        let modes = cx
++            .update(|cx| {
++                self.connection
++                    .session_modes(&acp::SessionId::new(session_id.to_string()), cx)
++            })
++            .expect("the session exposes modes");
++        let result = cx
++            .update(|cx| modes.set_mode(acp::SessionModeId::new(mode_id.to_string()), cx))
++            .await;
++        cx.run_until_parked();
++        result
++    }
++
++    /// Releases every held rejection and lets the answers settle.
++    pub(super) fn open_gate(&self, cx: &mut gpui::TestAppContext) {
++        drop(self.gate_tx.borrow_mut().take());
++        cx.run_until_parked();
++    }
++
++    /// Several mode picks issued together, before any answer is processed —
++    /// two changes in flight at once.
++    pub(super) fn start_mode_picks(
++        &self,
++        session_id: &str,
++        mode_ids: &[&str],
++        cx: &mut gpui::TestAppContext,
++    ) -> Vec<Task<Result<()>>> {
++        let modes = cx
++            .update(|cx| {
++                self.connection
++                    .session_modes(&acp::SessionId::new(session_id.to_string()), cx)
++            })
++            .expect("the session exposes modes");
++        cx.update(|cx| {
++            mode_ids
++                .iter()
++                .map(|mode| modes.set_mode(acp::SessionModeId::new(mode.to_string()), cx))
++                .collect()
++        })
++    }
++
++    /// The agent pushes a `session/update` over the wire.
++    pub(super) fn notify(
++        &self,
++        session_id: &str,
++        update: acp::SessionUpdate,
++        cx: &mut gpui::TestAppContext,
++    ) {
++        self.agent
++            .send_notification(acp::SessionNotification::new(
++                acp::SessionId::new(session_id.to_string()),
++                update,
++            ))
++            .expect("agent sends a session update");
++        cx.run_until_parked();
++    }
++
++    /// `(config id, wire value)` of every `session/set_config_option`, sorted.
++    pub(super) fn config_requests(&self) -> Vec<(String, serde_json::Value)> {
++        let mut sent: Vec<(String, serde_json::Value)> = self
++            .requests
++            .lock()
++            .expect("requests")
++            .iter()
++            .filter(|(method, _)| method == SET_CONFIG)
++            .map(|(_, params)| {
++                (
++                    params["configId"].as_str().unwrap_or_default().to_string(),
++                    params["value"].clone(),
++                )
++            })
++            .collect();
++        sent.sort_by(|a, b| a.0.cmp(&b.0));
++        sent
++    }
++
++    /// Mode ids of every `session/set_mode`, in order.
++    pub(super) fn mode_requests(&self) -> Vec<String> {
++        self.requests
++            .lock()
++            .expect("requests")
++            .iter()
++            .filter(|(method, _)| method == SET_MODE)
++            .map(|(_, params)| params["modeId"].as_str().unwrap_or_default().to_string())
++            .collect()
++    }
++
++    pub(super) fn is_open(&self, session_id: &str) -> bool {
++        self.connection
++            .sessions
++            .borrow()
++            .contains_key(&acp::SessionId::new(session_id.to_string()))
++    }
++
++    /// The value Zeo currently holds for an option: a JSON string or bool.
++    pub(super) fn option_value(
++        &self,
++        session_id: &str,
++        config_id: &str,
++    ) -> Option<serde_json::Value> {
++        let sessions = self.connection.sessions.borrow();
++        let session = sessions.get(&acp::SessionId::new(session_id.to_string()))?;
++        let options = session.config_options.as_ref()?.config_options.borrow();
++        let option = options
++            .iter()
++            .find(|option| option.config_id.0.as_ref() == config_id)?;
++        match &option.kind {
++            acp_v2::SessionConfigKind::Select(select) => {
++                Some(serde_json::json!(select.current_value.0.as_ref()))
++            }
++            acp_v2::SessionConfigKind::Boolean(boolean) => {
++                Some(serde_json::json!(boolean.current_value))
++            }
++            _ => None,
++        }
++    }
++
++    pub(super) fn current_mode(&self, session_id: &str) -> Option<String> {
++        let sessions = self.connection.sessions.borrow();
++        let session = sessions.get(&acp::SessionId::new(session_id.to_string()))?;
++        let modes = session.session_modes.as_ref()?;
++        Some(modes.borrow().current_mode_id.0.to_string())
++    }
++}
++
++/// Drops entity handles and lets the release effects close the session.
++pub(super) fn release(cx: &mut gpui::TestAppContext) {
++    cx.run_until_parked();
++    cx.update(|_| ());
++    cx.run_until_parked();
++}
++
++pub(super) fn select(id: &str, current: &str, values: &[&str]) -> acp::SessionConfigOption {
++    acp::SessionConfigOption::select(
++        id.to_string(),
++        id.to_string(),
++        current.to_string(),
++        values
++            .iter()
++            .map(|value| acp::SessionConfigSelectOption::new(value.to_string(), value.to_string()))
++            .collect::<Vec<_>>(),
++    )
++}
++
++pub(super) fn boolean(id: &str, current: bool) -> acp::SessionConfigOption {
++    acp::SessionConfigOption::boolean(id.to_string(), id.to_string(), current)
++}
++
++pub(super) fn modes(current: &str, available: &[&str]) -> acp::SessionModeState {
++    acp::SessionModeState::new(
++        acp::SessionModeId::new(current.to_string()),
++        available
++            .iter()
++            .map(|mode| acp::SessionMode::new(mode.to_string(), mode.to_string()))
++            .collect::<Vec<_>>(),
++    )
++}
++
++pub(super) fn id_value(value: &str) -> acp_v2::SessionConfigOptionValue {
++    acp_v2::SessionConfigOptionValue::id(value.to_string())
++}
++
++pub(super) fn wire(config_id: &str, value: serde_json::Value) -> (String, serde_json::Value) {
++    (config_id.to_string(), value)
++}
++
++pub(super) fn recorded_config(
++    mode: Option<&str>,
++    options: Vec<(&str, RecordedValue)>,
++) -> RecordedConfig {
++    RecordedConfig {
++        mode: mode.map(str::to_string),
++        options: options
++            .into_iter()
++            .map(|(id, value)| (id.to_string(), value))
++            .collect(),
++    }
++}
++
++pub(super) fn recorded(
++    agent_id: &str,
++    session_id: &str,
++    cx: &mut gpui::TestAppContext,
++) -> Option<RecordedConfig> {
++    cx.update(|cx| {
++        thread_config_store::read(
++            &AgentId::new(agent_id.to_string()),
++            &acp::SessionId::new(session_id.to_string()),
++            cx,
++        )
++    })
++}
++
++pub(super) async fn record(
++    agent_id: &str,
++    session_id: &str,
++    config: RecordedConfig,
++    cx: &mut gpui::TestAppContext,
++) {
++    cx.update(|cx| {
++        thread_config_store::write(
++            &AgentId::new(agent_id.to_string()),
++            &acp::SessionId::new(session_id.to_string()),
++            &config,
++            cx,
++        )
++    })
++    .await
++    .expect("seeding a record succeeds");
++}
++
++pub(super) fn recorded_id(config: &RecordedConfig, option: &str) -> Option<String> {
++    match config.options.get(option)? {
++        RecordedValue::Id(value) => Some(value.clone()),
++        RecordedValue::Bool(_) => None,
++    }
++}
++
++pub(super) fn recorded_bool(config: &RecordedConfig, option: &str) -> Option<bool> {
++    match config.options.get(option)? {
++        RecordedValue::Bool(value) => Some(*value),
++        RecordedValue::Id(_) => None,
++    }
++}
+diff --git a/crates/agent_servers/src/agent_servers.rs b/crates/agent_servers/src/agent_servers.rs
+index e4ed27c..6de17a2 100644
+--- a/crates/agent_servers/src/agent_servers.rs
++++ b/crates/agent_servers/src/agent_servers.rs
+@@ -1,5 +1,8 @@
+ mod acp;
+ mod custom;
++#[cfg(test)]
++mod test_log_capture;
++pub mod thread_config_store;
+ 
+ #[cfg(any(test, feature = "test-support"))]
+ pub mod e2e_tests;
+diff --git a/crates/agent_servers/src/test_log_capture.rs b/crates/agent_servers/src/test_log_capture.rs
+new file mode 100644
+index 0000000..4fb94c7
+--- /dev/null
++++ b/crates/agent_servers/src/test_log_capture.rs
+@@ -0,0 +1,51 @@
++//! Process-wide log capture for the tests of patch `0036` that must prove a
++//! failure or a dropped value is logged rather than swallowed (story 015, Q4).
++//!
++//! Materialize with `#[cfg(test)] mod test_log_capture;` in `agent_servers.rs`.
++//! The `log` crate accepts one logger per process; nothing else in this crate's
++//! test binary installs one (the e2e helpers that call `env_logger::try_init`
++//! are `#[ignore]`d without the `e2e` feature).
++
++use std::sync::{Mutex, Once};
++
++struct Capture;
++
++static RECORDS: Mutex<Vec<(log::Level, String)>> = Mutex::new(Vec::new());
++static CAPTURE: Capture = Capture;
++
++impl log::Log for Capture {
++    fn enabled(&self, metadata: &log::Metadata) -> bool {
++        metadata.level() <= log::Level::Warn
++    }
++
++    fn log(&self, record: &log::Record) {
++        if self.enabled(record.metadata()) {
++            RECORDS
++                .lock()
++                .unwrap_or_else(|poisoned| poisoned.into_inner())
++                .push((record.level(), record.args().to_string()));
++        }
++    }
++
++    fn flush(&self) {}
++}
++
++/// Installs the capturing logger once for the whole test process.
++pub(crate) fn install() {
++    static ONCE: Once = Once::new();
++    ONCE.call_once(|| {
++        log::set_logger(&CAPTURE)
++            .expect("another logger was installed before the thread-config log capture");
++        log::set_max_level(log::LevelFilter::Warn);
++    });
++}
++
++/// True when one WARN-or-ERROR line contains every needle. Tests run in
++/// parallel in one process, so callers pass needles unique to their test.
++pub(crate) fn logged(needles: &[&str]) -> bool {
++    RECORDS
++        .lock()
++        .unwrap_or_else(|poisoned| poisoned.into_inner())
++        .iter()
++        .any(|(_, message)| needles.iter().all(|needle| message.contains(needle)))
++}
+diff --git a/crates/agent_servers/src/thread_config_store.rs b/crates/agent_servers/src/thread_config_store.rs
+new file mode 100644
+index 0000000..0aa2467
+--- /dev/null
++++ b/crates/agent_servers/src/thread_config_store.rs
+@@ -0,0 +1,154 @@
++//! Per-thread record of an external agent's session config (mode and config
++//! options), so a reopened thread can be restored to the state it was left in.
++//!
++//! The record lives in upstream's key-value store under its own namespace, so
++//! no table and no migration are added: a database written without this
++//! change reads as "no record", and a release without it ignores the rows.
++
++use std::collections::BTreeMap;
++
++use agent_client_protocol::schema::{v1 as acp, v2 as acp_v2};
++use anyhow::{Context as _, Result};
++use db::kvp::KeyValueStore;
++use gpui::{App, AppContext as _, Task};
++use project::AgentId;
++use serde::{Deserialize, Serialize};
++
++const NAMESPACE: &str = "acp_thread_config";
++
++/// The recorded session config of one thread.
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
++pub struct RecordedConfig {
++    pub mode: Option<String>,
++    pub options: BTreeMap<String, RecordedValue>,
++}
++
++/// The recorded value of one config option. The tag keeps a select whose
++/// value id is `"true"` apart from the boolean `true`.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "value")]
++pub enum RecordedValue {
++    Id(String),
++    Bool(bool),
++}
++
++/// The store key of a thread: the JSON encoding of the pair
++/// `[agent_id, session_id]`. Both ids are free text, so a concatenated key
++/// could make two threads share one record; the JSON pair cannot.
++pub fn key(agent_id: &AgentId, session_id: &acp::SessionId) -> Result<String> {
++    serde_json::to_string(&(agent_id.as_ref(), session_id.0.as_ref())).with_context(|| {
++        format!(
++            "rendering the thread config key of agent {} session {}",
++            agent_id.as_ref(),
++            session_id.0
++        )
++    })
++}
++
++/// Reads a thread's record. A read or parse failure is logged with both ids
++/// and reads as "no record", so it never blocks loading the thread.
++pub fn read(agent_id: &AgentId, session_id: &acp::SessionId, cx: &App) -> Option<RecordedConfig> {
++    let result = key(agent_id, session_id).and_then(|key| {
++        let raw = KeyValueStore::global(cx).scoped(NAMESPACE).read(&key)?;
++        raw.map(|raw| {
++            serde_json::from_str::<RecordedConfig>(&raw).context("parsing the recorded config")
++        })
++        .transpose()
++    });
++    match result {
++        Ok(recorded) => recorded,
++        Err(error) => {
++            log::warn!(
++                "failed to read the thread config of agent {} session {}: {error:#}",
++                agent_id.as_ref(),
++                session_id.0
++            );
++            None
++        }
++    }
++}
++
++/// Replaces a thread's record. Any error names the agent and the session.
++pub fn write(
++    agent_id: &AgentId,
++    session_id: &acp::SessionId,
++    recorded: &RecordedConfig,
++    cx: &App,
++) -> Task<Result<()>> {
++    let target = describe(agent_id, session_id);
++    let prepared = key(agent_id, session_id).and_then(|key| {
++        let payload = serde_json::to_string(recorded).context("serializing the recorded config")?;
++        Ok((key, payload))
++    });
++    let (key, payload) = match prepared {
++        Ok(prepared) => prepared,
++        Err(error) => {
++            return Task::ready(Err(
++                error.context(format!("writing the thread config of {target}"))
++            ));
++        }
++    };
++    let kvp = KeyValueStore::global(cx);
++    cx.background_spawn(async move {
++        kvp.scoped(NAMESPACE)
++            .write(key, payload)
++            .await
++            .with_context(|| format!("writing the thread config of {target}"))
++    })
++}
++
++/// Removes a thread's record. Any error names the agent and the session.
++pub fn delete(agent_id: &AgentId, session_id: &acp::SessionId, cx: &App) -> Task<Result<()>> {
++    let target = describe(agent_id, session_id);
++    let key = match key(agent_id, session_id) {
++        Ok(key) => key,
++        Err(error) => {
++            return Task::ready(Err(
++                error.context(format!("deleting the thread config of {target}"))
++            ));
++        }
++    };
++    let kvp = KeyValueStore::global(cx);
++    cx.background_spawn(async move {
++        kvp.scoped(NAMESPACE)
++            .delete(key)
++            .await
++            .with_context(|| format!("deleting the thread config of {target}"))
++    })
++}
++
++/// Captures the current mode and the select and boolean options of a
++/// session. Any other option kind has no value this record can replay, so it
++/// is skipped.
++pub fn snapshot(
++    options: &[acp_v2::SessionConfigOption],
++    mode: Option<&acp::SessionModeId>,
++) -> RecordedConfig {
++    let options = options
++        .iter()
++        .filter_map(|option| {
++            let value = match &option.kind {
++                acp_v2::SessionConfigKind::Select(select) => {
++                    RecordedValue::Id(select.current_value.0.to_string())
++                }
++                acp_v2::SessionConfigKind::Boolean(boolean) => {
++                    RecordedValue::Bool(boolean.current_value)
++                }
++                _ => return None,
++            };
++            Some((option.config_id.0.to_string(), value))
++        })
++        .collect();
++    RecordedConfig {
++        mode: mode.map(|mode| mode.0.to_string()),
++        options,
++    }
++}
++
++fn describe(agent_id: &AgentId, session_id: &acp::SessionId) -> String {
++    format!("agent {} session {}", agent_id.as_ref(), session_id.0)
++}
++
++#[cfg(test)]
++#[path = "thread_config_store_tests.rs"]
++mod thread_config_store_tests;
+diff --git a/crates/agent_servers/src/thread_config_store_tests.rs b/crates/agent_servers/src/thread_config_store_tests.rs
+new file mode 100644
+index 0000000..aaf3b22
+--- /dev/null
++++ b/crates/agent_servers/src/thread_config_store_tests.rs
+@@ -0,0 +1,469 @@
++//! Task 1.1 — the per-thread config store (story 015, patch `0036`).
++//!
++//! Materialize with, at the end of `thread_config_store.rs`:
++//!     #[cfg(test)]
++//!     #[path = "thread_config_store_tests.rs"]
++//!     mod tests;
++//! and `#[cfg(test)] mod test_log_capture;` in `agent_servers.rs`.
++//!
++//! Hostile halves come first in every identity group: fixtures that would make
++//! two threads share one record (collapse), then fixtures that would make one
++//! thread lose its record (split), then the benign case.
++
++use std::collections::{BTreeMap, HashSet};
++
++use agent_client_protocol::schema::{v1 as acp, v2 as acp_v2};
++use db::kvp::KeyValueStore;
++use gpui::{AppContext as _, TestAppContext};
++use project::AgentId;
++
++use super::{RecordedConfig, RecordedValue, delete, key, read, snapshot, write};
++
++const NAMESPACE: &str = "acp_thread_config";
++
++fn agent(id: &str) -> AgentId {
++    AgentId::new(id.to_string())
++}
++
++fn session(id: &str) -> acp::SessionId {
++    acp::SessionId::new(id.to_string())
++}
++
++fn config(mode: Option<&str>, options: Vec<(&str, RecordedValue)>) -> RecordedConfig {
++    RecordedConfig {
++        mode: mode.map(str::to_string),
++        options: options
++            .into_iter()
++            .map(|(id, value)| (id.to_string(), value))
++            .collect(),
++    }
++}
++
++fn id_of(config: &RecordedConfig, option: &str) -> Option<String> {
++    match config.options.get(option)? {
++        RecordedValue::Id(value) => Some(value.clone()),
++        RecordedValue::Bool(_) => None,
++    }
++}
++
++fn bool_of(config: &RecordedConfig, option: &str) -> Option<bool> {
++    match config.options.get(option)? {
++        RecordedValue::Bool(value) => Some(*value),
++        RecordedValue::Id(_) => None,
++    }
++}
++
++fn as_json(config: &RecordedConfig) -> serde_json::Value {
++    serde_json::to_value(config).expect("a recorded config serializes")
++}
++
++fn v2_options(options: Vec<acp::SessionConfigOption>) -> Vec<acp_v2::SessionConfigOption> {
++    acp_thread::config_options::from_v1(options).expect("v1 options convert to v2")
++}
++
++fn init_db(cx: &mut TestAppContext) {
++    cx.update(|cx| cx.set_global(db::AppDatabase::test_new()));
++}
++
++fn read_in(agent_id: &str, session_id: &str, cx: &mut TestAppContext) -> Option<RecordedConfig> {
++    cx.update(|cx| read(&agent(agent_id), &session(session_id), cx))
++}
++
++async fn write_in(
++    agent_id: &str,
++    session_id: &str,
++    recorded: &RecordedConfig,
++    cx: &mut TestAppContext,
++) {
++    cx.update(|cx| write(&agent(agent_id), &session(session_id), recorded, cx))
++        .await
++        .expect("writing a record succeeds on the test database");
++}
++
++async fn delete_in(agent_id: &str, session_id: &str, cx: &mut TestAppContext) {
++    cx.update(|cx| delete(&agent(agent_id), &session(session_id), cx))
++        .await
++        .expect("deleting a record succeeds on the test database");
++}
++
++// ---------------------------------------------------------------- key
++
++#[test]
++fn key_keeps_pairs_apart_when_a_separator_moves_between_agent_and_session() {
++    // Hostile half (collapse): an agent id is free text, so any character a
++    // concatenating key could use as a separator can sit inside either id.
++    let pairs = [
++        ("a/b", "c"),
++        ("a", "b/c"),
++        ("a:b", "c"),
++        ("a", "b:c"),
++        ("a b", "c"),
++        ("a", "b c"),
++        ("a\"", "b"),
++        ("a", "\"b"),
++        ("a\",\"b", "c"),
++        ("a", "b\",\"c"),
++        ("ab", ""),
++        ("", "ab"),
++        ("a", "b"),
++    ];
++    let keys: HashSet<String> = pairs
++        .iter()
++        .map(|(agent_id, session_id)| {
++            key(&agent(agent_id), &session(session_id)).expect("key renders")
++        })
++        .collect();
++    assert_eq!(
++        keys.len(),
++        pairs.len(),
++        "two different (agent, session) pairs rendered the same key: {keys:?}"
++    );
++}
++
++#[test]
++fn key_of_a_third_pair_cannot_spell_another_pairs_key() {
++    // Hostile half for the derived value itself: a third input whose agent id
++    // already IS the rendered key of another pair must not land on that key.
++    let rendered = key(&agent("Claude Agent (Plus)"), &session("s-1")).expect("key renders");
++    let third = key(&agent(&rendered), &session("")).expect("key renders");
++    let fourth = key(&agent(""), &session(&rendered)).expect("key renders");
++    assert_ne!(rendered, third);
++    assert_ne!(rendered, fourth);
++    assert_ne!(third, fourth);
++
++    // The key decodes back to exactly its pair, which is what makes it
++    // injective for every input, not only for the fixtures above.
++    for (agent_id, session_id) in [
++        ("Claude Agent (Plus)", "s-1"),
++        (rendered.as_str(), ""),
++        ("", rendered.as_str()),
++        ("a\",\"b", "c"),
++    ] {
++        let decoded: (String, String) = serde_json::from_str(
++            &key(&agent(agent_id), &session(session_id)).expect("key renders"),
++        )
++        .expect("the key is the JSON encoding of the pair");
++        assert_eq!(decoded, (agent_id.to_string(), session_id.to_string()));
++    }
++}
++
++#[test]
++fn key_is_the_same_for_equal_ids_built_separately() {
++    // Hostile half (split): the same thread, seen after a restart through
++    // freshly built ids, must reach the same key.
++    let before = key(
++        &AgentId::new("Claude Agent (Plus)"),
++        &acp::SessionId::new("0199-session"),
++    )
++    .expect("key renders");
++    let after = key(
++        &AgentId::new(String::from("Claude Agent (Plus)")),
++        &acp::SessionId::new(String::from("0199-session")),
++    )
++    .expect("key renders");
++    assert_eq!(before, after);
++}
++
++// ---------------------------------------------------------------- persisted shape
++
++#[test]
++fn recorded_value_kinds_stay_distinct_in_json() {
++    // Hostile half (collapse): a select whose value id is "true" is not the
++    // boolean `true`, and must not come back as one.
++    let as_id = config(None, vec![("x", RecordedValue::Id("true".into()))]);
++    let as_bool = config(None, vec![("x", RecordedValue::Bool(true))]);
++    assert_ne!(as_json(&as_id), as_json(&as_bool));
++
++    let id_back: RecordedConfig =
++        serde_json::from_value(as_json(&as_id)).expect("id record deserializes");
++    let bool_back: RecordedConfig =
++        serde_json::from_value(as_json(&as_bool)).expect("bool record deserializes");
++    assert_eq!(id_of(&id_back, "x").as_deref(), Some("true"));
++    assert_eq!(bool_of(&id_back, "x"), None);
++    assert_eq!(bool_of(&bool_back, "x"), Some(true));
++    assert_eq!(id_of(&bool_back, "x"), None);
++}
++
++#[test]
++fn recorded_config_reads_and_writes_the_documented_json_shape() {
++    // R1.9: the record outlives the process, so its JSON shape is a contract
++    // (design.md, Data Models).
++    let documented = serde_json::json!({
++        "mode": "plan",
++        "options": {
++            "model": { "kind": "Id", "value": "opus" },
++            "fast": { "kind": "Bool", "value": false }
++        }
++    });
++    let parsed: RecordedConfig =
++        serde_json::from_value(documented.clone()).expect("documented shape deserializes");
++    assert_eq!(parsed.mode.as_deref(), Some("plan"));
++    assert_eq!(id_of(&parsed, "model").as_deref(), Some("opus"));
++    assert_eq!(bool_of(&parsed, "fast"), Some(false));
++    assert_eq!(parsed.options.len(), 2);
++    assert_eq!(as_json(&parsed), documented);
++
++    let without_mode = config(None, Vec::new());
++    let back: RecordedConfig =
++        serde_json::from_value(as_json(&without_mode)).expect("empty record deserializes");
++    assert_eq!(back.mode, None);
++    assert!(back.options.is_empty());
++}
++
++// ---------------------------------------------------------------- snapshot
++
++#[test]
++fn snapshot_keeps_select_boolean_and_mode_and_skips_other_kinds() {
++    let mut options = v2_options(vec![
++        acp::SessionConfigOption::select(
++            "model",
++            "Model",
++            "opus",
++            vec![
++                acp::SessionConfigSelectOption::new("sonnet", "Sonnet"),
++                acp::SessionConfigSelectOption::new("opus", "Opus"),
++            ],
++        ),
++        acp::SessionConfigOption::select(
++            "effort",
++            "Effort",
++            "high",
++            vec![
++                acp::SessionConfigSelectGroup::new(
++                    "fast",
++                    "Fast",
++                    vec![acp::SessionConfigSelectOption::new("low", "Low")],
++                ),
++                acp::SessionConfigSelectGroup::new(
++                    "deep",
++                    "Deep",
++                    vec![acp::SessionConfigSelectOption::new("high", "High")],
++                ),
++            ],
++        ),
++        acp::SessionConfigOption::boolean("fast_mode", "Fast mode", false),
++    ]);
++    options.push(acp_v2::SessionConfigOption::new(
++        acp_v2::SessionConfigId::new("_slider"),
++        "Slider",
++        acp_v2::SessionConfigKind::Other(acp_v2::OtherSessionConfigKind::new(
++            "_slider",
++            BTreeMap::new(),
++        )),
++    ));
++
++    let recorded = snapshot(&options, Some(&acp::SessionModeId::new("plan")));
++    assert_eq!(recorded.mode.as_deref(), Some("plan"));
++    assert_eq!(id_of(&recorded, "model").as_deref(), Some("opus"));
++    assert_eq!(id_of(&recorded, "effort").as_deref(), Some("high"));
++    assert_eq!(bool_of(&recorded, "fast_mode"), Some(false));
++    assert!(
++        !recorded.options.contains_key("_slider"),
++        "only select and boolean options are recorded"
++    );
++    assert_eq!(recorded.options.len(), 3);
++}
++
++#[test]
++fn snapshot_without_mode_or_options_is_empty() {
++    let recorded = snapshot(&[], None);
++    assert_eq!(recorded.mode, None);
++    assert!(recorded.options.is_empty());
++}
++
++// ---------------------------------------------------------------- read / write / delete
++
++#[gpui::test]
++async fn records_of_two_agents_sharing_a_session_id_stay_separate(cx: &mut TestAppContext) {
++    // Hostile half (collapse), R3.1: the session id alone is not a thread.
++    init_db(cx);
++    let plus = config(
++        Some("plan"),
++        vec![("model", RecordedValue::Id("opus".into()))],
++    );
++    let codex = config(None, vec![("model", RecordedValue::Id("gpt-5".into()))]);
++    write_in("Claude Agent (Plus)", "shared", &plus, cx).await;
++    write_in("Codex", "shared", &codex, cx).await;
++
++    let plus_back = read_in("Claude Agent (Plus)", "shared", cx).expect("Plus record");
++    let codex_back = read_in("Codex", "shared", cx).expect("Codex record");
++    assert_eq!(as_json(&plus_back), as_json(&plus));
++    assert_eq!(as_json(&codex_back), as_json(&codex));
++
++    delete_in("Claude Agent (Plus)", "shared", cx).await;
++    assert!(read_in("Claude Agent (Plus)", "shared", cx).is_none());
++    let codex_after =
++        read_in("Codex", "shared", cx).expect("deleting one agent's record keeps the other");
++    assert_eq!(as_json(&codex_after), as_json(&codex));
++}
++
++#[gpui::test]
++async fn records_of_ids_differing_only_by_a_separator_stay_separate(cx: &mut TestAppContext) {
++    // Hostile half (collapse) through the store, not only through `key`.
++    init_db(cx);
++    let left = config(None, vec![("model", RecordedValue::Id("left".into()))]);
++    let right = config(None, vec![("model", RecordedValue::Id("right".into()))]);
++    write_in("a/b", "c", &left, cx).await;
++    write_in("a", "b/c", &right, cx).await;
++    assert_eq!(
++        id_of(&read_in("a/b", "c", cx).expect("left record"), "model").as_deref(),
++        Some("left")
++    );
++    assert_eq!(
++        id_of(&read_in("a", "b/c", cx).expect("right record"), "model").as_deref(),
++        Some("right")
++    );
++}
++
++#[gpui::test]
++async fn a_record_is_found_again_through_separately_built_ids(cx: &mut TestAppContext) {
++    // Hostile half (split), R1.9: a restart rebuilds both ids from strings.
++    init_db(cx);
++    let recorded = config(Some("plan"), vec![("fast", RecordedValue::Bool(true))]);
++    cx.update(|cx| {
++        write(
++            &AgentId::new("Claude Agent (Plus)"),
++            &acp::SessionId::new("0199-session"),
++            &recorded,
++            cx,
++        )
++    })
++    .await
++    .expect("write succeeds");
++    let back = cx
++        .update(|cx| {
++            read(
++                &AgentId::new(String::from("Claude Agent (Plus)")),
++                &acp::SessionId::new(String::from("0199-session")),
++                cx,
++            )
++        })
++        .expect("the same thread reaches its record after ids are rebuilt");
++    assert_eq!(as_json(&back), as_json(&recorded));
++}
++
++#[gpui::test]
++async fn write_read_replace_and_delete_one_record(cx: &mut TestAppContext) {
++    // R4.1: a database that never saw the namespace reads as "no record".
++    init_db(cx);
++    assert!(read_in("Codex", "s-1", cx).is_none());
++
++    let first = config(
++        Some("plan"),
++        vec![("model", RecordedValue::Id("opus".into()))],
++    );
++    write_in("Codex", "s-1", &first, cx).await;
++    assert_eq!(
++        as_json(&read_in("Codex", "s-1", cx).expect("written record")),
++        as_json(&first)
++    );
++
++    let second = config(None, vec![("model", RecordedValue::Id("haiku".into()))]);
++    write_in("Codex", "s-1", &second, cx).await;
++    assert_eq!(
++        as_json(&read_in("Codex", "s-1", cx).expect("replaced record")),
++        as_json(&second),
++        "a later write replaces the earlier one"
++    );
++
++    delete_in("Codex", "s-1", cx).await;
++    assert!(read_in("Codex", "s-1", cx).is_none());
++}
++
++#[gpui::test]
++async fn record_lives_in_its_own_namespace_of_the_existing_key_value_store(
++    cx: &mut TestAppContext,
++) {
++    // R4.1, R4.2, Q12: no table and no migration of its own — the record is a
++    // row of upstream's `scoped_kv_store` under `acp_thread_config`.
++    init_db(cx);
++    let recorded = config(
++        Some("plan"),
++        vec![("model", RecordedValue::Id("opus".into()))],
++    );
++    write_in("Claude Agent (Plus)", "s-ns", &recorded, cx).await;
++
++    let raw_key = key(&agent("Claude Agent (Plus)"), &session("s-ns")).expect("key renders");
++    let raw = cx
++        .update(|cx| KeyValueStore::global(cx).scoped(NAMESPACE).read(&raw_key))
++        .expect("scoped read succeeds")
++        .expect("the record is stored under the acp_thread_config namespace");
++    let stored: serde_json::Value = serde_json::from_str(&raw).expect("stored value is JSON");
++    assert_eq!(stored, as_json(&recorded));
++
++    let elsewhere = cx
++        .update(|cx| {
++            KeyValueStore::global(cx)
++                .scoped("agent_draft_prompts")
++                .read(&raw_key)
++        })
++        .expect("scoped read succeeds");
++    assert!(
++        elsewhere.is_none(),
++        "the record must not leak into another namespace"
++    );
++}
++
++#[gpui::test]
++async fn a_corrupt_record_reads_as_no_record(cx: &mut TestAppContext) {
++    // R3.4: a read or parse failure behaves as "no recorded state". The log
++    // line it must leave is asserted in `acp::restore_options_tests`.
++    init_db(cx);
++    let raw_key = key(&agent("Claude Agent (Plus)"), &session("s-corrupt")).expect("key renders");
++    cx.update(|cx| {
++        let store = KeyValueStore::global(cx);
++        cx.background_spawn(async move {
++            store
++                .scoped(NAMESPACE)
++                .write(raw_key, "{not json".to_string())
++                .await
++        })
++    })
++    .await
++    .expect("raw write succeeds");
++
++    assert!(read_in("Claude Agent (Plus)", "s-corrupt", cx).is_none());
++}
++
++#[gpui::test]
++async fn write_and_delete_failures_name_the_agent_and_the_session(cx: &mut TestAppContext) {
++    // R3.4, Q4: a database without the key-value table (`Migrator for ()`
++    // runs no migration) makes every store call fail for real. The error must
++    // carry both ids so the caller's `detach_and_log_err` names the thread;
++    // a failed read is "no record", never a panic.
++    let connection = db::open_test_db::<()>("thread-config-store-no-table").await;
++    cx.update(|cx| cx.set_global(db::AppDatabase(connection)));
++    let recorded = config(
++        Some("plan"),
++        vec![("model", RecordedValue::Id("opus".into()))],
++    );
++
++    let write_error = cx
++        .update(|cx| {
++            write(
++                &agent("Fail Agent (W)"),
++                &session("s-write-fail"),
++                &recorded,
++                cx,
++            )
++        })
++        .await
++        .expect_err("writing without the table fails");
++    let shown = format!("{write_error:#}");
++    assert!(
++        shown.contains("Fail Agent (W)") && shown.contains("s-write-fail"),
++        "write error must name both ids: {shown}"
++    );
++
++    let delete_error = cx
++        .update(|cx| delete(&agent("Fail Agent (D)"), &session("s-delete-fail"), cx))
++        .await
++        .expect_err("deleting without the table fails");
++    let shown = format!("{delete_error:#}");
++    assert!(
++        shown.contains("Fail Agent (D)") && shown.contains("s-delete-fail"),
++        "delete error must name both ids: {shown}"
++    );
++
++    assert!(read_in("Fail Agent (R)", "s-read-fail", cx).is_none());
++}
+diff --git a/crates/agent_ui/src/thread_metadata_store.rs b/crates/agent_ui/src/thread_metadata_store.rs
+index eb840eb..75e702f 100644
+--- a/crates/agent_ui/src/thread_metadata_store.rs
++++ b/crates/agent_ui/src/thread_metadata_store.rs
+@@ -1154,11 +1154,20 @@ impl ThreadMetadataStore {
+                 }
+             }
+         }
+-        self.threads.remove(&thread_id);
++        let removed = self.threads.remove(&thread_id);
+         self.pending_thread_ops_tx
+             .try_send(DbOperation::Delete(thread_id))
+             .log_err();
+         crate::draft_prompt_store::delete(thread_id, cx).detach_and_log_err(cx);
++        // The recorded config is keyed by agent and session, the same pair
++        // the connection writes it under. A draft has no session yet, so it
++        // owns no record.
++        if let Some(thread) = removed
++            && let Some(session_id) = &thread.session_id
++        {
++            agent_servers::thread_config_store::delete(&thread.agent_id, session_id, cx)
++                .detach_and_log_err(cx);
++        }
+         cx.notify();
+     }
+ 
+@@ -1818,6 +1827,9 @@ impl Column for ArchivedGitWorktree {
+     }
+ }
+ 
++#[cfg(test)]
++mod thread_config_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/agent_ui/src/thread_metadata_store/thread_config_tests.rs b/crates/agent_ui/src/thread_metadata_store/thread_config_tests.rs
+new file mode 100644
+index 0000000..89f2640
+--- /dev/null
++++ b/crates/agent_ui/src/thread_metadata_store/thread_config_tests.rs
+@@ -0,0 +1,169 @@
++//! Task 4.1 — deleting a thread deletes its recorded config (story 015, patch `0036`).
++//!
++//! Materialize with `#[cfg(test)] mod thread_config_tests;` in
++//! `thread_metadata_store.rs`. Hostile halves first: the records that must
++//! SURVIVE a deletion (same session id under another agent, another thread of
++//! the same agent, a draft with no session), then the record that must go.
++
++use super::*;
++use agent_client_protocol::schema::v1 as acp;
++use agent_servers::thread_config_store::{self, RecordedConfig, RecordedValue};
++use gpui::TestAppContext;
++use project::FakeFs;
++use std::path::Path;
++
++const PLUS: &str = "Claude Agent (Plus)";
++const CODEX: &str = "Codex";
++
++fn init(cx: &mut TestAppContext) {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| {
++        cx.set_global(db::AppDatabase::test_new());
++        let settings_store = settings::SettingsStore::test(cx);
++        cx.set_global(settings_store);
++        theme_settings::init(theme::LoadThemes::JustBase, cx);
++        editor::init(cx);
++        release_channel::init("0.0.0".parse().unwrap(), cx);
++        prompt_store::init(cx);
++        <dyn Fs>::set_global(fs, cx);
++        ThreadMetadataStore::init_global(cx);
++        ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++    cx.run_until_parked();
++}
++
++fn thread(agent_id: &str, session_id: Option<&str>) -> ThreadMetadata {
++    let now = Utc::now();
++    ThreadMetadata {
++        thread_id: ThreadId::new(),
++        session_id: session_id.map(|id| acp::SessionId::new(id.to_string())),
++        agent_id: AgentId::new(agent_id.to_string()),
++        title: Some("Thread".into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new("/project")])),
++        remote_connection: None,
++        archived: false,
++    }
++}
++
++fn config(model: &str) -> RecordedConfig {
++    RecordedConfig {
++        mode: Some("plan".to_string()),
++        options: [("model".to_string(), RecordedValue::Id(model.to_string()))]
++            .into_iter()
++            .collect(),
++    }
++}
++
++async fn record(agent_id: &str, session_id: &str, model: &str, cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        thread_config_store::write(
++            &AgentId::new(agent_id.to_string()),
++            &acp::SessionId::new(session_id.to_string()),
++            &config(model),
++            cx,
++        )
++    })
++    .await
++    .expect("seeding a record succeeds");
++}
++
++fn has_record(agent_id: &str, session_id: &str, cx: &mut TestAppContext) -> bool {
++    cx.update(|cx| {
++        thread_config_store::read(
++            &AgentId::new(agent_id.to_string()),
++            &acp::SessionId::new(session_id.to_string()),
++            cx,
++        )
++    })
++    .is_some()
++}
++
++fn save(metadata: ThreadMetadata, cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
++    });
++    cx.run_until_parked();
++}
++
++#[gpui::test]
++async fn deleting_a_thread_deletes_only_its_own_thread_config_record(cx: &mut TestAppContext) {
++    // R3.2, with R3.1's hostile half: the same session id under another agent,
++    // and another thread of the same agent, keep their records.
++    init(cx);
++    record(PLUS, "s-1", "opus", cx).await;
++    record(CODEX, "s-1", "gpt-5", cx).await;
++    record(PLUS, "s-2", "haiku", cx).await;
++    let doomed = thread(PLUS, Some("s-1"));
++    let doomed_id = doomed.thread_id;
++    save(doomed, cx);
++    save(thread(PLUS, Some("s-2")), cx);
++
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(doomed_id, cx));
++    });
++    cx.run_until_parked();
++
++    assert!(
++        !has_record(PLUS, "s-1", cx),
++        "the deleted thread's record must go"
++    );
++    assert!(
++        has_record(CODEX, "s-1", cx),
++        "another agent's record with the same session id stays"
++    );
++    assert!(has_record(PLUS, "s-2", cx), "another thread's record stays");
++}
++
++#[gpui::test]
++async fn deleting_a_draft_thread_deletes_no_thread_config_record(cx: &mut TestAppContext) {
++    // A draft has no session id, so it owns no record.
++    init(cx);
++    record(PLUS, "s-live", "opus", cx).await;
++    let draft = thread(PLUS, None);
++    let draft_id = draft.thread_id;
++    save(draft, cx);
++    let live = thread(PLUS, Some("s-live"));
++    let live_id = live.thread_id;
++    save(live, cx);
++
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(draft_id, cx));
++    });
++    cx.run_until_parked();
++    assert!(has_record(PLUS, "s-live", cx));
++
++    // Non-vacuous: the live thread's record does go when the live thread goes.
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(live_id, cx));
++    });
++    cx.run_until_parked();
++    assert!(!has_record(PLUS, "s-live", cx));
++}
++
++#[gpui::test]
++async fn delete_all_deletes_each_threads_thread_config_record(cx: &mut TestAppContext) {
++    init(cx);
++    record(PLUS, "s-a", "opus", cx).await;
++    record(CODEX, "s-b", "gpt-5", cx).await;
++    record(PLUS, "s-kept", "haiku", cx).await;
++    let first = thread(PLUS, Some("s-a"));
++    let second = thread(CODEX, Some("s-b"));
++    let ids = vec![first.thread_id, second.thread_id];
++    save(first, cx);
++    save(second, cx);
++    save(thread(PLUS, Some("s-kept")), cx);
++
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete_all(ids, cx));
++    });
++    cx.run_until_parked();
++
++    assert!(!has_record(PLUS, "s-a", cx));
++    assert!(!has_record(CODEX, "s-b", cx));
++    assert!(has_record(PLUS, "s-kept", cx));
++}
