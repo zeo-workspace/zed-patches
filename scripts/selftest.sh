@@ -2392,12 +2392,30 @@ test_release_refuses_version_without_changelog() {
 	rm -rf "${tmp}"
 }
 
+test_release_refuses_unreadable_changelog_as_environment() {
+	case_start "release-portable: an unreadable changelog exits 2 naming it, not as a missing section"
+	local tmp out status log
+	tmp="$(mktemp -d)"
+	release_env "${tmp}"
+	out="$(run_release "${tmp}" "${tmp}/absent/CHANGELOG.md" --no-flatpak)"
+	status=$?
+	log="$(cat "${tmp}/docker.log")"
+	assert_not_contains "${log}" "run " &&
+		assert_not_contains "${log}" "build " &&
+		assert_status 2 "${status}" &&
+		assert_contains "${out}" "${tmp}/absent/CHANGELOG.md" &&
+		assert_not_contains "${out}" "write its CHANGELOG.md section first" && ok
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
-# main [<filter>] — run every case, or only those whose function name contains
-# <filter>. A filter matching nothing fails rather than reporting a green zero.
+# main [<filter>...] — run every case, or only those whose function name contains
+# ANY of the filters, each case once, in the order below. Filters that together
+# match nothing fail rather than reporting a green zero.
 main() {
-	local filter="${1:-}" t ran=0
+	local -a filters=("$@")
+	local t f ran=0 hit
 	if [[ ! -f "${SCRIPTS}/lib.sh" ]]; then
 		printf 'scripts not found under %s — nothing implemented yet\n' "${SCRIPTS}" >&2
 	fi
@@ -2465,6 +2483,7 @@ main() {
 		test_changelog_notes_unreadable
 
 		test_release_refuses_version_without_changelog
+		test_release_refuses_unreadable_changelog_as_environment
 
 		test_refresh_preserves_source_set
 		test_refresh_refuses_existing_destination
@@ -2522,13 +2541,19 @@ main() {
 	)
 
 	for t in "${tests[@]}"; do
-		[[ -z "${filter}" || "${t}" == *"${filter}"* ]] || continue
+		if ((${#filters[@]} > 0)); then
+			hit=0
+			for f in "${filters[@]}"; do
+				[[ "${t}" == *"${f}"* ]] && hit=1 && break
+			done
+			((hit)) || continue
+		fi
 		ran=$((ran + 1))
 		"${t}"
 	done
 
 	if [[ "${ran}" -eq 0 ]]; then
-		printf 'no case matches the filter: %s\n' "${filter}" >&2
+		printf 'no case matches the filter: %s\n' "${filters[*]}" >&2
 		return 1
 	fi
 	printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

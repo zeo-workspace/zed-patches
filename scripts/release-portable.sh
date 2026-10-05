@@ -22,7 +22,9 @@
 # no crate twice. --skip-build reuses the staged tree outright.
 #
 # A version with no CHANGELOG.md section is refused before anything is built
-# (check-changelog.sh): its release would have no notes to carry.
+# (check-changelog.sh), with exit 1: its release would have no notes to carry.
+# A changelog that cannot be read ends it with exit 2, as the environment
+# problem it is.
 #
 # It never publishes. The artefacts land in ${ZP_PORTABLE_DIR}/<PF>/out/dist,
 # ready for `gh release upload` once a human authorises it.
@@ -44,8 +46,13 @@ main() {
 	done
 	[[ -n "${pf}" ]] || die 2 "usage: release-portable.sh <PF> [--skip-build] [--no-flatpak]"
 	resolve_version "${pf}"
-	bash "${ZP_REPO}/scripts/check-changelog.sh" "${pf}" ||
-		die 1 "refusing to release ${pf}: write its CHANGELOG.md section first (zeo/docs/RELEASING.md)"
+	local changelog_status=0
+	bash "$(dirname "${BASH_SOURCE[0]}")/check-changelog.sh" "${pf}" || changelog_status=$?
+	case "${changelog_status}" in
+	0) ;;
+	1) die 1 "refusing to release ${pf}: write its CHANGELOG.md section first (zeo/docs/RELEASING.md)" ;;
+	*) die 2 "cannot check the changelog for ${pf}" ;;
+	esac
 
 	local pvr="${pf#zeo-}" pv
 	pv="${pvr%-r[0-9]*}"
