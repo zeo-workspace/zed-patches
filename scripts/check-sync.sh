@@ -9,6 +9,8 @@
 #   2. patches <-> overlay  this repository's files against the overlay's files/
 #   3. patches <-> source   every patch still applies to the packaged tree
 #   4. patches, clean       no patch carries a *.orig or *.rej file
+#   5. version <-> changelog the packaged Zeo version has its CHANGELOG.md
+#                            section (check-changelog.sh)
 #
 # 1 is the one no other script checks: sync-overlay.sh copies what the series
 # names and reports what the overlay has spare, but neither side reads the
@@ -174,6 +176,26 @@ check_litter() {
 	done
 }
 
+# check_changelog <pf> — relation 5, delegated to check-changelog.sh, which owns
+# what counts as a section. A changelog that cannot be read is an environment
+# problem, not drift, and ends the run with its exit 2.
+check_changelog() {
+	local pf="$1" here out status=0
+	here="$(dirname "${BASH_SOURCE[0]}")"
+	out="$("${here}/check-changelog.sh" "${pf}" 2>&1)" || status=$?
+	case "${status}" in
+	0) report "ok" "version <-> changelog: ${out}" ;;
+	1)
+		report "DRIFT" "version <-> changelog"
+		printf '%s\n' "${out}" | sed 's/^/           /'
+		;;
+	*)
+		printf '%s\n' "${out}" >&2
+		exit 2
+		;;
+	esac
+}
+
 main() {
 	local pf="" arg
 	for arg in "$@"; do
@@ -212,6 +234,7 @@ main() {
 	check_overlay patches "${dir}"
 	check_source "${ZP_PV}"
 	check_litter "${dir}"
+	check_changelog "${ZP_PV}"
 
 	printf '\n'
 	if ((DRIFT == 0)); then

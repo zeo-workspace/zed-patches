@@ -234,6 +234,65 @@ read_series() {
 	((${#selected[@]} == 0)) || printf '%s\n' "${selected[@]}"
 }
 
+# --- the changelog -----------------------------------------------------------
+
+# zeo_version_of <PF|X.Y.Z> — print Zeo's own X.Y.Z, or fail printing nothing.
+#
+# zeo-0.1.1_p20261004-r3 -> 0.1.1. The snapshot date and the revision are not
+# part of it: a snapshot-only bump or a -rN keeps the version, and so keeps the
+# changelog section it already has (zeo/docs/RELEASING.md).
+zeo_version_of() {
+	local v="${1:-}"
+	v="${v#zeo-}"
+	v="${v%-r[0-9]*}"
+	v="${v%_p[0-9]*}"
+	[[ "${v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	printf '%s' "${v}"
+}
+
+# zeo_changelog — the path of Zeo's CHANGELOG.md: ZP_CHANGELOG, else zeo/ beside
+# this repository, which is where the chain keeps it.
+zeo_changelog() {
+	if [[ -n "${ZP_CHANGELOG:-}" ]]; then
+		printf '%s' "${ZP_CHANGELOG}"
+		return 0
+	fi
+	local repo="${ZP_REPO:-$(_zp_repo_root)}" parent
+	parent="$(cd "${repo}/.." 2>/dev/null && pwd)" || parent="${repo}/.."
+	printf '%s/zeo/CHANGELOG.md' "${parent}"
+}
+
+# changelog_section <file> <X.Y.Z> — print the body of that version's section,
+# its heading and the blank lines around it left out. Exit 1 when it has none.
+#
+# A section is a line that BEGINS with "## [X.Y.Z] — ", outside a fenced code
+# block, so a mention in prose, an indented or fenced example, an h3 or a
+# neighbouring version (0.1.10 for 0.1.1) never counts. The body runs to the
+# next "## [" heading; link reference definitions are not part of it.
+changelog_section() {
+	local file="$1" version="$2"
+	awk -v heading="## [${version}] — " '
+		function flush(   i, first, last) {
+			first = 1; last = n
+			while (first <= n && body[first] ~ /^[[:space:]]*$/) first++
+			while (last >= first && body[last] ~ /^[[:space:]]*$/) last--
+			for (i = first; i <= last; i++) print body[i]
+		}
+		{
+			is_fence = ($0 ~ /^ {0,3}(```|~~~)/)
+			if (inside) {
+				if (!fence && index($0, "## [") == 1) exit
+				if (fence || $0 !~ /^\[[^]]+\]: /) body[++n] = $0
+				if (is_fence) fence = !fence
+				next
+			}
+			if (is_fence) { fence = !fence; next }
+			if (!fence && index($0, heading) == 1) { inside = 1; found = 1 }
+		}
+		END { if (found) flush(); exit (found ? 0 : 1) }
+	' "${file}"
+}
+
 # --- advisories --------------------------------------------------------------
 
 # _zp_chain_root — the directory holding all five projects of the chain. This

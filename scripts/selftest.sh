@@ -638,10 +638,15 @@ run_branches() {
 		ZP_REPO="${tmp}/repo" bash "${SCRIPTS}/patch-branches.sh" "${FIXTURE_PV}" "$@" 2>&1
 }
 
+# run_checksync — with a changelog that has the fixture version's section, so
+# only the relation a case is about decides its verdict.
 run_checksync() {
 	local tmp="$1"
 	shift
-	ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" ZP_WORKROOT="${tmp}/work" \
+	[[ -f "${tmp}/CHANGELOG.fixture.md" ]] ||
+		printf '# Changelog\n\n## [0.9.9] — 2026-01-01\n\n- NINE.\n' >"${tmp}/CHANGELOG.fixture.md"
+	ZP_CHANGELOG="${tmp}/CHANGELOG.fixture.md" \
+		ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" ZP_WORKROOT="${tmp}/work" \
 		ZP_REPO="${tmp}/repo" bash "${SCRIPTS}/check-sync.sh" "${FIXTURE_PV}" "$@" 2>&1
 }
 
@@ -1968,6 +1973,425 @@ test_xvfb_proof_lifecycle_stops_the_group_of_a_crashed_editor() {
 	rm -rf "${tmp}"
 }
 
+# Story 026 — selftest.sh cases for the changelog guard, the release notes and
+# the release refusal. A fragment: paste it into selftest.sh above the
+# "# --- runner ---" banner, and add the calls listed at the end to main().
+#
+# Every case runs on fixtures under mktemp -d and reads no real changelog.
+
+# --- changelog guard: fixtures ----------------------------------------------
+
+# cl_env <tmp> <pf>... — an overlay holding one fixture ebuild per PF (copies of
+# the FIXTURE_PV one), so a script that resolves the version through lib.sh
+# finds it, and a scratch repo for ZP_REPO.
+cl_env() {
+	local tmp="$1" pf
+	shift
+	make_ebuild "${tmp}/overlay" "${FIXTURE_COMMIT}"
+	for pf in "$@"; do
+		[[ "${pf}" == "${FIXTURE_PV}" ]] ||
+			cp "${tmp}/overlay/app-editors/zeo/${FIXTURE_PV}.ebuild" \
+				"${tmp}/overlay/app-editors/zeo/${pf}.ebuild"
+	done
+	mkdir -p "${tmp}/repo/scripts" "${tmp}/distfiles"
+}
+
+# run_check_changelog <tmp> <changelog|-> [<PF>] — the guard, with ZP_CHANGELOG
+# pointing at <changelog>, or left unset when it is "-".
+run_check_changelog() {
+	local tmp="$1" changelog="$2"
+	shift 2
+	if [[ "${changelog}" == "-" ]]; then
+		env -u ZP_CHANGELOG ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" \
+			ZP_WORKROOT="${tmp}/work" ZP_REPO="${tmp}/repo" \
+			bash "${SCRIPTS}/check-changelog.sh" "$@" 2>&1
+	else
+		ZP_CHANGELOG="${changelog}" ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" \
+			ZP_WORKROOT="${tmp}/work" ZP_REPO="${tmp}/repo" \
+			bash "${SCRIPTS}/check-changelog.sh" "$@" 2>&1
+	fi
+}
+
+run_changelog_notes() {
+	local tmp="$1" changelog="$2"
+	shift 2
+	ZP_CHANGELOG="${changelog}" ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" \
+		ZP_WORKROOT="${tmp}/work" ZP_REPO="${tmp}/repo" \
+		bash "${SCRIPTS}/changelog-notes.sh" "$@" 2>&1
+}
+
+# cl_header <file> — the Keep a Changelog preamble and an empty [Unreleased].
+cl_header() {
+	cat >"$1" <<-'EOS'
+		# Changelog
+
+		All notable changes to Zeo are documented here. The format follows
+		[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and the
+		version [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
+
+		## [Unreleased]
+
+	EOS
+}
+
+# cl_with_0_1_1 <file> — a changelog whose 0.1.1 section exists, with a newer
+# 0.1.10 above it whose name starts with the same characters.
+cl_with_0_1_1() {
+	cl_header "$1"
+	cat >>"$1" <<-'EOS'
+		## [0.1.10] — 2027-01-01
+
+		### Fixed
+
+		- TEN-BODY: a change that belongs to 0.1.10 only.
+
+		## [0.1.1] — 2026-10-04
+
+		### Added
+
+		- ONE-BODY-ADDED: the agent tasks panel (patch 0035).
+
+		### Fixed
+
+		- ONE-BODY-FIXED: thread configuration survives a reopen (patch 0036).
+
+		## [0.1.0] — 2026-10-01
+
+		### Changed
+
+		- ZERO-BODY: Zed rebranded as Zeo (patches 0019-0023, 0025).
+
+		[0.1.10]: https://example.invalid/compare/v0.1.1...v0.1.10
+		[0.1.1]: https://example.invalid/compare/v0.1.0...v0.1.1
+		[0.1.0]: https://example.invalid/releases/v0.1.0
+	EOS
+}
+
+# cl_without_0_1_1 <file> — every way 0.1.1 can APPEAR without having a
+# section: a mention in prose, a deeper heading, an indented code block, a
+# fenced code block, a link reference definition, a heading with an
+# unescaped-dot look-alike, and the neighbouring 0.1.10 / 10.1.1 / 0.1.11.
+cl_without_0_1_1() {
+	cl_header "$1"
+	cat >>"$1" <<-'EOS'
+		The next release will open with a line such as ## [0.1.1] — 2026-10-04,
+		written by hand when it is cut.
+
+		### [0.1.1] — 2026-10-04
+
+		    ## [0.1.1] — 2026-10-04
+
+		```markdown
+		## [0.1.1] — 2026-10-04
+		```
+
+		## [0x1x1] — 2026-10-03
+
+		## [0.1.11] — 2026-10-02
+
+		## [10.1.1] — 2026-10-02
+
+		## [0.1.10] — 2026-10-02
+
+		### Fixed
+
+		- TEN-BODY: a change that belongs to 0.1.10 only.
+
+		## [0.1.0] — 2026-10-01
+
+		### Changed
+
+		- ZERO-BODY: Zed rebranded as Zeo.
+
+		[0.1.1]: https://example.invalid/compare/v0.1.0...v0.1.1
+		[0.1.0]: https://example.invalid/releases/v0.1.0
+	EOS
+}
+
+# --- check-changelog.sh (R3.1 - R3.3, R2.3) ---------------------------------
+
+# Hostile first: 0.1.1 is MENTIONED in every way a careless match would accept,
+# and never has a section of its own. It must not pass.
+test_check_changelog_ignores_mentions_and_lookalikes() {
+	case_start "check-changelog: 0.1.1 in prose, a fence, an h3, a link ref or as 0.1.10 is not a section (exit 1)"
+	local tmp out status pf="zeo-0.1.1_p20261004"
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "${pf}"
+	cl_without_0_1_1 "${tmp}/CHANGELOG.md"
+	out="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "${pf}")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "0.1.1" &&
+		assert_contains "${out}" "${tmp}/CHANGELOG.md" && ok
+	rm -rf "${tmp}"
+}
+
+# The converse: 0.1.1 must not be confused with 0.1.10 when 0.1.10 is the one
+# missing — the shorter section must not satisfy the longer version.
+test_check_changelog_short_section_does_not_satisfy_longer_version() {
+	case_start "check-changelog: a [0.1.1] section does not satisfy 0.1.10 (exit 1 naming 0.1.10)"
+	local tmp out status pf="zeo-0.1.10_p20261004"
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "${pf}"
+	cl_header "${tmp}/CHANGELOG.md"
+	printf '## [0.1.1] — 2026-10-04\n\n### Added\n\n- ONE-BODY.\n' >>"${tmp}/CHANGELOG.md"
+	out="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "${pf}")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "0.1.10" && ok
+	rm -rf "${tmp}"
+}
+
+# Hostile split: the snapshot date and the -rN are NOT part of Zeo's version.
+# A revision bump and a snapshot-only bump find the same section (R2.3).
+test_check_changelog_ignores_snapshot_and_revision() {
+	case_start "check-changelog: -r3 and another _p date resolve to the same [0.1.1] section (exit 0)"
+	local tmp out1 out2 out3 s1 s2 s3
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "zeo-0.1.1_p20261004-r3" "zeo-0.1.1_p20991231" "zeo-0.1.1_p20261004"
+	cl_with_0_1_1 "${tmp}/CHANGELOG.md"
+	out1="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "zeo-0.1.1_p20261004-r3")"
+	s1=$?
+	out2="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "zeo-0.1.1_p20991231")"
+	s2=$?
+	out3="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "zeo-0.1.1_p20261004")"
+	s3=$?
+	assert_status 0 "${s1}" && assert_status 0 "${s2}" && assert_status 0 "${s3}" &&
+		assert_not_contains "${out1}${out2}${out3}" "error" && ok
+	rm -rf "${tmp}"
+}
+
+# -rN must not leak into the derived version on the failing side either: the
+# refusal names 0.1.2, not 0.1.2-r1, and not the snapshot.
+test_check_changelog_names_bare_version_when_missing() {
+	case_start "check-changelog: a missing version exits 1 naming X.Y.Z and the changelog path"
+	local tmp out status pf="zeo-0.1.2_p20261004-r1"
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "${pf}"
+	cl_with_0_1_1 "${tmp}/CHANGELOG.md"
+	out="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "${pf}")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "0.1.2" &&
+		assert_contains "${out}" "${tmp}/CHANGELOG.md" &&
+		assert_not_contains "${out}" "[0.1.2-r1]" && ok
+	rm -rf "${tmp}"
+}
+
+test_check_changelog_unreadable_is_environment() {
+	case_start "check-changelog: an unreadable changelog exits 2 naming the path"
+	local tmp out status pf="zeo-0.1.1_p20261004"
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "${pf}"
+	out="$(run_check_changelog "${tmp}" "${tmp}/absent/CHANGELOG.md" "${pf}")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "${tmp}/absent/CHANGELOG.md" && ok
+	rm -rf "${tmp}"
+}
+
+test_check_changelog_unparsable_pf_is_environment() {
+	case_start "check-changelog: a PF with no X.Y.Z exits 2 naming it"
+	local tmp out status pf="zeo-banana_p20261004"
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "${pf}"
+	cl_with_0_1_1 "${tmp}/CHANGELOG.md"
+	out="$(run_check_changelog "${tmp}" "${tmp}/CHANGELOG.md" "${pf}")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "${pf}" && ok
+	rm -rf "${tmp}"
+}
+
+# Benign last: the section exists, under the default path ../zeo/CHANGELOG.md
+# beside the zed-patches repository (ZP_CHANGELOG unset).
+test_check_changelog_default_path_passes() {
+	case_start "check-changelog: [0.1.1] in ../zeo/CHANGELOG.md beside the repo exits 0"
+	local tmp out status pf="zeo-0.1.1_p20261004"
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "${pf}"
+	mkdir -p "${tmp}/zeo"
+	cl_with_0_1_1 "${tmp}/zeo/CHANGELOG.md"
+	out="$(run_check_changelog "${tmp}" "-" "${pf}")"
+	status=$?
+	assert_status 0 "${status}" && ok
+	rm -rf "${tmp}"
+}
+
+# --- changelog-notes.sh (R4.1) ----------------------------------------------
+
+test_changelog_notes_prints_only_its_section_body() {
+	case_start "changelog-notes: 0.1.1 prints its body, not its heading, not 0.1.10's or 0.1.0's"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}"
+	cl_with_0_1_1 "${tmp}/CHANGELOG.md"
+	out="$(run_changelog_notes "${tmp}" "${tmp}/CHANGELOG.md" "0.1.1")"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_contains "${out}" "ONE-BODY-ADDED" &&
+		assert_contains "${out}" "ONE-BODY-FIXED" &&
+		assert_contains "${out}" "### Fixed" &&
+		assert_not_contains "${out}" "## [0.1.1]" &&
+		assert_not_contains "${out}" "TEN-BODY" &&
+		assert_not_contains "${out}" "ZERO-BODY" &&
+		assert_not_contains "${out}" "## [0.1.0]" && ok
+	rm -rf "${tmp}"
+}
+
+test_changelog_notes_accepts_a_pf() {
+	case_start "changelog-notes: a PF with _p and -rN prints the same body as its X.Y.Z"
+	local tmp by_version by_pf status
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}" "zeo-0.1.1_p20261004-r3"
+	cl_with_0_1_1 "${tmp}/CHANGELOG.md"
+	by_version="$(run_changelog_notes "${tmp}" "${tmp}/CHANGELOG.md" "0.1.1")"
+	by_pf="$(run_changelog_notes "${tmp}" "${tmp}/CHANGELOG.md" "zeo-0.1.1_p20261004-r3")"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_contains "${by_pf}" "ONE-BODY-ADDED" &&
+		assert_equal "${by_version}" "${by_pf}" && ok
+	rm -rf "${tmp}"
+}
+
+test_changelog_notes_missing_section() {
+	case_start "changelog-notes: a version mentioned but without a section exits 1 naming it"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}"
+	cl_without_0_1_1 "${tmp}/CHANGELOG.md"
+	out="$(run_changelog_notes "${tmp}" "${tmp}/CHANGELOG.md" "0.1.1")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "0.1.1" &&
+		assert_not_contains "${out}" "TEN-BODY" && ok
+	rm -rf "${tmp}"
+}
+
+test_changelog_notes_unreadable() {
+	case_start "changelog-notes: an unreadable changelog exits 2 naming the path"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	cl_env "${tmp}"
+	out="$(run_changelog_notes "${tmp}" "${tmp}/absent/CHANGELOG.md" "0.1.1")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "${tmp}/absent/CHANGELOG.md" && ok
+	rm -rf "${tmp}"
+}
+
+# --- check-sync.sh runs the guard (R3.4) ------------------------------------
+
+run_checksync_changelog() {
+	local tmp="$1" changelog="$2"
+	shift 2
+	ZP_CHANGELOG="${changelog}" ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" \
+		ZP_WORKROOT="${tmp}/work" ZP_REPO="${tmp}/repo" \
+		bash "${SCRIPTS}/check-sync.sh" "${FIXTURE_PV}" "$@" 2>&1
+}
+
+# checksync_changelog_env <tmp> — every other relation in sync, so only the
+# changelog can decide the verdict.
+checksync_changelog_env() {
+	local tmp="$1"
+	verify_env "${tmp}"
+	add_ebuild_patches "${tmp}/overlay" "0001-first.patch" "0002-second.patch"
+	run_sync "${tmp}" >/dev/null
+}
+
+test_checksync_changelog_missing_is_drift() {
+	case_start "check-sync: a packaged version with no changelog section is drift naming it (exit 1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	checksync_changelog_env "${tmp}"
+	# 0.9.9 only as 0.9.99 and in prose — no section of its own.
+	cl_header "${tmp}/CHANGELOG.md"
+	printf 'See ## [0.9.9] — 2026-01-01 once it ships.\n\n## [0.9.99] — 2026-01-02\n\n- NINES.\n' \
+		>>"${tmp}/CHANGELOG.md"
+	out="$(run_checksync_changelog "${tmp}" "${tmp}/CHANGELOG.md")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "DRIFT" &&
+		assert_contains "${out}" "0.9.9" &&
+		assert_contains "${out}" "${tmp}/CHANGELOG.md" &&
+		assert_contains "${out}" "out of sync" && ok
+	rm -rf "${tmp}"
+}
+
+test_checksync_changelog_unreadable_is_environment() {
+	case_start "check-sync: an unreadable changelog propagates as exit 2"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	checksync_changelog_env "${tmp}"
+	out="$(run_checksync_changelog "${tmp}" "${tmp}/absent/CHANGELOG.md")"
+	status=$?
+	assert_status 2 "${status}" &&
+		assert_contains "${out}" "${tmp}/absent/CHANGELOG.md" && ok
+	rm -rf "${tmp}"
+}
+
+test_checksync_changelog_present_is_checked_and_ok() {
+	case_start "check-sync: a version with its section stays in sync and the check is reported"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	checksync_changelog_env "${tmp}"
+	cl_header "${tmp}/CHANGELOG.md"
+	printf '## [0.9.9] — 2026-01-01\n\n### Added\n\n- NINE.\n' >>"${tmp}/CHANGELOG.md"
+	out="$(run_checksync_changelog "${tmp}" "${tmp}/CHANGELOG.md")"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_contains "${out}" "in sync" &&
+		assert_contains "${out,,}" "changelog" && ok
+	rm -rf "${tmp}"
+}
+
+# --- release-portable.sh refuses an undocumented release (R4.2) --------------
+
+# release_env <tmp> — every input release-portable.sh checks is present, and
+# `docker` is a stub that only records how it was called; nothing is built.
+release_env() {
+	local tmp="$1" ebuild_dir
+	verify_env "${tmp}"
+	ebuild_dir="${tmp}/overlay/app-editors/zeo"
+	printf 'DIST webrtc-m1-linux-x64-release.zip 1 BLAKE2B 0\n' >"${ebuild_dir}/Manifest"
+	: >"${tmp}/distfiles/webrtc-m1-linux-x64-release.zip"
+	mkdir -p "${ebuild_dir}/files"
+	: >"${ebuild_dir}/files/app-icon-zeo.png"
+	mkdir -p "${tmp}/repo/release/portable" "${tmp}/bin"
+	: >"${tmp}/repo/release/portable/Containerfile"
+	cat >"${tmp}/bin/docker" <<-EOS
+		#!/usr/bin/env bash
+		printf '%s\n' "\$*" >>"${tmp}/docker.log"
+		exit 0
+	EOS
+	chmod +x "${tmp}/bin/docker"
+	: >"${tmp}/docker.log"
+}
+
+run_release() {
+	local tmp="$1" changelog="$2"
+	shift 2
+	PATH="${tmp}/bin:${PATH}" ZP_CHANGELOG="${changelog}" ZP_PORTABLE_DIR="${tmp}/portable" \
+		ZP_OVERLAY="${tmp}/overlay" ZP_DISTDIR="${tmp}/distfiles" ZP_WORKROOT="${tmp}/work" \
+		ZP_REPO="${tmp}/repo" bash "${SCRIPTS}/release-portable.sh" "${FIXTURE_PV}" "$@" 2>&1
+}
+
+test_release_refuses_version_without_changelog() {
+	case_start "release-portable: no changelog section refuses with exit 1 before any container"
+	local tmp out status log
+	tmp="$(mktemp -d)"
+	release_env "${tmp}"
+	cl_without_0_1_1 "${tmp}/CHANGELOG.md"
+	out="$(run_release "${tmp}" "${tmp}/CHANGELOG.md" --no-flatpak)"
+	status=$?
+	log="$(cat "${tmp}/docker.log")"
+	assert_not_contains "${log}" "run " &&
+		assert_not_contains "${log}" "build " &&
+		assert_status 1 "${status}" &&
+		assert_contains "${out}" "0.9.9" && ok
+	rm -rf "${tmp}"
+}
+
 # --- runner -----------------------------------------------------------------
 
 # main [<filter>] — run every case, or only those whose function name contains
@@ -2022,6 +2446,25 @@ main() {
 		test_checksync_reports_in_sync
 		test_checksync_detects_overlay_drift
 		test_checksync_detects_ebuild_drift
+
+		test_check_changelog_ignores_mentions_and_lookalikes
+		test_check_changelog_short_section_does_not_satisfy_longer_version
+		test_check_changelog_ignores_snapshot_and_revision
+		test_check_changelog_names_bare_version_when_missing
+		test_check_changelog_unreadable_is_environment
+		test_check_changelog_unparsable_pf_is_environment
+		test_check_changelog_default_path_passes
+
+		test_checksync_changelog_missing_is_drift
+		test_checksync_changelog_unreadable_is_environment
+		test_checksync_changelog_present_is_checked_and_ok
+
+		test_changelog_notes_prints_only_its_section_body
+		test_changelog_notes_accepts_a_pf
+		test_changelog_notes_missing_section
+		test_changelog_notes_unreadable
+
+		test_release_refuses_version_without_changelog
 
 		test_refresh_preserves_source_set
 		test_refresh_refuses_existing_destination
