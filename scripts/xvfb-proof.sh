@@ -56,6 +56,7 @@ WORKDIR=""
 XVFB_DISPLAY=""
 XVFB_PID=""
 ZEO_PID=""
+SLEEP_PID=""
 WINDOW_ID=""
 
 # One entry per step, filled by validate_steps; values are read back from the file.
@@ -153,16 +154,64 @@ print_plan() {
 # --- isolation ----------------------------------------------------------------
 
 setup_workdir() {
-	WORKDIR="$(mktemp -d "${TMP_ROOT}/zp-XXXX")" || die 2 "cannot create a temporary directory under ${TMP_ROOT}"
-	printf 'workdir: %s\n' "${WORKDIR}"
+	if [[ -n "${KEEP}" ]]; then
+		mkdir -p -- "${KEEP}" || die 2 "cannot create the --keep directory: ${KEEP}"
+		WORKDIR="$(cd -- "${KEEP}" && pwd)"
+		printf 'workdir: %s\n' "${WORKDIR}"
+		printf 'kept: %s survives this run\n' "${WORKDIR}"
+	else
+		WORKDIR="$(mktemp -d "${TMP_ROOT}/zp-XXXX")" || die 2 "cannot create a temporary directory under ${TMP_ROOT}"
+		printf 'workdir: %s\n' "${WORKDIR}"
+	fi
 	[[ "${#WORKDIR}" -le "${MAX_WORKDIR_BYTES}" ]] ||
 		die 2 "the isolated directory is ${#WORKDIR} bytes, over the ${MAX_WORKDIR_BYTES} bytes a Unix socket under it allows: ${WORKDIR}"
 }
 
+# --- lifecycle -----------------------------------------------------------------
+
+# alive <pid> — running, and not a zombie waiting to be reaped.
+alive() {
+	local state
+	kill -0 "$1" 2>/dev/null || return 1
+	state="$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" || return 1
+	[[ "${state}" != Z ]]
+}
+
+# mine <pid> — the process is still a child of this run. A recorded PID that
+# died and was reused by something else is never signalled.
+mine() {
+	[[ -n "$1" && "$(awk '{print $4}' "/proc/$1/stat" 2>/dev/null)" == "$$" ]]
+}
+
+# stop <pid> [group] — SIGTERM, up to 5 s of grace, then SIGKILL. With "group",
+# the whole process group the PID leads: Zeo's own children (agent servers, the
+# CLI it spawns) go with it.
+stop() {
+	local pid="$1" target="$1" tries
+	mine "${pid}" || return 0
+	[[ "${2-}" != group ]] || target="-${pid}"
+	kill -TERM -- "${target}" 2>/dev/null || true
+	for ((tries = 50; tries > 0; tries--)); do
+		alive "${pid}" || break
+		sleep 0.1
+	done
+	if alive "${pid}"; then
+		printf 'warning: pid %s ignored SIGTERM for 5 s; killing it\n' "${pid}" >&2
+		kill -KILL -- "${target}" 2>/dev/null || true
+	fi
+	wait "${pid}" 2>/dev/null || true
+}
+
+# cleanup — on every exit: stop what this run started, newest first, then drop
+# the temporary directory unless --keep named it.
 cleanup() {
-	[[ -z "${ZEO_PID}" ]] || kill -TERM "${ZEO_PID}" 2>/dev/null || true
-	[[ -z "${XVFB_PID}" ]] || kill -TERM "${XVFB_PID}" 2>/dev/null || true
-	[[ -z "${WORKDIR}" ]] || rm -rf "${WORKDIR}"
+	trap - EXIT INT TERM
+	stop "${SLEEP_PID}"
+	stop "${ZEO_PID}" group
+	stop "${XVFB_PID}"
+	if [[ -n "${WORKDIR}" && -z "${KEEP}" ]]; then
+		rm -rf -- "${WORKDIR}"
+	fi
 }
 
 # display_number <display> — the N of [host]:N[.screen], empty when there is none.
@@ -233,13 +282,15 @@ launch_zeo() {
 		cp -- "${KEYMAP}" "${WORKDIR}/config/keymap.json" || die 2 "cannot copy the keymap: ${KEYMAP}"
 	fi
 	guard_display "${XVFB_DISPLAY}"
+	# setsid makes Zeo lead its own process group, so stop() can take its
+	# children with it; in a non-interactive shell it execs without forking.
 	env -u ZED_STATELESS \
 		WAYLAND_DISPLAY= \
 		DISPLAY="${XVFB_DISPLAY}" \
 		ZED_ALLOW_EMULATED_GPU=1 \
 		XDG_CACHE_HOME="${WORKDIR}/cache" \
 		XDG_STATE_HOME="${WORKDIR}/state" \
-		"${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
+		setsid "${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
 	ZEO_PID=$!
 	printf 'zeo: pid %s, log %s\n' "${ZEO_PID}" "${log}"
 }
@@ -316,7 +367,12 @@ run_steps() {
 			fi
 			;;
 		sleep)
-			sleep "$(step_value "${i}" sleep)"
+			# In the background and waited on: bash runs a signal trap only
+			# once the foreground command returns, and wait returns at once.
+			sleep "$(step_value "${i}" sleep)" &
+			SLEEP_PID=$!
+			wait "${SLEEP_PID}" || true
+			SLEEP_PID=""
 			;;
 		shot)
 			take_shot "${n}" "$(step_value "${i}" shot)"
@@ -332,10 +388,13 @@ main() {
 	print_plan
 	[[ "${DRY_RUN}" -eq 0 ]] || exit 0
 	trap cleanup EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	command -v Xvfb >/dev/null || die 2 "Xvfb is not on PATH"
 	command -v xdotool >/dev/null || die 2 "xdotool is not on PATH"
 	command -v import >/dev/null || die 2 "import (ImageMagick) is not on PATH"
 	command -v identify >/dev/null || die 2 "identify (ImageMagick) is not on PATH"
+	command -v setsid >/dev/null || die 2 "setsid (util-linux) is not on PATH"
 	setup_workdir
 	start_xvfb
 	launch_zeo

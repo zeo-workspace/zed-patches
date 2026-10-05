@@ -1462,6 +1462,7 @@ test_protocol_still_reports_drift_on_an_answering_lock() {
 # Behaviour switches, read by the stubs at run time:
 #   XVFB_STUB_DIE=1        Xvfb exits at once, creating no socket
 #   ZEO_STUB_NO_WINDOW=1   the editor never shows a window
+#   ZEO_STUB_IGNORE_TERM=1 the editor ignores SIGTERM and must be killed
 #   XDOTOOL_STUB_FAIL=<sub> xdotool exits 1 when its first argument is <sub>
 #   IDENTIFY_STUB_GEOM     what identify reports ("1920 1080" when unset)
 make_xvfb_stubs() {
@@ -1490,6 +1491,9 @@ printf 'config: %s\n' "$(cat "${udd}/config/settings.json" "${udd}/config/keymap
 echo "zeo stub started"
 [[ -n "${ZEO_STUB_NO_WINDOW-}" ]] || : >"${STUB_WINDOW}"
 printf '%s\n' "$$" >>"${STUB_PIDS}"
+# An ignored signal stays ignored across exec: the sleep below then shrugs off
+# SIGTERM the way a hung editor would.
+[[ -z "${ZEO_STUB_IGNORE_TERM-}" ]] || trap '' TERM
 exec sleep 300
 STUB
 	cat >"${bindir}/xdotool" <<'STUB'
@@ -1516,6 +1520,8 @@ STUB
 }
 
 # run_xvfb_proof <tmp> <args...> — the harness against the stubs in <tmp>/bin.
+# It execs, so a call put in the background leaves the harness itself in $!.
+# Call it only in a subshell -- $(...), ( ... ) or & -- or it replaces this one.
 # DISPLAY defaults to :0, the operator's display the harness must never drive.
 run_xvfb_proof() {
 	local tmp="$1"
@@ -1529,7 +1535,7 @@ run_xvfb_proof() {
 		XVFB_PROOF_X11_ROOT="${tmp}/x" \
 		XVFB_PROOF_XVFB_TIMEOUT=2 \
 		XVFB_PROOF_WINDOW_TIMEOUT="${XVFB_TEST_WINDOW_TIMEOUT:-5}" \
-		bash "${SCRIPTS}/xvfb-proof.sh" --binary "${tmp}/bin/zeo-editor" "$@" 2>&1
+		exec bash "${SCRIPTS}/xvfb-proof.sh" --binary "${tmp}/bin/zeo-editor" "$@" 2>&1
 }
 
 # stub_log <tmp> — what the stubs were asked, or nothing when none ran.
@@ -1678,8 +1684,8 @@ test_xvfb_proof_launch_copies_settings_and_keymap() {
 	tmp="$(mktemp -d)"
 	printf '{"SETTINGS": 1}' >"${tmp}/settings.json"
 	printf '[{"KEYMAP": 1}]' >"${tmp}/keymap.json"
-	run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')" \
-		--settings "${tmp}/settings.json" --keymap "${tmp}/keymap.json" >/dev/null
+	(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')" \
+		--settings "${tmp}/settings.json" --keymap "${tmp}/keymap.json" >/dev/null)
 	assert_contains "$(stub_log "${tmp}")" 'config: {"SETTINGS": 1}[{"KEYMAP": 1}]' && ok
 	rm -rf "${tmp}"
 }
@@ -1762,6 +1768,109 @@ test_xvfb_proof_drive_failing_xdotool_names_the_step() {
 	assert_status 1 "${status}" &&
 		assert_contains "${out}" "step 2" &&
 		assert_not_contains "$(stub_log "${tmp}")" "import" && ok
+	rm -rf "${tmp}"
+}
+
+# stubs_stopped <tmp> — both long-lived stubs ran and none is left alive.
+# A zombie counts as stopped: it is gone, only not yet reaped by its parent.
+stubs_stopped() {
+	local pid count=0
+	[[ -f "$1/stub.pids" ]] || {
+		no "no stub recorded a PID"
+		return 1
+	}
+	while read -r pid; do
+		count=$((count + 1))
+		if kill -0 "${pid}" 2>/dev/null && [[ "$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null)" != Z ]]; then
+			kill -KILL "${pid}" 2>/dev/null
+			no "stub pid ${pid} outlived the harness"
+			return 1
+		fi
+	done <"$1/stub.pids"
+	[[ "${count}" -eq 2 ]] || {
+		no "expected Xvfb and Zeo to record a PID, got ${count}"
+		return 1
+	}
+}
+
+test_xvfb_proof_lifecycle_stops_everything_on_success() {
+	case_start "xvfb-proof: after a successful run Xvfb and Zeo are gone and the temp dir removed (R4.1, R4.2)"
+	local tmp out status wd
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	status=$?
+	wd="$(workdir_of "${out}")"
+	assert_status 0 "${status}" && stubs_stopped "${tmp}" && {
+		[[ -n "${wd}" && ! -e "${wd}" ]] || no "the temp dir survived: [${wd}]"
+		[[ -n "${wd}" && ! -e "${wd}" ]]
+	} && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_lifecycle_stops_everything_on_failure() {
+	case_start "xvfb-proof: a failed step still stops Xvfb and a Zeo deaf to SIGTERM, and removes the temp dir (R4.1, R4.2)"
+	local tmp out status wd
+	tmp="$(mktemp -d)"
+	out="$(ZEO_STUB_IGNORE_TERM=1 IDENTIFY_STUB_GEOM="1 1" run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" "[{\"shot\": \"${tmp}/x.png\"}]")")"
+	status=$?
+	wd="$(workdir_of "${out}")"
+	assert_status 1 "${status}" && stubs_stopped "${tmp}" && {
+		[[ -n "${wd}" && ! -e "${wd}" ]] || no "the temp dir survived: [${wd}]"
+		[[ -n "${wd}" && ! -e "${wd}" ]]
+	} && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_lifecycle_stops_everything_on_sigterm() {
+	case_start "xvfb-proof: SIGTERM in the middle of a long sleep stops everything promptly (R4.1)"
+	local tmp pid tries start elapsed wd children child orphans=""
+	tmp="$(mktemp -d)"
+	run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 30}]')" >"${tmp}/out" &
+	pid=$!
+	for ((tries = 100; tries > 0; tries--)); do
+		grep -q '^step 1: sleep' "${tmp}/out" 2>/dev/null && break
+		sleep 0.1
+	done
+	# Every child, the step's own sleep included: an orphan left sleeping is
+	# exactly what outliving the run means.
+	children="$(pgrep -P "${pid}")"
+	start=${SECONDS}
+	kill -TERM "${pid}"
+	wait "${pid}"
+	elapsed=$((SECONDS - start))
+	wd="$(workdir_of "$(cat "${tmp}/out")")"
+	for child in ${children}; do
+		if kill -0 "${child}" 2>/dev/null && [[ "$(awk '{print $3}' "/proc/${child}/stat" 2>/dev/null)" != Z ]]; then
+			orphans+=" ${child}($(cat "/proc/${child}/comm" 2>/dev/null))"
+			kill -KILL "${child}"
+		fi
+	done
+	[[ -n "${children}" ]] || no "the harness had no children to check"
+	[[ -z "${orphans}" ]] || no "children outlived SIGTERM:${orphans}"
+	[[ -n "${children}" && -z "${orphans}" ]] && {
+		[[ "${elapsed}" -le 8 ]] || no "the harness took ${elapsed} s to honour SIGTERM"
+		[[ "${elapsed}" -le 8 ]]
+	} && stubs_stopped "${tmp}" && {
+		[[ -n "${wd}" && ! -e "${wd}" ]] || no "the temp dir survived: [${wd}]"
+		[[ -n "${wd}" && ! -e "${wd}" ]]
+	} && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_lifecycle_keep_reuses_and_preserves() {
+	case_start "xvfb-proof: --keep uses the given dir, keeps it, and a second run reopens it (R4.3)"
+	local tmp out1 out2 keep
+	tmp="$(mktemp -d)"
+	keep="${tmp}/keep"
+	out1="$(run_xvfb_proof "${tmp}" --keep "${keep}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	: >"${keep}/thread-marker"
+	out2="$(run_xvfb_proof "${tmp}" --keep "${keep}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	assert_equal "${keep}" "$(workdir_of "${out1}")" &&
+		assert_equal "${keep}" "$(workdir_of "${out2}")" &&
+		assert_contains "$(stub_log "${tmp}")" "zeo --user-data-dir ${keep}" && {
+		[[ -e "${keep}/thread-marker" && -d "${keep}/config" ]] || no "the kept dir lost its contents"
+		[[ -e "${keep}/thread-marker" && -d "${keep}/config" ]]
+	} && ok
 	rm -rf "${tmp}"
 }
 
@@ -1859,6 +1968,11 @@ main() {
 		test_xvfb_proof_drive_sends_every_step_to_the_private_display
 		test_xvfb_proof_drive_deletes_a_degenerate_capture
 		test_xvfb_proof_drive_failing_xdotool_names_the_step
+
+		test_xvfb_proof_lifecycle_stops_everything_on_success
+		test_xvfb_proof_lifecycle_stops_everything_on_failure
+		test_xvfb_proof_lifecycle_stops_everything_on_sigterm
+		test_xvfb_proof_lifecycle_keep_reuses_and_preserves
 	)
 
 	for t in "${tests[@]}"; do
