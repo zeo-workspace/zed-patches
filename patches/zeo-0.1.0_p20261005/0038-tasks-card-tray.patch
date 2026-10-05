@@ -763,7 +763,7 @@ index 0000000..b035a4c
 +}
 diff --git a/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs b/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs
 new file mode 100644
-index 0000000..a813a6e
+index 0000000..814e89b
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/tray/dedupe_tests.rs
 @@ -0,0 +1,276 @@
@@ -908,7 +908,7 @@ index 0000000..a813a6e
 +
 +    fn prompt(
 +        &self,
-+        params: acp::PromptRequest,
++        params: agent_client_protocol::schema::v2::PromptRequest,
 +        cx: &mut App,
 +    ) -> Task<Result<acp::PromptResponse>> {
 +        self.inner.prompt(params, cx)

@@ -8,7 +8,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 ---
 
 diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
-index 9746b4f..1f8f269 100644
+index 9746b4f..c6a0993 100644
 --- a/crates/agent_ui/src/message_editor.rs
 +++ b/crates/agent_ui/src/message_editor.rs
 @@ -1779,7 +1779,25 @@ impl MessageEditor {
@@ -55,7 +55,7 @@ index 9746b4f..1f8f269 100644
 +        let link = mention_uri.as_link().to_string();
 +        message_editor.update_in(cx, |editor, window, cx| {
 +            editor.set_message(
-+                vec![acp_v1::ContentBlock::Text(acp_v1::TextContent::new(
++                vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
 +                    format!("Look at {link} please"),
 +                ))],
 +                window,
@@ -93,12 +93,12 @@ index 9746b4f..1f8f269 100644
 +        pretty_assertions::assert_matches!(
 +            content.as_slice(),
 +            [
-+                acp_v1::ContentBlock::Text { .. },
-+                acp_v1::ContentBlock::ResourceLink { .. },
-+                acp_v1::ContentBlock::Text { .. },
++                acp_v2::ContentBlock::Text { .. },
++                acp_v2::ContentBlock::ResourceLink { .. },
++                acp_v2::ContentBlock::Text { .. },
 +            ]
 +        );
-+        if let acp_v1::ContentBlock::ResourceLink(resource_link) = &content[1] {
++        if let acp_v2::ContentBlock::ResourceLink(resource_link) = &content[1] {
 +            assert_eq!(resource_link.uri, mention_uri.to_uri().to_string());
 +        }
 +    }

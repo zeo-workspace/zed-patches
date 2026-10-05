@@ -84,7 +84,7 @@ index 9a741e4..3683c66 100644
                                      .children(self.render_fast_mode_control(cx))
                                      .children(self.render_thinking_control(cx)),
 diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
-index 1f8f269..ffa5509 100644
+index c6a0993..4782e02 100644
 --- a/crates/agent_ui/src/message_editor.rs
 +++ b/crates/agent_ui/src/message_editor.rs
 @@ -25,10 +25,11 @@ use editor::{

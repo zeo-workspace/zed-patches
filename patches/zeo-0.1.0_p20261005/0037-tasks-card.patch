@@ -4265,7 +4265,7 @@ index 0000000..49f0bb1
 +}
 diff --git a/crates/agent_ui/src/tasks_card/row_error_tests.rs b/crates/agent_ui/src/tasks_card/row_error_tests.rs
 new file mode 100644
-index 0000000..90ccf3e
+index 0000000..8b2c328
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/row_error_tests.rs
 @@ -0,0 +1,181 @@
@@ -4421,7 +4421,7 @@ index 0000000..90ccf3e
 +
 +    fn prompt(
 +        &self,
-+        params: acp::PromptRequest,
++        params: agent_client_protocol::schema::v2::PromptRequest,
 +        cx: &mut App,
 +    ) -> Task<Result<acp::PromptResponse>> {
 +        self.inner.prompt(params, cx)
@@ -4608,7 +4608,7 @@ index 0000000..54c31cc
 +}
 diff --git a/crates/agent_ui/src/tasks_card/test_helpers.rs b/crates/agent_ui/src/tasks_card/test_helpers.rs
 new file mode 100644
-index 0000000..7a2a1cf
+index 0000000..c618c90
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/test_helpers.rs
 @@ -0,0 +1,418 @@
@@ -4801,7 +4801,7 @@ index 0000000..7a2a1cf
 +
 +    fn prompt(
 +        &self,
-+        _params: acp::PromptRequest,
++        _params: agent_client_protocol::schema::v2::PromptRequest,
 +        _cx: &mut App,
 +    ) -> Task<Result<acp::PromptResponse>> {
 +        Task::ready(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))

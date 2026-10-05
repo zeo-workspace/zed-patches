@@ -4856,7 +4856,7 @@ index 0000000..e589a50
 +}
 diff --git a/crates/agent_tasks_panel/src/test_helpers.rs b/crates/agent_tasks_panel/src/test_helpers.rs
 new file mode 100644
-index 0000000..f08c933
+index 0000000..45054b2
 --- /dev/null
 +++ b/crates/agent_tasks_panel/src/test_helpers.rs
 @@ -0,0 +1,545 @@
@@ -5162,7 +5162,7 @@ index 0000000..f08c933
 +
 +    fn prompt(
 +        &self,
-+        _params: acp::PromptRequest,
++        _params: agent_client_protocol::schema::v2::PromptRequest,
 +        _cx: &mut App,
 +    ) -> Task<Result<acp::PromptResponse>> {
 +        Task::ready(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
@@ -5810,7 +5810,7 @@ index 50f1002..2f699cd 100644
  fn project_name(thread: &AcpThread) -> SharedString {
 diff --git a/crates/agent_ui/src/tasks_card/activity_tests.rs b/crates/agent_ui/src/tasks_card/activity_tests.rs
 new file mode 100644
-index 0000000..cc2540d
+index 0000000..1edc462
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/activity_tests.rs
 @@ -0,0 +1,845 @@
@@ -6438,7 +6438,7 @@ index 0000000..cc2540d
 +
 +        fn prompt(
 +            &self,
-+            params: acp::PromptRequest,
++            params: agent_client_protocol::schema::v2::PromptRequest,
 +            cx: &mut App,
 +        ) -> Task<Result<acp::PromptResponse>> {
 +            self.inner.prompt(params, cx)
