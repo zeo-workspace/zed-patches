@@ -1,6 +1,6 @@
-From 1b6e06bb3ff1929c9bdc04cc9cd2da56080b1607 Mon Sep 17 00:00:00 2001
+From d507dbab780a89b1d787f8abf09bd65d35416071 Mon Sep 17 00:00:00 2001
 From: zed-patches <zed-patches@localhost>
-Date: Tue, 6 Oct 2026 17:24:57 -0300
+Date: Tue, 6 Oct 2026 18:00:43 -0300
 Subject: [PATCH] agent_ui: Up and Down in the composer recall the thread's
  sent messages
 
@@ -43,7 +43,11 @@ message instead of stopping on each of its lines.
 (`draft_content_blocks_snapshot`, so mentions survive) and ends three ways:
 Down past the newest message restores it; any edit of a recalled message ends
 browsing, so the edited text is the new draft and the next Up starts from the
-newest again; and sending ends it. The recall's own replacement is told apart
+newest again; and sending ends it -- from the composer, or by resubmitting an
+edited earlier message (`regenerate` never goes through the composer's send, so
+it ends browsing itself and puts the saved draft back: the recalled text in the
+composer was never the operator's). A recalled index that no longer names a
+sent message does the same rather than dropping the draft. The recall's own replacement is told apart
 from an operator edit by the composer buffer's version, captured right after
 the recall -- every edit `set_source_message` makes is synchronous. While
 browsing, the thread's persisted `draft_prompt` is left alone: a recalled
@@ -63,8 +67,8 @@ after the defaults and `vim::Up`/`vim::Down` would otherwise shadow recall in
 normal mode, which is the composer's starting mode there.
 
 The model is a pure `SentMessageHistory` in `conversation_view/sent_history.rs`
-(entry indices plus the saved draft), held per `ThreadView`. Tests: 9 unit tests
-for the model, 17 GPUI tests driving the real keymap with real keystrokes
+(entry indices plus the saved draft), held per `ThreadView`. Tests: 10 unit tests
+for the model, 18 GPUI tests driving the real keymap with real keystrokes
 (`recall_*`).
 
 Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
@@ -76,13 +80,13 @@ Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
  assets/keymaps/vim.json                       |  10 +
  crates/agent_ui/src/agent_ui.rs               |   8 +
  crates/agent_ui/src/conversation_view.rs      |   7 +
- .../src/conversation_view/sent_history.rs     | 116 ++++
- .../conversation_view/sent_history/tests.rs   | 354 +++++++++++
- .../tests/recall_ends_tests.rs                | 277 +++++++++
+ .../src/conversation_view/sent_history.rs     | 123 ++++
+ .../conversation_view/sent_history/tests.rs   | 385 ++++++++++++
+ .../tests/recall_ends_tests.rs                | 347 +++++++++++
  .../tests/recall_indices_tests.rs             | 154 +++++
  .../conversation_view/tests/recall_tests.rs   | 580 ++++++++++++++++++
- .../src/conversation_view/thread_view.rs      | 197 +++++-
- 12 files changed, 1729 insertions(+), 4 deletions(-)
+ .../src/conversation_view/thread_view.rs      | 214 ++++++-
+ 12 files changed, 1854 insertions(+), 4 deletions(-)
  create mode 100644 crates/agent_ui/src/conversation_view/sent_history.rs
  create mode 100644 crates/agent_ui/src/conversation_view/sent_history/tests.rs
  create mode 100644 crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs
@@ -219,10 +223,10 @@ index 405ec91..7bcf1d5 100644
          // The agent wraps the provider error in a fresh `anyhow::Error`, so
 diff --git a/crates/agent_ui/src/conversation_view/sent_history.rs b/crates/agent_ui/src/conversation_view/sent_history.rs
 new file mode 100644
-index 0000000..2c56748
+index 0000000..b8350f1
 --- /dev/null
 +++ b/crates/agent_ui/src/conversation_view/sent_history.rs
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,123 @@
 +//! Shell-style history of the messages the operator sent in one thread.
 +//!
 +//! The composer walks it with Up and Down: Up recalls the operator's earlier
@@ -320,6 +324,13 @@ index 0000000..2c56748
 +        Some(Recall::Entry(browse.entries[browse.position]))
 +    }
 +
++    /// Ends browsing and hands back the saved draft, for when the composer
++    /// still shows a recalled message that the operator never chose to keep.
++    /// `None` when not browsing.
++    pub fn abandon(&mut self) -> Option<Vec<acp_v2::ContentBlock>> {
++        self.browsing.take().map(|browse| browse.draft)
++    }
++
 +    /// Forgets the position and the saved draft: the next `start` begins again
 +    /// from the newest message.
 +    pub fn end(&mut self) {
@@ -341,10 +352,10 @@ index 0000000..2c56748
 +mod tests;
 diff --git a/crates/agent_ui/src/conversation_view/sent_history/tests.rs b/crates/agent_ui/src/conversation_view/sent_history/tests.rs
 new file mode 100644
-index 0000000..0061020
+index 0000000..580e9fc
 --- /dev/null
 +++ b/crates/agent_ui/src/conversation_view/sent_history/tests.rs
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,385 @@
 +//! Unit tests for `SentMessageHistory` (story 018, Task 2.1).
 +//!
 +//! Wiring: `crates/agent_ui/src/conversation_view/sent_history.rs` declares
@@ -699,12 +710,43 @@ index 0000000..0061020
 +        assert_eq!(newer(&mut history), Shown::Draft(draft("d")));
 +    });
 +}
++
++/// Validation fix round 2: abandoning hands back the saved draft and ends
++/// browsing, so a caller can put the draft back in the composer.
++#[gpui::test]
++fn sent_history_abandon_returns_the_draft_and_ends_browsing(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("first", cx),
++            agent("a", cx),
++            sent_live("second", cx),
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(
++            history.abandon(),
++            None,
++            "nothing to abandon when not browsing"
++        );
++        assert_eq!(
++            start(&mut history, &entries, draft("kept")),
++            Shown::Entry(2)
++        );
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        assert_eq!(history.abandon(), Some(draft("kept")));
++        assert_eq!(
++            newer(&mut history),
++            Shown::Nothing,
++            "not browsing after abandon()"
++        );
++    });
++}
 diff --git a/crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs b/crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs
 new file mode 100644
-index 0000000..eeebbc8
+index 0000000..d61e8f0
 --- /dev/null
 +++ b/crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,347 @@
 +//! Composer recall: when browsing ends, and whose history it is (story 018, Task 3.2).
 +//!
 +//! Wiring: inside `crates/agent_ui/src/conversation_view.rs`'s `mod tests { .. }`, declare
@@ -981,6 +1023,76 @@ index 0000000..eeebbc8
 +        "restored question",
 +        "R4.2: restored and live messages form one history"
 +    );
++}
++
++// ---------------------------------------------------------------------------
++// R4.3 / R2.2 -- resubmitting an edited earlier message (validation fix round 2)
++// ---------------------------------------------------------------------------
++
++/// `regenerate` resends an earlier message from its own editor and never goes
++/// through the composer's send, so it must end browsing itself. The recalled
++/// text in the composer was never the operator's draft: the draft comes back.
++#[gpui::test]
++async fn recall_ends_when_an_earlier_message_is_resubmitted(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "alpha", cx);
++    send(&view, &connection, "bravo", cx);
++
++    type_draft(&view, "my draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "bravo", "precondition: browsing");
++
++    let thread_view = active_thread(&view, cx);
++    let (alpha_ix, alpha_editor) = thread_view.read_with(cx, |view, cx| {
++        let alpha_ix = view
++            .thread
++            .read(cx)
++            .entries()
++            .iter()
++            .position(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
++            .expect("precondition: alpha is in the thread");
++        let editor = view
++            .entry_view_state
++            .read(cx)
++            .entry(alpha_ix)
++            .and_then(|entry| entry.message_editor())
++            .cloned()
++            .expect("precondition: alpha has an edit-message editor");
++        (alpha_ix, editor)
++    });
++    alpha_editor.update_in(cx, |editor, window, cx| {
++        editor.set_text("alpha edited", window, cx)
++    });
++    connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
++        acp_v1::ContentChunk::new("Redone.".into()),
++    )]);
++    thread_view.update_in(cx, |view, window, cx| {
++        view.regenerate(alpha_ix, alpha_editor.clone(), window, cx)
++    });
++    cx.run_until_parked();
++
++    assert_eq!(
++        composer_text(&view, cx),
++        "my draft",
++        "R2.2: the recalled message is replaced by the draft browsing started from"
++    );
++    focus_composer(&view, cx);
++    set_caret_to_start(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "alpha edited",
++        "R4.3: the next Up starts from the message just resubmitted"
++    );
++}
++
++fn set_caret_to_start(view: &Entity<ConversationView>, cx: &mut VisualTestContext) {
++    message_editor(view, cx).update_in(cx, |editor, window, cx| {
++        editor.set_cursor_offset(0, window, cx)
++    });
++    cx.run_until_parked();
 +}
 diff --git a/crates/agent_ui/src/conversation_view/tests/recall_indices_tests.rs b/crates/agent_ui/src/conversation_view/tests/recall_indices_tests.rs
 new file mode 100644
@@ -1729,7 +1841,7 @@ index 0000000..949d577
 +    assert_eq!(composer_text(&view, cx), "my draft");
 +}
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index fc8a9cb..557499d 100644
+index fc8a9cb..ac5c993 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -1,5 +1,6 @@
@@ -1817,7 +1929,16 @@ index fc8a9cb..557499d 100644
          if self.message_editor.read(cx).editor().read(cx).read_only(cx) {
              self.handle_thread_error(
                  anyhow!(
-@@ -2815,6 +2838,170 @@ impl ThreadView {
+@@ -2369,6 +2392,8 @@ impl ThreadView {
+         if self.is_loading_contents || !self.can_edit_user_message(entry_ix, cx) {
+             return;
+         }
++        // Resubmitting an earlier message is a send that bypasses `send`.
++        self.abandon_sent_history(window, cx);
+         let thread = self.thread.clone();
+ 
+         let Some(client_id) = thread.update(cx, |thread, _| {
+@@ -2815,6 +2840,185 @@ impl ThreadView {
          self.move_queued_message_to_main_editor(last_id, None, None, window, cx);
      }
  
@@ -1949,7 +2070,7 @@ index fc8a9cb..557499d 100644
 +                        "composer history: entry {entry_ix} is no longer a sent message (session {}); browsing ended",
 +                        self.thread.read(cx).session_id()
 +                    );
-+                    self.sent_history.end();
++                    self.abandon_sent_history(window, cx);
 +                    return;
 +                };
 +                (blocks, false, caret_at_start)
@@ -1974,6 +2095,21 @@ index fc8a9cb..557499d 100644
 +        cx.notify();
 +    }
 +
++    /// Ends browsing with the composer back on the draft browsing started from:
++    /// a recalled message left there would otherwise pass for the draft.
++    fn abandon_sent_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let Some(draft) = self.sent_history.abandon() else {
++            return;
++        };
++        self.message_editor.update(cx, |editor, cx| {
++            editor.set_message(draft, window, cx);
++            let end = editor.text(cx).len();
++            editor.set_cursor_offset(end, window, cx);
++        });
++        self.recalled_composer_version = self.composer_version(cx);
++        cx.notify();
++    }
++
 +    fn composer_version(&self, cx: &App) -> Option<clock::Global> {
 +        self.message_editor
 +            .read(cx)
@@ -1988,7 +2124,7 @@ index fc8a9cb..557499d 100644
      // editor methods
  
      pub fn expand_message_editor(
-@@ -4989,6 +5176,8 @@ impl ThreadView {
+@@ -4989,6 +5193,8 @@ impl ThreadView {
              .bg(editor_bg_color)
              .justify_center()
              .on_action(cx.listener(Self::handle_message_editor_move_up))
