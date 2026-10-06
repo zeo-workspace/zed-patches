@@ -1,6 +1,6 @@
-From 09cce71e35ac83e40fc8134db22de85d02535602 Mon Sep 17 00:00:00 2001
+From 5fbb0bda61263f68eb07988d974f969d7af0e6b6 Mon Sep 17 00:00:00 2001
 From: lucascouts <lucascs@protonmail.com>
-Date: Tue, 6 Oct 2026 13:35:21 -0300
+Date: Tue, 6 Oct 2026 14:47:02 -0300
 Subject: [PATCH] agent: show running tasks' progress and open a task at its
  tool call
 MIME-Version: 1.0
@@ -13,9 +13,12 @@ The tasks card showed a running task's elapsed time, but its last tool
 and tool count only on rows the user chose to watch, so a stuck task and
 a busy one looked the same. Every running row now reads
 "<last tool> · <N> tools · <elapsed>", or "starting · <elapsed>" before
-the feed reports a tool use (a count of 0 never shows a tool). It follows
-each new snapshot without watching or expanding the row, truncates before
-the elapsed time and never wraps, and is gone once the task ends; ended
+the feed reports a tool use (a count of 0 never shows a tool), on a
+second line under the description: on one line it squeezed the
+description of a narrow card down to "Run...", so the description keeps
+the whole first line beside its chip and controls. It follows each new
+snapshot without watching or expanding the row, truncates and never
+wraps, and is gone once the task ends, taking its line with it; ended
 rows keep "<status> · <duration>", watched rows keep their details
 (tokens, last tool, summary). Selector tasks-card-progress-{task_id}.
 
@@ -55,14 +58,14 @@ started the task, where every command and edit it made is recorded.
     0040's assertions expected no notice after an open of a record with
     no id, and now expect that one.
 
-Tests: agent_ui tasks_card progress 5, agent_session_router scroll 3, and
+Tests: agent_ui tasks_card progress 5 and progress_line 3, agent_session_router scroll 3, and
 conversation_view's subagent-full-screen case 1; agent_tasks_panel
 history_db tool_call_id (a database from the shipped step 0, exactly one
 step appended, fills scoped to their key, never overwritten), store
 tool_call_id 5, panel open_at_task 6 and tool_call_id_contract 2 (feed to
 memory to disk to reload keeps the exact spelling beside case, fold and
 trailing-space decoys; an id known only from disk scrolls to the exact
-entry). Suites: agent_tasks_panel 121, agent_ui tasks_card 101,
+entry). Suites: agent_tasks_panel 121, agent_ui tasks_card 104,
 agent_session_router 14.
 ---
 
@@ -2338,10 +2341,10 @@ index 540f73a..f14bf54 100644
      async fn test_session_notices_stay_with_background_session_without_metadata_updates(
          cx: &mut TestAppContext,
 diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
-index f3a3b11..199b6b1 100644
+index f3a3b11..687c9f3 100644
 --- a/crates/agent_ui/src/tasks_card.rs
 +++ b/crates/agent_ui/src/tasks_card.rs
-@@ -93,6 +93,10 @@ mod title;
+@@ -93,6 +93,14 @@ mod title;
  #[path = "tasks_card/label_tests.rs"]
  mod label;
  
@@ -2349,10 +2352,14 @@ index f3a3b11..199b6b1 100644
 +#[path = "tasks_card/progress_tests.rs"]
 +mod progress;
 +
++#[cfg(test)]
++#[path = "tasks_card/progress_line_tests.rs"]
++mod progress_line;
++
  // GPUI's test windows never activate their accessibility tree (the test platform's
  // `a11y_init` drops the activation callback), so `debug_a11y_tree_json` has nothing to
  // show; tests read the row controls' screen-reader labels of the last render from here.
-@@ -179,6 +183,8 @@ pub struct TaskRecord {
+@@ -179,6 +187,8 @@ pub struct TaskRecord {
      pub status: AgentTaskStatus,
      pub tokens: Option<u64>,
      pub tool_uses: Option<u64>,
@@ -2361,7 +2368,7 @@ index f3a3b11..199b6b1 100644
  }
  
  impl TaskRecord {
-@@ -196,6 +202,12 @@ impl TaskRecord {
+@@ -196,6 +206,12 @@ impl TaskRecord {
              status: task.status,
              tokens: task.usage.as_ref().map(|usage| usage.tokens),
              tool_uses: task.usage.as_ref().map(|usage| usage.tool_uses),
@@ -2374,54 +2381,125 @@ index f3a3b11..199b6b1 100644
          }
      }
  
-@@ -1480,16 +1492,35 @@ impl TasksCard {
+@@ -1478,36 +1494,73 @@ impl TasksCard {
+             ("Foreground", "Running in the Foreground")
+         };
  
-         let timing = if task.status.is_running() {
+-        let timing = if task.status.is_running() {
++        // Every running row, watched or not, says what it is doing (story 023), on a line of its
++        // own under the description, so the description keeps the whole of line 1 (R1.6).
++        let progress_line = task.status.is_running().then(|| {
              let elapsed = now.duration_since(task.started_at).unwrap_or_default();
 -            div()
-+            // Every running row, watched or not, says what it is doing (story 023):
-+            // the activity truncates before the elapsed time does, and never wraps.
-+            h_flex()
-                 .debug_selector({
-                     let task_id = task_id.clone();
+-                .debug_selector({
+-                    let task_id = task_id.clone();
 -                    move || format!("tasks-card-elapsed-{task_id}")
-+                    move || format!("tasks-card-progress-{task_id}")
-                 })
+-                })
 -                .flex_none()
-+                .min_w_0()
-+                .max_w_1_2()
++            h_flex()
 +                .gap_1()
++                .min_w_0()
++                // An invisible copy of the kind indents the line under the description.
                  .child(
 -                    Label::new(format_duration(elapsed))
-+                    Label::new(format!("{} ·", progress_activity(&task)))
-                         .size(LabelSize::XSmall)
+-                        .size(LabelSize::XSmall)
 -                        .color(Color::Muted),
-+                        .color(Color::Muted)
-+                        .single_line()
-+                        .truncate(),
++                    div().flex_none().invisible().child(
++                        Label::new(task.kind.clone())
++                            .size(LabelSize::XSmall)
++                            .color(Color::Muted),
++                    ),
 +                )
 +                .child(
-+                    div()
++                    h_flex()
 +                        .debug_selector({
 +                            let task_id = task_id.clone();
-+                            move || format!("tasks-card-elapsed-{task_id}")
++                            move || format!("tasks-card-progress-{task_id}")
 +                        })
-+                        .flex_none()
++                        .min_w_0()
++                        .gap_1()
 +                        .child(
-+                            Label::new(format_duration(elapsed))
++                            Label::new(format!("{} ·", progress_activity(&task)))
 +                                .size(LabelSize::XSmall)
-+                                .color(Color::Muted),
++                                .color(Color::Muted)
++                                .single_line()
++                                .truncate(),
++                        )
++                        .child(
++                            div()
++                                .debug_selector({
++                                    let task_id = task_id.clone();
++                                    move || format!("tasks-card-elapsed-{task_id}")
++                                })
++                                .flex_none()
++                                .child(
++                                    Label::new(format_duration(elapsed))
++                                        .size(LabelSize::XSmall)
++                                        .color(Color::Muted),
++                                ),
 +                        ),
                  )
++        });
++
++        let timing = if task.status.is_running() {
++            None
          } else {
              let status = status_label(task.status);
-@@ -1939,6 +1970,31 @@ fn render_details(task: &AgentTask, task_id: &AgentTaskId) -> AnyElement {
+             let text = match ended_duration(&task) {
+                 Some(duration) => format!("{status} · {}", format_duration(duration)),
+                 None => status.to_string(),
+             };
+-            div()
+-                .debug_selector({
+-                    let task_id = task_id.clone();
+-                    move || format!("tasks-card-ended-{task_id}")
+-                })
+-                .flex_none()
+-                .child(
+-                    Label::new(text)
+-                        .size(LabelSize::XSmall)
+-                        .color(status_color(task.status)),
+-                )
++            Some(
++                div()
++                    .debug_selector({
++                        let task_id = task_id.clone();
++                        move || format!("tasks-card-ended-{task_id}")
++                    })
++                    .flex_none()
++                    .child(
++                        Label::new(text)
++                            .size(LabelSize::XSmall)
++                            .color(status_color(task.status)),
++                    ),
++            )
+         };
+ 
+         let watch_focus_handle = self.row_focus_handle(&key, RowControl::Watch, cx);
+@@ -1677,7 +1730,7 @@ impl TasksCard {
+                     ))
+                     .child(Chip::new(chip_label).label_size(LabelSize::XSmall)),
+             )
+-            .child(timing)
++            .children(timing)
+             .child(open_button)
+             .child(watch_button)
+             .children(background_button)
+@@ -1692,6 +1745,7 @@ impl TasksCard {
+             .pl_2()
+             .py_0p5()
+             .child(line)
++            .children(progress_line)
+             .when(watched, |this| this.child(render_details(&task, &task_id)))
+             .when_some(error, |this, error| {
+                 this.child(
+@@ -1939,6 +1993,31 @@ fn render_details(task: &AgentTask, task_id: &AgentTaskId) -> AnyElement {
          .into_any_element()
  }
  
 +/// What a running row paints beside its controls: `<last tool> · <N> tools · <elapsed>`,
 +/// or `starting · <elapsed>` before the first tool; `None` once the task ended (R1.1–R1.4).
-+/// The row paints the same two parts as separate labels; GPUI test windows report painted
++/// The row paints the same two parts as separate labels, on its second line; GPUI test windows report painted
 +/// bounds, not text, so the tests read the text through this.
 +#[cfg(test)]
 +pub(crate) fn progress_label(task: &AgentTask, now: SystemTime) -> Option<SharedString> {
@@ -2447,6 +2525,223 @@ index f3a3b11..199b6b1 100644
  /// How long an ended task ran: its own end time, else the adapter's measured
  /// duration; `None` when the adapter reported neither.
  fn ended_duration(task: &AgentTask) -> Option<Duration> {
+diff --git a/crates/agent_ui/src/tasks_card/progress_line_tests.rs b/crates/agent_ui/src/tasks_card/progress_line_tests.rs
+new file mode 100644
+index 0000000..e809712
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/progress_line_tests.rs
+@@ -0,0 +1,211 @@
++// Story 023, task 8.1 — a running row's progress reads on a second line below its
++// description, so the description keeps the row's width; an ended row keeps its status and
++// duration on line 1 and gains no second line (R1.1, R1.4, R1.6). Wired in
++// `src/tasks_card.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "tasks_card/progress_line_tests.rs"]
++//     mod progress_line;
++//
++// Validation filter: `tasks_card_progress_line_`.
++//
++// Contract: the selectors of story 013/023 stay as they are — `tasks-card-row-{id}`,
++// `tasks-card-label-{id}` (the description), `tasks-card-mode-{id}` (the chip),
++// `tasks-card-open-{id}` / `tasks-card-stop-{id}` (controls), `tasks-card-progress-{id}`
++// holding `tasks-card-elapsed-{id}` (running), `tasks-card-ended-{id}` (ended). GPUI's test
++// window records painted bounds per debug selector; every assertion here is on those bounds.
++//
++// Hostile halves first: the progress must NOT share the description's line (which is what
++// squeezes the description to "Run…"), and the converse — an ended row must NOT be split
++// onto a second line it has nothing to put on.
++
++use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, px};
++use serde_json::json;
++
++use super::test_helpers::*;
++
++const LONG_DESCRIPTION: &str = "Run the whole workspace test suite and collect every failing \
++     test into a report grouped by crate";
++const LONG_TOOL: &str = "mcp__playwright__browser_take_screenshot_of_the_full_page";
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// A running wire task with a long description that has reported progress through a tool
++/// with a long name: today's one-line layout gives that progress up to half the line.
++fn busy_described(id: &str) -> serde_json::Value {
++    let mut task = wire_task(id, "running", true, 1_000);
++    task["description"] = json!(LONG_DESCRIPTION);
++    task["lastTool"] = json!(LONG_TOOL);
++    task["usage"] = json!({ "tokens": 4_321, "toolUses": 17, "durationMs": 9_000 });
++    task
++}
++
++/// An ended wire task with the same long description.
++fn ended_described(id: &str, status: &str) -> serde_json::Value {
++    let mut task = wire_task(id, status, true, 1_000);
++    task["description"] = json!(LONG_DESCRIPTION);
++    task["lastTool"] = json!(LONG_TOOL);
++    task["usage"] = json!({ "tokens": 4_321, "toolUses": 17, "durationMs": 9_000 });
++    task
++}
++
++fn bounds(selector: &'static str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
++    cx.debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"))
++}
++
++fn same_line(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
++    a.top() < b.bottom() && b.top() < a.bottom()
++}
++
++fn inside(inner: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
++    inner.left() >= outer.left()
++        && inner.right() <= outer.right()
++        && inner.top() >= outer.top()
++        && inner.bottom() <= outer.bottom()
++}
++
++// R1.6 (hostile half: the progress must not share the description's line) — on a running
++// row the progress is painted below the description, under it, inside the row; the kind,
++// chip and controls stay on the description's line, and the elapsed time stays inside the
++// progress (R1.1).
++#[gpui::test]
++async fn tasks_card_progress_line_is_painted_below_the_description(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![busy_described("t1")], &mut cx);
++    draw(&mut cx);
++    let sa = session_of(&a, &cx);
++    assert!(
++        find_row(&card(&panel, &cx), &sa, "t1", &mut cx).is_some(),
++        "precondition: t1 is on the card"
++    );
++
++    let row = bounds("tasks-card-row-t1", &mut cx);
++    let label = bounds("tasks-card-label-t1", &mut cx);
++    let progress = bounds("tasks-card-progress-t1", &mut cx);
++    let elapsed = bounds("tasks-card-elapsed-t1", &mut cx);
++
++    assert!(
++        progress.top() >= label.bottom(),
++        "the progress sits on a line below the description: \
++         progress {progress:?}, description {label:?}"
++    );
++    assert!(
++        inside(progress, row),
++        "the progress line is inside its row: {progress:?} in {row:?}"
++    );
++    assert!(
++        progress.left() >= label.left(),
++        "the progress line is indented under the description, not under the kind: \
++         progress {progress:?}, description {label:?}"
++    );
++    assert!(
++        inside(elapsed, progress) && same_line(progress, elapsed),
++        "the elapsed time is part of the progress line: {elapsed:?} in {progress:?}"
++    );
++    for control in [
++        "tasks-card-mode-t1",
++        "tasks-card-open-t1",
++        "tasks-card-stop-t1",
++    ] {
++        let control_bounds = bounds(control, &mut cx);
++        assert!(
++            same_line(control_bounds, label),
++            "{control} stays on the description's line: {control_bounds:?} vs {label:?}"
++        );
++        assert!(
++            !same_line(control_bounds, progress),
++            "{control} is not on the progress line: {control_bounds:?} vs {progress:?}"
++        );
++    }
++}
++
++// R1.6 — with the progress moved off line 1, a long description on a running row keeps
++// the whole of line 1 that the kind, the chip and the controls leave: it reaches the chip,
++// and nothing but the row's gap stands between the chip and the first control, however long
++// the last tool's name is.
++//
++// Not "wider than half the row": measured on 2026-10-06, the test card's row is 292px and
++// kind (~26px), chip (~61px) and three controls (~68px) leave the description ~118px even
++// with no progress on line 1, so a half-the-row bound would fail a correct layout. Today the
++// progress takes ~118px of line 1 and the description is painted 0px wide.
++#[gpui::test]
++async fn tasks_card_progress_line_leaves_the_description_the_whole_line(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![busy_described("t1")], &mut cx);
++    draw(&mut cx);
++
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t1").is_some(),
++        "precondition: the running row paints its progress"
++    );
++    let label = bounds("tasks-card-label-t1", &mut cx);
++    let chip = bounds("tasks-card-mode-t1", &mut cx);
++    let open = bounds("tasks-card-open-t1", &mut cx);
++    // `gap_1` is 4px; one gap plus rounding, never a whole element.
++    let one_gap = px(8.);
++    assert!(
++        open.left() - chip.right() <= one_gap,
++        "nothing but a gap between the chip and the first control on line 1: \
++         chip {chip:?}, open {open:?}"
++    );
++    assert!(
++        chip.left() - label.right() <= one_gap,
++        "the description reaches the chip: description {label:?}, chip {chip:?}"
++    );
++    assert!(
++        label.size.width > px(0.),
++        "the description is not squeezed away: {label:?}"
++    );
++}
++
++// R1.4 (converse hostile half: an ended row must not be split onto a second line) — an
++// ended row paints no progress, keeps its status and duration on the description's line,
++// and stays one line tall: as tall as another ended row, shorter than a running row whose
++// progress takes a second line.
++#[gpui::test]
++async fn tasks_card_progress_line_is_absent_from_an_ended_row(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            ended_described("t1", "completed"),
++            ended_described("t2", "failed"),
++            busy_described("t3"),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t1").is_none(),
++        "no progress on an ended row"
++    );
++    let label = bounds("tasks-card-label-t1", &mut cx);
++    let ended = bounds("tasks-card-ended-t1", &mut cx);
++    assert!(
++        same_line(ended, label),
++        "status and duration stay on the description's line: {ended:?} vs {label:?}"
++    );
++
++    let ended_row = bounds("tasks-card-row-t1", &mut cx);
++    let other_ended_row = bounds("tasks-card-row-t2", &mut cx);
++    let running_row = bounds("tasks-card-row-t3", &mut cx);
++    assert_eq!(
++        ended_row.size.height, other_ended_row.size.height,
++        "every ended row is one line tall"
++    );
++    assert!(
++        ended_row.size.height < running_row.size.height,
++        "only a running row gains the progress line: ended {ended_row:?}, running {running_row:?}"
++    );
++}
 diff --git a/crates/agent_ui/src/tasks_card/progress_tests.rs b/crates/agent_ui/src/tasks_card/progress_tests.rs
 new file mode 100644
 index 0000000..6cd5f7b
