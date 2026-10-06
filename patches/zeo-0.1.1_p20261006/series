@@ -240,6 +240,12 @@
 # router scrolled to it (story 023). After 0040, whose reserved tool_call_id it
 # honours, so it rides this flag BY DEPENDENCY.
 0041-agent-tasks-progress-and-open-at-task.patch
+# 0042: an archived record of 0035's Agent Tasks panel can be deleted -- one
+# row's Delete, or Delete All Archived under the Archived filter -- after a
+# confirmation; only the history row goes, the thread is never touched. No
+# migration. After 0041, whose panel and history it changes, so it rides this
+# flag BY DEPENDENCY (story 025).
+0042-agent-tasks-panel-delete-archived.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
