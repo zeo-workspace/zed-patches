@@ -254,6 +254,14 @@
 # still sends, BY CHOICE of the operator (story 017). Generic ACP, so it
 # rides this flag BY CHOICE, like 0027 and 0030.
 0043-question-card-swallows-enter.patch
+# 0044: Up on the composer's first line recalls the operator's messages sent
+# in this thread, newest first; Down on its last line walks forward and back to
+# the draft kept when browsing started. Anywhere else, with a selection, or with
+# a menu open they move the caret as before (the action propagates to
+# editor::MoveUp/MoveDown); upstream's Up-pulls-the-last-queued-message keeps
+# priority. All four keymaps, vim.json included (story 018). Pure Zed, so it
+# rides this flag BY CHOICE, like 0014 and 0026.
+0044-composer-sent-message-history.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
