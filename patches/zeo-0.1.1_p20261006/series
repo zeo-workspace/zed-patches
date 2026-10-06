@@ -234,6 +234,12 @@
 # (story 024). After 0035 and 0039, whose open_task and rows it changes, so
 # it rides this flag BY DEPENDENCY.
 0040-agent-route-sessions-to-their-project-window.patch
+# 0041: every running row of 0037's card shows its last tool and tool count;
+# 0035's history keeps the tool call that started each task (a migration step
+# appended after 0039's) and "Open at Task" opens the thread through 0040's
+# router scrolled to it (story 023). After 0040, whose reserved tool_call_id it
+# honours, so it rides this flag BY DEPENDENCY.
+0041-agent-tasks-progress-and-open-at-task.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
