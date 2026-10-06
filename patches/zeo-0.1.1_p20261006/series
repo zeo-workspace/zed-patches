@@ -262,6 +262,13 @@
 # priority. All four keymaps, vim.json included (story 018). Pure Zed, so it
 # rides this flag BY CHOICE, like 0014 and 0026.
 0044-composer-sent-message-history.patch
+# 0045: a code block in an agent's message that holds one slash command gets a
+# button beside Copy that opens a new thread with the same agent and the
+# command in its composer -- prefilled, never sent; code blocks only, agent
+# messages only (a markdown hook, MarkdownElement::on_code_block_action, set on
+# the assistant-message path). Pure Zed, so it rides this flag BY CHOICE, like
+# 0014 and 0026 (story 020).
+0045-slash-command-opens-new-thread.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
