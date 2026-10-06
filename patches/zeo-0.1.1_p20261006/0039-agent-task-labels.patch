@@ -1,0 +1,4302 @@
+From dd8236716669bf8a7adcff89fd288a7ef2edacb2 Mon Sep 17 00:00:00 2001
+From: zed-patches <zed-patches@localhost>
+Date: Mon, 5 Oct 2026 10:16:06 -0300
+Subject: [PATCH] agent_tasks: one-line task labels, and a Rename the panel
+ keeps
+
+A task's label could span several lines. Both rows built it with
+`Label::new(description).truncate()`, and `truncate()` only stops soft
+wrapping: a hard `\n` -- a Bash heredoc, say -- still starts a new line
+inside a fixed-height row, so 0037's card and 0035's panel drew the extra
+lines over the rows below them (seen live in zeo -r7). Every 013/014
+fixture was a one-line "Task {id}", which is why no test saw it. Story 022.
+
+What a row shows now, in the card and in the panel:
+
+  * one line: every run of whitespace, line breaks and tabs included, is
+    collapsed to one space (`agent_ui::collapse_label`), then rendered
+    `.single_line().truncate()`;
+  * at most 60 characters (`TASK_LABEL_MAX_CHARS`): a longer label is cut
+    to 59 plus an ellipsis (`display_label`); exactly 60 stays uncut --
+    `util::truncate_and_trailoff(s, n)` cuts whenever the byte length passes
+    n, so it is only called once the character count is over 60;
+  * the full collapsed text in the row's tooltip, and the shown text in
+    every screen-reader label of the row.
+
+Rename. Every panel row -- running, ended, interrupted or archived -- has a
+Rename action (pencil, "Rename This Task", keyboard-reachable). It swaps the
+label for a one-line editor holding the current label, selected. Enter or
+leaving the editor saves; Escape cancels; a blank name restores the agent's
+description; what is kept is cut to 60 characters. Escape is handled as
+`editor::actions::Cancel` as well as `menu::Cancel`: inside an Editor the
+default keymap dispatches the former, so the latter alone leaves Escape
+dead. The editor is rendered outside the row's ButtonLike, so a click in
+it never opens the thread, and rows are full width so its slot is not laid
+out at 0px by uniform_list.
+An editor that vanishes without an answer -- its row scrolled out of
+uniform_list's range, hidden by a filter, or gone -- discards the edit
+instead of saving half a label. Asking what holds focus cannot tell that
+apart from a real blur: the Workspace refocuses the panel before Blurred
+arrives. The panel's own on_focus_lost fires first, and that is the flag.
+
+Where the label lives. The panel's history gains migration step 2,
+`ALTER TABLE agent_task_history ADD COLUMN label TEXT` -- appended, step 1
+untouched, since sqlez migrations are positional; a 0035 database opens
+with every row intact and label NULL. `TaskHistoryStore::rename` updates
+memory, then the `agent_ui::TaskLabels` global, then queues the write, so a
+failed write still shows the label this session and is logged with the
+session and task ids. The global is how the card shows the user's label:
+agent_tasks_panel depends on agent_ui, never the reverse. Loading the
+history refills it, so a label survives a restart; later updates of the
+task never clear it.
+
+Dock. The panel now docks at the bottom by default (320px tall) instead of
+the left: the agent panel, which holds 0037's card, defaults to the left
+dock, so the two hid each other. A dock position the user saved is kept.
+
+Paired with claude-agent-acp-plus 0.25.0, which holds a foreground shell
+task back for 5 s and labels shell tasks with the tool call's own
+description; with an older adapter everything above still holds, the
+lists are only fuller.
+
+Tests: agent_ui task_label 16, tasks_card 96; agent_tasks_panel 97 (new:
+history_db/label, store/rename, panel/list_label, actions_rename,
+label_contract, rename_vanish, dock_default). GPUI test windows build no accessibility tree, so each
+crate records the aria labels it renders in a #[cfg(test)] thread-local.
+Live proof on a built Zeo p20261004: a 10 s heredoc listed on one line under
+its description, a 79-character rename stored as 60, kept across a restart.
+---
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 00e0ce8..8e23258 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -470,11 +470,13 @@ dependencies = [
+  "anyhow",
+  "collections",
+  "db",
++ "editor",
+  "fs",
+  "futures 0.3.34",
+  "gpui",
+  "language_model",
+  "log",
++ "menu",
+  "project",
+  "remote",
+  "remote_connection",
+diff --git a/crates/agent_tasks_panel/Cargo.toml b/crates/agent_tasks_panel/Cargo.toml
+index 6010073..aa9d9dc 100644
+--- a/crates/agent_tasks_panel/Cargo.toml
++++ b/crates/agent_tasks_panel/Cargo.toml
+@@ -19,9 +19,11 @@ agent_ui.workspace = true
+ anyhow.workspace = true
+ collections.workspace = true
+ db.workspace = true
++editor.workspace = true
+ futures.workspace = true
+ gpui.workspace = true
+ log.workspace = true
++menu.workspace = true
+ settings.workspace = true
+ ui.workspace = true
+ workspace.workspace = true
+diff --git a/crates/agent_tasks_panel/src/history_db.rs b/crates/agent_tasks_panel/src/history_db.rs
+index cb876de..8d0abd3 100644
+--- a/crates/agent_tasks_panel/src/history_db.rs
++++ b/crates/agent_tasks_panel/src/history_db.rs
+@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+ use acp_thread::{AgentTaskId, AgentTaskStatus};
+ use agent_client_protocol::schema::v1 as acp;
+-use agent_ui::TaskRecord;
++use agent_ui::{TaskKey, TaskRecord};
+ use anyhow::{Context as _, Result, anyhow};
+ use db::{
+     sqlez::{
+@@ -37,13 +37,15 @@ use db::{
+     },
+     sqlez_macros::sql,
+ };
++use gpui::SharedString;
+ 
+ /// The history domain's connection: a clone of the shared application database.
+ pub struct AgentTaskHistoryDb(ThreadSafeConnection);
+ 
+ /// The migration list lives in a `static` so that the list registered with `inventory` and
+ /// `AgentTaskHistoryDb::MIGRATIONS` are one allocation rather than two copies of a `const`.
+-static HISTORY_MIGRATIONS: [&str; 1] = [sql!(
++static HISTORY_MIGRATIONS: [&str; 2] = [
++    sql!(
+     CREATE TABLE IF NOT EXISTS agent_task_history(
+         session_id TEXT NOT NULL,
+         task_id TEXT NOT NULL,
+@@ -61,7 +63,10 @@ static HISTORY_MIGRATIONS: [&str; 1] = [sql!(
+         PRIMARY KEY(session_id, task_id)
+     ) STRICT;
+     CREATE INDEX IF NOT EXISTS agent_task_history_started ON agent_task_history(started_at);
+-)];
++    ),
++    // Step 2 (story 022): the user's label of a task, NULL until renamed (R3.8, R4.1).
++    sql!(ALTER TABLE agent_task_history ADD COLUMN label TEXT;),
++];
+ 
+ impl Domain for AgentTaskHistoryDb {
+     const NAME: &str = stringify!(AgentTaskHistoryDb);
+@@ -73,12 +78,15 @@ impl Domain for AgentTaskHistoryDb {
+ // No dependencies: the history domain migrates after nothing upstream (R4.1).
+ db::static_connection!(AgentTaskHistoryDb, []);
+ 
+-/// One task of the history: the record story 013's card emitted, and whether the user archived
+-/// it. The flag belongs to the history, not to the live record.
++/// One task of the history: the record story 013's card emitted, whether the user archived it,
++/// and the label the user gave it. The flag and the label belong to the history, not to the
++/// live record.
+ #[derive(Clone, Debug, PartialEq)]
+ pub struct HistoryEntry {
+     pub record: TaskRecord,
+     pub archived: bool,
++    /// The user's label, already normalized; `None` shows the description.
++    pub label: Option<SharedString>,
+ }
+ 
+ // There is deliberately no delete statement: every record is kept until the user deletes Zeo's
+@@ -205,11 +213,30 @@ impl AgentTaskHistoryDb {
+         .await
+     }
+ 
++    /// Sets or clears (`None`) the user's label of one task. Only that `(session_id, task_id)`
++    /// row is written; its description, status and archive flag are left as they are.
++    pub async fn set_label(&self, key: &TaskKey, label: Option<&str>) -> Result<()> {
++        let (session_id, task_id) = key;
++        let ids = ids_of(session_id, task_id);
++        let bindings = (
++            label.map(str::to_string),
++            session_id.to_string(),
++            task_id.to_string(),
++        );
++        self.write(move |connection| {
++            connection.exec_bound(sql!(
++                UPDATE agent_task_history SET label = ?1 WHERE session_id = ?2 AND task_id = ?3
++            ))?(bindings)
++        })
++        .await
++        .with_context(|| format!("labelling {ids}"))
++    }
++
+     /// Every record, archived or not, newest first.
+     pub async fn load_all(&self) -> Result<Vec<HistoryEntry>> {
+         self.select::<HistoryEntry>(sql!(
+             SELECT session_id, task_id, thread_title, project, kind, description, background,
+-                status, started_at, ended_at, tokens, tool_uses, archived
++                status, started_at, ended_at, tokens, tool_uses, archived, label
+             FROM agent_task_history
+             ORDER BY started_at DESC, session_id, task_id
+         ))?()
+@@ -232,6 +259,7 @@ impl Column for HistoryEntry {
+         let (tokens, next): (Option<u64>, i32) = Column::column(statement, next)?;
+         let (tool_uses, next): (Option<u64>, i32) = Column::column(statement, next)?;
+         let (archived, next): (bool, i32) = Column::column(statement, next)?;
++        let (label, next): (Option<String>, i32) = Column::column(statement, next)?;
+ 
+         let status = parse_status(&status)
+             .with_context(|| format!("reading the record of {session_id}/{task_id}"))?;
+@@ -249,7 +277,14 @@ impl Column for HistoryEntry {
+             tokens,
+             tool_uses,
+         };
+-        Ok((HistoryEntry { record, archived }, next))
++        Ok((
++            HistoryEntry {
++                record,
++                archived,
++                label: label.map(Into::into),
++            },
++            next,
++        ))
+     }
+ }
+ 
+@@ -295,3 +330,7 @@ mod migration;
+ #[cfg(test)]
+ #[path = "history_db/statement_tests.rs"]
+ mod statements;
++
++#[cfg(test)]
++#[path = "history_db/label_tests.rs"]
++mod label;
+diff --git a/crates/agent_tasks_panel/src/history_db/label_tests.rs b/crates/agent_tasks_panel/src/history_db/label_tests.rs
+new file mode 100644
+index 0000000..daa2fb2
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/history_db/label_tests.rs
+@@ -0,0 +1,306 @@
++// Story 022, task 4.1 — migration step 2 and `set_label` (R3.8, R4.1, R5.3, Q12, Q13).
++// Module path: `history_db::label`. Hostile fixtures come before benign ones.
++//
++// Declared in `src/history_db.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "history_db/label_tests.rs"]
++//     mod label;
++
++use acp_thread::AgentTaskStatus;
++use db::sqlez::{connection::Connection, domain::Domain};
++use gpui::TestAppContext;
++
++use crate::AgentTaskHistoryDb;
++use crate::test_helpers::*;
++
++fn label_of(rows: &[crate::HistoryEntry], session: &str, task: &str) -> Option<String> {
++    find(rows, session, task)
++        .unwrap_or_else(|| panic!("({session}, {task}) should be recorded"))
++        .label
++        .as_ref()
++        .map(|label| label.to_string())
++}
++
++async fn seed(db: &AgentTaskHistoryDb, pairs: &[(&str, &str)]) {
++    for (index, (session, task)) in pairs.iter().enumerate() {
++        let at = 1_000 + index as i64 * 100;
++        db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++            .await
++            .unwrap();
++        db.update_ended(&record(session, task, AgentTaskStatus::Completed, at))
++            .await
++            .unwrap();
++    }
++}
++
++// R4.1, Q12 — a database written by the 0035 schema (step 1 only) opens with every row,
++// status and archive flag intact, gains a NULL label, and each row is renamable.
++#[test]
++fn history_db_label_migration_two_opens_a_step_one_database_intact() {
++    assert_eq!(
++        AgentTaskHistoryDb::MIGRATIONS.len(),
++        2,
++        "step 2 is appended after the 0035 step"
++    );
++    let connection = Connection::open_memory(Some("agent_task_history_label_step_one"));
++    connection
++        .migrate(
++            AgentTaskHistoryDb::NAME,
++            &AgentTaskHistoryDb::MIGRATIONS[..1],
++            &mut |_, _, _| false,
++        )
++        .expect("step 1 alone applies");
++    connection
++        .exec(
++            "INSERT INTO agent_task_history \
++             (session_id, task_id, thread_title, project, kind, description, background, \
++              status, started_at, ended_at, tokens, tool_uses, archived) \
++             VALUES ('s-old', 'fg', 'Old', 'project', 'shell', 'ls -la\nwc -l', 0, \
++                     'completed', 1000, 2000, NULL, NULL, 1), \
++                    ('s-old', 'bg', 'Old', 'project', 'shell', 'sleep 20', 1, \
++                     'interrupted', 3000, 4000, NULL, NULL, 0)",
++        )
++        .and_then(|mut run| run())
++        .expect("rows written by the 0035 schema");
++
++    for _ in 0..2 {
++        connection
++            .migrate(
++                AgentTaskHistoryDb::NAME,
++                AgentTaskHistoryDb::MIGRATIONS,
++                &mut |_, _, _| false,
++            )
++            .expect("the full list applies to a step-1 database, and again as a no-op");
++    }
++
++    let rows = connection
++        .select::<(String, String, String, i64, i64, Option<String>)>(
++            "SELECT task_id, description, status, background, archived, label \
++             FROM agent_task_history ORDER BY task_id",
++        )
++        .expect("select")()
++    .expect("run");
++    assert_eq!(
++        rows,
++        vec![
++            (
++                "bg".into(),
++                "sleep 20".into(),
++                "interrupted".into(),
++                1,
++                0,
++                None
++            ),
++            (
++                "fg".into(),
++                "ls -la\nwc -l".into(),
++                "completed".into(),
++                0,
++                1,
++                None
++            ),
++        ],
++        "every 0035 row survives as it was, with no label"
++    );
++
++    connection
++        .exec("UPDATE agent_task_history SET label = 'Listed files' WHERE task_id = 'fg'")
++        .and_then(|mut run| run())
++        .expect("a migrated row is renamable");
++}
++
++// R3.8, Q12 — every later start of Zeo reopens a step-2 database: the list applies no step
++// again, records each step once, and every label already written survives.
++#[test]
++fn history_db_label_reopening_a_step_two_database_keeps_the_labels() {
++    let connection = Connection::open_memory(Some("agent_task_history_label_reopen"));
++    let migrate = || {
++        connection.migrate(
++            AgentTaskHistoryDb::NAME,
++            AgentTaskHistoryDb::MIGRATIONS,
++            &mut |_, _, _| false,
++        )
++    };
++    migrate().expect("the full list applies to an empty database");
++    connection
++        .exec(
++            "INSERT INTO agent_task_history \
++             (session_id, task_id, thread_title, project, kind, description, background, \
++              status, started_at, ended_at, tokens, tool_uses, archived, label) \
++             VALUES ('s1', 'a', 'T', 'project', 'shell', 'ls', 0, \
++                     'completed', 1000, 2000, NULL, NULL, 0, 'Kept label'), \
++                    ('s1', 'b', 'T', 'project', 'shell', 'pwd', 0, \
++                     'completed', 3000, 4000, NULL, NULL, 1, NULL)",
++        )
++        .and_then(|mut run| run())
++        .expect("rows written by the step-2 schema");
++
++    for _ in 0..2 {
++        migrate().expect("reopening a step-2 database is a no-op");
++    }
++
++    let rows = connection
++        .select::<(String, i64, Option<String>)>(
++            "SELECT task_id, archived, label FROM agent_task_history ORDER BY task_id",
++        )
++        .expect("select")()
++    .expect("run");
++    assert_eq!(
++        rows,
++        vec![
++            ("a".into(), 0, Some("Kept label".into())),
++            ("b".into(), 1, None),
++        ],
++        "every label written before the reopen survives it"
++    );
++    let steps = connection
++        .select::<i64>("SELECT COUNT(*) FROM migrations WHERE domain = 'AgentTaskHistoryDb'")
++        .expect("select")()
++    .expect("run");
++    assert_eq!(
++        steps,
++        vec![2],
++        "each step is recorded once, however often it reopens"
++    );
++}
++
++// Hostile (wrong collapse): only the pair is labelled — not the same task id in another
++// session, not another task of the session, not a pair whose parts concatenate alike.
++#[gpui::test]
++async fn history_db_label_set_label_touches_only_its_own_pair(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_label_own_pair").await;
++    seed(
++        &db,
++        &[
++            ("s1", "t1"),
++            ("s2", "t1"),
++            ("s1", "t2"),
++            ("s10", "t1"),
++            ("s:1", "x"),
++            ("s", "1:x"),
++        ],
++    )
++    .await;
++
++    db.set_label(&key("s1", "t1"), Some("Renamed"))
++        .await
++        .unwrap();
++    db.set_label(&key("s", "1:x"), Some("Third")).await.unwrap();
++
++    let rows = load(&db).await;
++    assert_eq!(label_of(&rows, "s1", "t1").as_deref(), Some("Renamed"));
++    assert_eq!(label_of(&rows, "s", "1:x").as_deref(), Some("Third"));
++    for (session, task) in [("s2", "t1"), ("s1", "t2"), ("s10", "t1"), ("s:1", "x")] {
++        assert_eq!(
++            label_of(&rows, session, task),
++            None,
++            "{session}/{task} is untouched"
++        );
++    }
++}
++
++// Hostile (wrong split): a key built from fresh strings reaches the stored row; setting twice
++// overwrites; None clears. A 60-character multi-byte label round-trips exactly.
++#[gpui::test]
++async fn history_db_label_set_label_overwrites_round_trips_and_clears(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_label_round_trip").await;
++    seed(&db, &[("s1", "t1")]).await;
++
++    let session = String::from("s") + "1";
++    db.set_label(&key(&session, "t1"), Some("First"))
++        .await
++        .unwrap();
++    db.set_label(&key("s1", "t1"), Some("Second"))
++        .await
++        .unwrap();
++    assert_eq!(
++        label_of(&load(&db).await, "s1", "t1").as_deref(),
++        Some("Second")
++    );
++
++    let wide = "é".repeat(60);
++    db.set_label(&key("s1", "t1"), Some(&wide)).await.unwrap();
++    assert_eq!(label_of(&load(&db).await, "s1", "t1"), Some(wide));
++
++    db.set_label(&key("s1", "t1"), None).await.unwrap();
++    assert_eq!(label_of(&load(&db).await, "s1", "t1"), None);
++}
++
++// R3.9 at the database: a new row starts with no label, and no later write of the task — a
++// repeated start, its ending, the startup sweep — clears or rewrites one.
++#[gpui::test]
++async fn history_db_label_later_writes_never_touch_the_label(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_label_later_writes").await;
++    let running = record("s1", "t1", AgentTaskStatus::Running, 1_000);
++    db.insert_started(&running).await.unwrap();
++    assert_eq!(
++        label_of(&load(&db).await, "s1", "t1"),
++        None,
++        "a new row has no label"
++    );
++
++    db.set_label(&key("s1", "t1"), Some("Mine")).await.unwrap();
++    let mut repeat = running.clone();
++    repeat.description = "Changed by a later snapshot".into();
++    db.insert_started(&repeat).await.unwrap();
++    db.mark_running_interrupted().await.unwrap();
++    let mut ended = record("s1", "t1", AgentTaskStatus::Completed, 1_000);
++    ended.description = "Changed again".into();
++    db.update_ended(&ended).await.unwrap();
++
++    let rows = load(&db).await;
++    assert_eq!(label_of(&rows, "s1", "t1").as_deref(), Some("Mine"));
++    assert_eq!(
++        find(&rows, "s1", "t1").unwrap().record.description.as_ref(),
++        "Task t1",
++        "the stored description is never rewritten"
++    );
++}
++
++// Constraint: the label never rewrites the description, the status or the archive flag.
++#[gpui::test]
++async fn history_db_label_leaves_description_status_and_archive_alone(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_label_leaves_rest").await;
++    seed(&db, &[("s1", "t1")]).await;
++    db.set_archived(&[key("s1", "t1")], true).await.unwrap();
++    db.set_label(&key("s1", "t1"), Some("Short")).await.unwrap();
++
++    let rows = load(&db).await;
++    let entry = find(&rows, "s1", "t1").unwrap();
++    assert_eq!(entry.record.description.as_ref(), "Task t1");
++    assert_eq!(entry.record.status, AgentTaskStatus::Completed);
++    assert!(entry.archived);
++}
++
++// Q13 — a refused write returns an error naming both ids and leaves the previous label.
++#[gpui::test]
++async fn history_db_label_failed_write_names_the_ids_and_keeps_the_previous_label(
++    _cx: &mut TestAppContext,
++) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_label_failed_write").await;
++    seed(&db, &[("session-l1", "task-l1")]).await;
++    db.set_label(&key("session-l1", "task-l1"), Some("Before"))
++        .await
++        .unwrap();
++    run_sql(
++        &db,
++        "CREATE TRIGGER refuse_label BEFORE UPDATE OF label ON agent_task_history \
++         BEGIN SELECT RAISE(ABORT, 'label refused'); END",
++    )
++    .await;
++
++    let error = db
++        .set_label(&key("session-l1", "task-l1"), Some("After"))
++        .await
++        .expect_err("the trigger refuses the write");
++    let message = format!("{error:#}");
++    assert!(
++        message.contains("session-l1") && message.contains("task-l1"),
++        "the error names both ids: {message}"
++    );
++    assert_eq!(
++        label_of(&load(&db).await, "session-l1", "task-l1").as_deref(),
++        Some("Before")
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
+index 256b143..cd8d4dd 100644
+--- a/crates/agent_tasks_panel/src/panel.rs
++++ b/crates/agent_tasks_panel/src/panel.rs
+@@ -14,16 +14,17 @@ use std::{cmp::Reverse, ops::Range, sync::Arc};
+ use acp_thread::{AgentTask, AgentTaskId, AgentTaskStatus};
+ use agent_client_protocol::schema::v1 as acp;
+ use agent_ui::{
+-    AgentPanel, DEFAULT_THREAD_TITLE, TaskRecord, TasksCard,
++    AgentPanel, DEFAULT_THREAD_TITLE, TaskRecord, TasksCard, collapse_label, display_label,
+     thread_metadata_store::ThreadMetadataStore,
+ };
+ use anyhow::{Result, anyhow};
+ use collections::HashMap;
+ use db::kvp::KeyValueStore;
++use editor::{Editor, EditorEvent, actions::SelectAll};
+ use gpui::{
+-    Action, AnyElement, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter,
++    Action, AnyElement, AnyView, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter,
+     FocusHandle, Focusable, IntoElement, Pixels, Render, SharedString, Subscription, Task,
+-    UniformListScrollHandle, WeakEntity, Window, actions, px, uniform_list,
++    TextStyleRefinement, UniformListScrollHandle, WeakEntity, Window, actions, px, uniform_list,
+ };
+ use settings::SettingsStore;
+ use ui::{Banner, ButtonLike, ButtonStyle, Severity, TintColor, Tooltip, prelude::*};
+@@ -42,6 +43,15 @@ actions!(
+     ]
+ );
+ 
++// GPUI's test windows never activate their accessibility tree, so `debug_a11y_tree_json` has
++// nothing to show; tests read the screen-reader labels of the last render from here. The card
++// keeps one of its own, but it is compiled only into agent_ui's own tests.
++#[cfg(test)]
++thread_local! {
++    pub(crate) static RENDERED_ARIA_LABELS: std::cell::RefCell<Vec<SharedString>> =
++        std::cell::RefCell::default();
++}
++
+ /// Registers the panel's `ToggleFocus` on every workspace created from now on.
+ pub(crate) fn register_actions(cx: &mut App) {
+     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+@@ -202,6 +212,7 @@ enum ListEntry {
+ #[derive(Clone)]
+ struct RowFocus {
+     open: FocusHandle,
++    rename: FocusHandle,
+     stop: FocusHandle,
+     /// Archive, or Unarchive on an archived row: the two share the row's last slot.
+     archive: FocusHandle,
+@@ -211,12 +222,30 @@ impl RowFocus {
+     fn new(cx: &mut App) -> Self {
+         Self {
+             open: control_focus_handle(cx),
++            rename: control_focus_handle(cx),
+             stop: control_focus_handle(cx),
+             archive: control_focus_handle(cx),
+         }
+     }
+ }
+ 
++/// The row being renamed and the one-line editor that stands in for its label (R3.1).
++struct Renaming {
++    key: TaskKey,
++    editor: Entity<Editor>,
++    /// Whether the window's focus went nowhere since the editor last took it. A vanished
++    /// editor and a bare blur both leave the focus path empty, so its `Blurred` then discards
++    /// the edit (R3.13) rather than confirming it (R3.6).
++    focus_lost: bool,
++    _subscription: Subscription,
++}
++
++impl Renaming {
++    fn is_for(&self, record: &TaskRecord) -> bool {
++        self.key.0 == record.session_id && self.key.1 == record.task_id
++    }
++}
++
+ /// What the panel reads from the cards in one pass: each held thread's current title and each
+ /// row's error.
+ #[derive(Default)]
+@@ -258,6 +287,8 @@ pub struct AgentTasksPanel {
+     group_focus_handles: HashMap<acp::SessionId, FocusHandle>,
+     /// A row's message after a click that opened nothing, until a later click opens it.
+     notices: HashMap<TaskKey, SharedString>,
++    /// The open rename, if any: at most one row edits its label at a time.
++    renaming: Option<Renaming>,
+     scroll_handle: UniformListScrollHandle,
+     /// The lines of the last render, read by the `uniform_list` callback.
+     entries: Vec<ListEntry>,
+@@ -304,6 +335,15 @@ impl AgentTasksPanel {
+     ) -> Self {
+         let subscriptions = vec![
+             cx.observe(&store, |_, _, cx| cx.notify()),
++            // GPUI runs focus-lost listeners before the blur listeners of the same frame, and
++            // the workspace's own listener has already moved focus back to the panel, so
++            // `window.focused` alone cannot tell a vanished editor from focus taken by another
++            // element.
++            cx.on_focus_lost(window, |panel, _window, _cx| {
++                if let Some(renaming) = panel.renaming.as_mut() {
++                    renaming.focus_lost = true;
++                }
++            }),
+             // The agent panel loads alongside this one, and is torn down and rebuilt when AI
+             // is turned off and on again; each one brings a new card.
+             cx.subscribe_in(
+@@ -328,6 +368,7 @@ impl AgentTasksPanel {
+             row_focus_handles: HashMap::default(),
+             group_focus_handles: HashMap::default(),
+             notices: HashMap::default(),
++            renaming: None,
+             scroll_handle: UniformListScrollHandle::new(),
+             entries: Vec::new(),
+             _save_position: Task::ready(()),
+@@ -480,6 +521,177 @@ impl AgentTasksPanel {
+             .update(cx, |store, cx| store.archive_group(session_id, cx));
+     }
+ 
++    /// Swaps `key`'s row label for a one-line editor holding the label the row shows — whole,
++    /// on one line — fully selected and focused (R3.1). A rename open on another row is
++    /// confirmed first, as losing focus would confirm it (R3.6).
++    pub fn start_rename(&mut self, key: TaskKey, window: &mut Window, cx: &mut Context<Self>) {
++        if let Some(renaming) = self
++            .renaming
++            .as_ref()
++            .filter(|renaming| renaming.key == key)
++        {
++            let editor = renaming.editor.clone();
++            editor.update(cx, |editor, cx| editor.select_all(&SelectAll, window, cx));
++            editor.focus_handle(cx).focus(window, cx);
++            return;
++        }
++        self.finish_rename(cx);
++        let Some(label) = self.current_label(&key, cx) else {
++            log::debug!(
++                "agent tasks panel: not renaming task {} of session {}: it is not recorded",
++                key.1,
++                key.0
++            );
++            return;
++        };
++        // The row's label is `LabelSize::Small`; the same size keeps the row's height, which
++        // `uniform_list` takes from its first line for every other.
++        let text_size = TextSize::Small.rems(cx);
++        let editor = cx.new(|cx| {
++            let mut editor = Editor::single_line(window, cx);
++            editor.set_text_style_refinement(TextStyleRefinement {
++                font_size: Some(text_size.into()),
++                ..Default::default()
++            });
++            editor.set_text(label, window, cx);
++            editor.select_all(&SelectAll, window, cx);
++            editor
++        });
++        let subscription = cx.subscribe_in(
++            &editor,
++            window,
++            |panel, editor, event: &EditorEvent, window, cx| {
++                // A cancelled rename has already let go of its editor, so the blur its removal
++                // raises confirms nothing (R3.5).
++                let Some(renaming) = panel
++                    .renaming
++                    .as_mut()
++                    .filter(|renaming| renaming.editor == *editor)
++                else {
++                    return;
++                };
++                match event {
++                    EditorEvent::Focused => renaming.focus_lost = false,
++                    EditorEvent::Blurred => {
++                        // Focus taken by another element confirms (R3.6). Focus gone nowhere
++                        // means the editor left the drawn tree — scrolled out of the list's
++                        // range, filtered out, its record gone — or was blurred outright, and
++                        // the edit is discarded as Escape would (R3.13).
++                        if renaming.focus_lost || window.focused(cx).is_none() {
++                            panel.cancel_rename(window, cx);
++                        } else {
++                            panel.finish_rename(cx);
++                        }
++                    }
++                    _ => {}
++                }
++            },
++        );
++        editor.focus_handle(cx).focus(window, cx);
++        self.renaming = Some(Renaming {
++            key,
++            editor,
++            focus_lost: false,
++            _subscription: subscription,
++        });
++        cx.notify();
++    }
++
++    /// The open rename's editor, while a row is being renamed.
++    pub fn rename_editor(&self) -> Option<Entity<Editor>> {
++        self.renaming
++            .as_ref()
++            .map(|renaming| renaming.editor.clone())
++    }
++
++    /// Confirms the open rename: the editor's text becomes the task's label — its first 60
++    /// characters, or none when blank, so the description shows again (R3.2, R3.4, R3.7).
++    fn finish_rename(&mut self, cx: &mut Context<Self>) {
++        let Some(Renaming { key, editor, .. }) = self.renaming.take() else {
++            return;
++        };
++        let text = editor.read(cx).text(cx);
++        TaskHistoryStore::global(cx).update(cx, |store, cx| store.rename(key, &text, cx));
++        cx.notify();
++    }
++
++    /// Enter in the rename editor: confirms, and gives focus back to the row's Rename.
++    fn confirm_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let Some(key) = self.renaming.as_ref().map(|renaming| renaming.key.clone()) else {
++            return;
++        };
++        self.finish_rename(cx);
++        self.focus_rename_control(&key, window, cx);
++    }
++
++    /// Escape in the rename editor, or an editor that vanished: closes it and keeps the
++    /// previous label (R3.5, R3.13).
++    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if self.discard_rename(window, cx) {
++            cx.notify();
++        }
++    }
++
++    /// Closes the open rename without touching the label; false when none is open.
++    fn discard_rename(&mut self, window: &mut Window, cx: &mut App) -> bool {
++        // Taken before the editor goes, so the blur it raises finds no rename to confirm.
++        let Some(renaming) = self.renaming.take() else {
++            return false;
++        };
++        self.focus_rename_control(&renaming.key, window, cx);
++        drop(renaming);
++        true
++    }
++
++    /// Discards a rename whose row the list no longer holds — hidden by a filter or gone from
++    /// the history — so the edit is not confirmed by the blur its vanished editor raises
++    /// (R3.13). Runs after `list_entries`, so focus falls back to the panel.
++    fn discard_unlisted_rename(&mut self, window: &mut Window, cx: &mut App) {
++        let Some(renaming) = &self.renaming else {
++            return;
++        };
++        let listed = self.entries.iter().any(|entry| match entry {
++            ListEntry::Row(row, _) => renaming.is_for(&row.entry.record),
++            ListEntry::Header { .. } => false,
++        });
++        if !listed {
++            self.discard_rename(window, cx);
++        }
++    }
++
++    /// Focus back on `key`'s Rename control once its editor closes, else on the panel, so
++    /// keyboard focus is not left on a removed editor (Q14).
++    fn focus_rename_control(&self, key: &TaskKey, window: &mut Window, cx: &mut App) {
++        let handle = self
++            .row_focus_handles
++            .get(key)
++            .map_or_else(|| self.focus_handle.clone(), |focus| focus.rename.clone());
++        window.focus(&handle, cx);
++    }
++
++    /// The label `key`'s row shows, whole: the user's, else the description — the card's live
++    /// one while it holds the task running (R3.9).
++    fn current_label(&self, key: &TaskKey, cx: &App) -> Option<SharedString> {
++        let (session_id, task_id) = key;
++        let store = self.store.read(cx);
++        let entry = store.records().iter().find(|entry| {
++            entry.record.session_id == *session_id && entry.record.task_id == *task_id
++        })?;
++        if let Some(label) = &entry.label {
++            return Some(collapse_label(label));
++        }
++        let live = entry
++            .record
++            .status
++            .is_running()
++            .then(|| store.live_task(session_id, task_id, cx))
++            .flatten();
++        Some(match live {
++            Some((_card, task)) => collapse_label(&task.description),
++            None => collapse_label(&entry.record.description),
++        })
++    }
++
+     fn set_notice(&mut self, key: &TaskKey, notice: &'static str, cx: &mut Context<Self>) {
+         self.notices
+             .insert(key.clone(), SharedString::new_static(notice));
+@@ -544,7 +756,15 @@ impl AgentTasksPanel {
+                     archive_focus,
+                     cx,
+                 ),
+-                ListEntry::Row(row, focus) => render_row(row, focus, cx),
++                ListEntry::Row(row, focus) => {
++                    let record = &row.entry.record;
++                    let rename_editor = self
++                        .renaming
++                        .as_ref()
++                        .filter(|renaming| renaming.is_for(record))
++                        .map(|renaming| renaming.editor.clone());
++                    render_row(row, focus, rename_editor, cx)
++                }
+             })
+             .collect()
+     }
+@@ -642,11 +862,17 @@ fn render_header(
+         .into_any_element()
+ }
+ 
+-/// `row`'s line: its description and its progress or outcome — together the control that
+-/// opens its thread (R2.5) — then Stop while it runs (R2.6), or Archive once it has ended
+-/// (R3.1, R3.4), or Unarchive when archived (R3.3). Watched or expanded detail stays on the
+-/// card, so every row keeps the one-line height `uniform_list` relies on.
+-fn render_row(row: &PanelRow, focus: &RowFocus, cx: &mut Context<AgentTasksPanel>) -> AnyElement {
++/// `row`'s line: its label (the user's, else the description) and its progress or outcome —
++/// together the control that opens its thread (R2.5) — then Stop while it runs (R2.6), or
++/// Archive once it has ended (R3.1, R3.4), or Unarchive when archived (R3.3). Watched or
++/// expanded detail stays on the card, so every row keeps the one-line height `uniform_list`
++/// relies on.
++fn render_row(
++    row: &PanelRow,
++    focus: &RowFocus,
++    rename_editor: Option<Entity<Editor>>,
++    cx: &mut Context<AgentTasksPanel>,
++) -> AnyElement {
+     let record = &row.entry.record;
+     let key: TaskKey = (record.session_id.clone(), record.task_id.clone());
+     let row_id = row_element_id(&key.0, &key.1);
+@@ -656,50 +882,85 @@ fn render_row(row: &PanelRow, focus: &RowFocus, cx: &mut Context<AgentTasksPanel
+         Some(message) => (message.clone(), Color::Error),
+         None => (row_detail(record).into(), status_color(record.status)),
+     };
+-    let description = record.description.clone();
+-
+-    let open_button = ButtonLike::new(control_id("open"))
+-        .full_width()
+-        .child(
+-            h_flex()
+-                .w_full()
+-                .min_w_0()
+-                .gap_2()
+-                .justify_between()
+-                .child(
+-                    div().min_w_0().flex_1().child(
+-                        Label::new(description.clone())
+-                            .size(LabelSize::Small)
+-                            .truncate(),
+-                    ),
+-                )
+-                // Shrinks and truncates too, so a long error cannot push the row past the
+-                // panel.
+-                .child(
+-                    div().min_w_0().flex_shrink_1().child(
+-                        Label::new(detail)
+-                            .size(LabelSize::XSmall)
+-                            .color(detail_color)
+-                            .truncate(),
+-                    ),
+-                ),
+-        )
+-        .aria_label(format!("Open thread: {description}"))
+-        .tooltip({
+-            let description = description.clone();
+-            move |_window, cx| Tooltip::with_meta(description.clone(), None, "Open Thread", cx)
++    // The user's label wins over the description, which `panel_row` keeps live (R3.9). The
++    // tooltip holds the whole text (R1.5); the row and every screen-reader label hold the one
++    // line shown (R1.6), since `truncate` alone still breaks at a `\n` (R1.1).
++    let full_label = collapse_label(row.entry.label.as_ref().unwrap_or(&record.description));
++    let shown_label = display_label(&full_label);
++    let task_id = record.task_id.clone();
++
++    let label_slot = div()
++        .debug_selector({
++            let task_id = task_id.clone();
++            move || format!("agent-tasks-row-label-{task_id}")
+         })
+-        .track_focus(&focus.open)
+-        .on_click(cx.listener({
+-            let key = key.clone();
+-            move |panel, _, window, cx| panel.open_task(&key, window, cx)
+-        }));
++        .min_w_0()
++        .flex_1();
++    // Shrinks and truncates too, so a long error cannot push the row past the panel.
++    let detail_label = div().min_w_0().flex_shrink_1().child(
++        Label::new(detail)
++            .size(LabelSize::XSmall)
++            .color(detail_color)
++            .truncate(),
++    );
+ 
++    let open_or_rename = match rename_editor {
++        Some(editor) => render_rename_editor(label_slot.child(editor), detail_label, cx),
++        None => ButtonLike::new(control_id("open"))
++            .full_width()
++            .child(
++                h_flex()
++                    .w_full()
++                    .min_w_0()
++                    .gap_2()
++                    .justify_between()
++                    .child(
++                        label_slot.child(
++                            Label::new(shown_label.clone())
++                                .size(LabelSize::Small)
++                                .single_line()
++                                .truncate(),
++                        ),
++                    )
++                    .child(detail_label),
++            )
++            .aria_label(control_aria_label(format!("Open thread: {shown_label}")))
++            .tooltip(open_thread_tooltip(task_id, full_label))
++            .track_focus(&focus.open)
++            .on_click(cx.listener({
++                let key = key.clone();
++                move |panel, _, window, cx| panel.open_task(&key, window, cx)
++            }))
++            .into_any_element(),
++    };
++
++    let rename_button = div()
++        .debug_selector({
++            let task_id = record.task_id.clone();
++            move || format!("agent-tasks-rename-{task_id}")
++        })
++        .child(
++            action_button(
++                control_id("rename"),
++                IconName::Pencil,
++                format!("Rename: {shown_label}"),
++                "Rename This Task",
++                &focus.rename,
++            )
++            .on_click(cx.listener({
++                let key = key.clone();
++                move |panel, _, window, cx| {
++                    // The click is Rename's alone: nothing under the row may act on it.
++                    cx.stop_propagation();
++                    panel.start_rename(key.clone(), window, cx)
++                }
++            })),
++        );
+     let stop_button = row.can_stop.then(|| {
+         action_button(
+             control_id("stop"),
+             IconName::Stop,
+-            format!("Stop: {description}"),
++            format!("Stop: {shown_label}"),
+             "Stop This Task",
+             &focus.stop,
+         )
+@@ -713,7 +974,7 @@ fn render_row(row: &PanelRow, focus: &RowFocus, cx: &mut Context<AgentTasksPanel
+             action_button(
+                 control_id("unarchive"),
+                 IconName::Undo,
+-                format!("Unarchive: {description}"),
++                format!("Unarchive: {shown_label}"),
+                 "Unarchive This Task",
+                 &focus.archive,
+             )
+@@ -724,7 +985,7 @@ fn render_row(row: &PanelRow, focus: &RowFocus, cx: &mut Context<AgentTasksPanel
+             action_button(
+                 control_id("archive"),
+                 IconName::Archive,
+-                format!("Archive: {description}"),
++                format!("Archive: {shown_label}"),
+                 "Archive This Task",
+                 &focus.archive,
+             )
+@@ -735,18 +996,55 @@ fn render_row(row: &PanelRow, focus: &RowFocus, cx: &mut Context<AgentTasksPanel
+         })
+     };
+ 
++    // `uniform_list` lays each line out against the list's width, but a line with no width of
++    // its own shrinks to its content — and a one-line editor has none, so its slot would get
++    // no room at all while renaming.
+     h_flex()
+         .id(row_id)
++        .w_full()
+         .h_7()
+         .pl_2()
+         .pr_2()
+         .gap_1()
+-        .child(div().min_w_0().flex_1().child(open_button))
++        .child(div().min_w_0().flex_1().child(open_or_rename))
++        .child(rename_button)
+         .children(stop_button)
+         .children(archive_button)
+         .into_any_element()
+ }
+ 
++/// What stands in for a row's open button while the row is renamed: `label` (the slot holding
++/// the editor) and `detail`, laid out as the button lays them out. The editor is never inside
++/// the button, so a click in it cannot reach the button's `on_click`; Enter and Escape are
++/// handled here, just above the editor, rather than by the panel. Escape is `editor::Cancel`
++/// in the default keymap, which a one-line editor passes up; `menu::Cancel` elsewhere.
++fn render_rename_editor(
++    label: impl IntoElement,
++    detail: impl IntoElement,
++    cx: &mut Context<AgentTasksPanel>,
++) -> AnyElement {
++    h_flex()
++        .w_full()
++        .min_w_0()
++        .gap_2()
++        .px(DynamicSpacing::Base04.rems(cx))
++        .justify_between()
++        .on_action(
++            cx.listener(|panel, _: &menu::Confirm, window, cx| panel.confirm_rename(window, cx)),
++        )
++        .on_action(
++            cx.listener(|panel, _: &menu::Cancel, window, cx| panel.cancel_rename(window, cx)),
++        )
++        .on_action(
++            cx.listener(|panel, _: &editor::actions::Cancel, window, cx| {
++                panel.cancel_rename(window, cx)
++            }),
++        )
++        .child(label)
++        .child(detail)
++        .into_any_element()
++}
++
+ /// A row or header action: a small muted icon with its tooltip, its screen-reader label and
+ /// its keyboard focus.
+ fn action_button(
+@@ -759,11 +1057,44 @@ fn action_button(
+     IconButton::new(id, icon)
+         .icon_size(IconSize::Small)
+         .icon_color(Color::Muted)
+-        .aria_label(aria_label)
++        .aria_label(control_aria_label(aria_label))
+         .tooltip(Tooltip::text(tooltip))
+         .track_focus(focus_handle)
+ }
+ 
++/// The Open Thread tooltip over `text`, a row's whole label. Its text carries the debug selector
++/// `agent-tasks-tooltip-open-{task_id}`, so tests can tell which row raised it.
++fn open_thread_tooltip(
++    task_id: AgentTaskId,
++    text: SharedString,
++) -> impl Fn(&mut Window, &mut App) -> AnyView {
++    move |_window, cx| {
++        let task_id = task_id.clone();
++        let text = text.clone();
++        cx.new(|_| {
++            Tooltip::new_element(move |_, _| {
++                div()
++                    .debug_selector({
++                        let task_id = task_id.clone();
++                        move || format!("agent-tasks-tooltip-open-{task_id}")
++                    })
++                    .child(text.clone())
++                    .into_any_element()
++            })
++            .meta("Open Thread")
++        })
++        .into()
++    }
++}
++
++/// A control's screen-reader label, recorded in test builds (see `RENDERED_ARIA_LABELS`).
++fn control_aria_label(text: String) -> SharedString {
++    let label = SharedString::from(text);
++    #[cfg(test)]
++    RENDERED_ARIA_LABELS.with_borrow_mut(|labels| labels.push(label.clone()));
++    label
++}
++
+ /// A row's element id, keyed by its task rather than its place in the list, so a row's hover
+ /// and click state stay with it when rows above it come and go. Nested children keep the pair
+ /// unambiguous where a joined string would not be (`a-b` + `c` against `a` + `b-c`).
+@@ -775,20 +1106,24 @@ fn row_element_id(session_id: &acp::SessionId, task_id: &AgentTaskId) -> Element
+     ElementId::NamedChild(Arc::new(session), task_id.clone())
+ }
+ 
+-/// The dock a saved value names; Left — the default — when nothing usable was saved.
++/// The dock a saved value names; Bottom — the default — when nothing usable was saved. The
++/// agent panel, which holds the tasks card, defaults to the left dock, so a left default would
++/// make the panel and the card hide each other.
+ fn saved_position(saved: Result<Option<String>>) -> DockPosition {
+     match saved {
+-        Ok(None) => DockPosition::Left,
++        Ok(None) => DockPosition::Bottom,
+         Ok(Some(text)) => parse_dock_position(&text).unwrap_or_else(|| {
+-            log::warn!("agent tasks panel: unknown saved dock position {text:?}; docking left");
+-            DockPosition::Left
++            log::warn!(
++                "agent tasks panel: unknown saved dock position {text:?}; docking at the bottom"
++            );
++            DockPosition::Bottom
+         }),
+         Err(error) => {
+             log::error!(
+-                "agent tasks panel: reading the saved dock position failed; docking left: \
+-                 {error:#}"
++                "agent tasks panel: reading the saved dock position failed; docking at the \
++                 bottom: {error:#}"
+             );
+-            DockPosition::Left
++            DockPosition::Bottom
+         }
+     }
+ }
+@@ -935,9 +1270,14 @@ impl Focusable for AgentTasksPanel {
+ }
+ 
+ impl Render for AgentTasksPanel {
+-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        // The list renders its rows after this, during layout; it renders its first entry — a
++        // group header, never a row — more than once to measure it.
++        #[cfg(test)]
++        RENDERED_ARIA_LABELS.with_borrow_mut(Vec::clear);
+         let groups = self.groups(cx);
+         self.entries = self.list_entries(groups, cx);
++        self.discard_unlisted_rename(window, cx);
+         let entry_count = self.entries.len();
+ 
+         v_flex()
+@@ -1067,3 +1407,23 @@ mod persistence;
+ #[cfg(test)]
+ #[path = "panel/actions_tests.rs"]
+ mod actions;
++
++#[cfg(test)]
++#[path = "panel/list_label_tests.rs"]
++mod list_label;
++
++#[cfg(test)]
++#[path = "panel/actions_rename_tests.rs"]
++mod actions_rename;
++
++#[cfg(test)]
++#[path = "panel/label_contract_tests.rs"]
++mod label_contract;
++
++#[cfg(test)]
++#[path = "panel/rename_vanish_tests.rs"]
++mod rename_vanish;
++
++#[cfg(test)]
++#[path = "panel/dock_default_tests.rs"]
++mod dock_default;
+diff --git a/crates/agent_tasks_panel/src/panel/actions_rename_tests.rs b/crates/agent_tasks_panel/src/panel/actions_rename_tests.rs
+new file mode 100644
+index 0000000..23682f6
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/actions_rename_tests.rs
+@@ -0,0 +1,538 @@
++// Story 022, task 5.2 — inline Rename on a panel row (R3.1, R3.2, R3.4, R3.5, R3.6, R3.7,
++// R3.11, Q14). Module path: `panel::actions_rename`. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/actions_rename_tests.rs"]
++//     mod actions_rename;
++//
++// Contract assumed beyond design.md (adjust HERE when the implementation drifts):
++//   - `AgentTasksPanel::start_rename(&mut self, key: TaskKey, window, cx)` opens the editor
++//     (what the Rename control does), and `rename_editor(&self) -> Option<Entity<Editor>>`
++//     exposes it while open (None otherwise);
++//   - the editor confirms on `menu::Confirm` and on losing focus, and cancels on `menu::Cancel`;
++//   - the Rename control carries debug selector `agent-tasks-rename-{task_id}` and the
++//     screen-reader label `Rename: {displayed label}`;
++//   - `agent_ui::TaskLabels` at agent_ui's root; screen-reader labels from
++//     `Window::debug_a11y_tree_json()`.
++
++use acp_thread::AgentTaskStatus;
++use agent_ui::TaskLabels;
++use gpui::{Entity, Focusable as _, KeyBinding, Modifiers, TestAppContext, VisualTestContext};
++use serde_json::json;
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++const HEREDOC: &str = "cat > f <<'EOF'\n{\"a\": 1}\nEOF";
++const HEREDOC_SHOWN: &str = "cat > f <<'EOF' {\"a\": 1} EOF";
++
++fn ensure_labels(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        if !cx.has_global::<TaskLabels>() {
++            cx.set_global(TaskLabels::default());
++        }
++    });
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Docks the Agent Tasks panel open, so its rows are painted.
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn described(id: &str, description: &str, status: &str, at: u64) -> serde_json::Value {
++    let mut task = wire_task(id, status, at, None);
++    task["description"] = json!(description);
++    task
++}
++
++/// Every string of the window's accessibility tree (screen-reader labels among them).
++fn a11y_strings(cx: &mut VisualTestContext) -> Vec<String> {
++    draw(cx);
++    // GPUI's test windows build no accessibility tree: fall back to the labels the panel
++    // recorded on its last render.
++    let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
++        return super::RENDERED_ARIA_LABELS
++            .with_borrow(|labels| labels.iter().map(ToString::to_string).collect());
++    };
++    let value: serde_json::Value = serde_json::from_str(&json).expect("the tree is JSON");
++    let mut strings = Vec::new();
++    collect_strings(&value, &mut strings);
++    strings
++}
++
++fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
++    match value {
++        serde_json::Value::String(text) => out.push(text.clone()),
++        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
++        serde_json::Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
++        _ => {}
++    }
++}
++
++fn count(strings: &[String], label: &str) -> usize {
++    strings.iter().filter(|text| text.as_str() == label).count()
++}
++
++fn store_label(session: &str, task: &str, cx: &mut VisualTestContext) -> Option<String> {
++    cx.update(|_, cx| {
++        let store = TaskHistoryStore::global(cx);
++        let records = store.read(cx).records().to_vec();
++        find(&records, session, task).and_then(|entry| entry.label.as_ref().map(|l| l.to_string()))
++    })
++}
++
++fn start(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.start_rename(target, window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++fn editor_text(panels: &mut Panels) -> Option<String> {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.rename_editor().map(|editor| editor.read(cx).text(cx))
++    })
++}
++
++fn editor_focused(panels: &mut Panels) -> bool {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel
++                .rename_editor()
++                .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
++        })
++}
++
++fn type_text(panels: &mut Panels, text: &str) {
++    panels.cx.simulate_input(text);
++    panels.cx.run_until_parked();
++}
++
++fn confirm(panels: &mut Panels) {
++    panels.cx.dispatch_action(menu::Confirm);
++    panels.cx.run_until_parked();
++}
++
++fn cancel(panels: &mut Panels) {
++    panels.cx.dispatch_action(menu::Cancel);
++    panels.cx.run_until_parked();
++}
++
++fn rename_to(panels: &mut Panels, session: &str, task: &str, text: &str) {
++    start(panels, session, task);
++    type_text(panels, text);
++    confirm(panels);
++}
++
++/// A live thread holding one running task `t` (description `Task t`), with the panel shown.
++async fn one_live_task(cx: &mut TestAppContext) -> (crate::AgentTaskHistoryDb, Panels, String) {
++    let db = init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace, &mut panels.cx);
++    (db, panels, session)
++}
++
++// R3.1 — the editor holds the current label (collapsed), fully selected and focused.
++#[gpui::test]
++async fn panel_actions_rename_opens_a_focused_editor_with_the_label_selected(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![described("multi", HEREDOC, "running", 1_000)],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    assert_eq!(editor_text(&mut panels), None, "no editor before Rename");
++    start(&mut panels, &session, "multi");
++    assert_eq!(editor_text(&mut panels).as_deref(), Some(HEREDOC_SHOWN));
++    assert!(editor_focused(&mut panels), "the editor takes focus");
++    type_text(&mut panels, "New");
++    assert_eq!(
++        editor_text(&mut panels).as_deref(),
++        Some("New"),
++        "typing replaces the whole label"
++    );
++    confirm(&mut panels);
++
++    start(&mut panels, &session, "multi");
++    assert_eq!(
++        editor_text(&mut panels).as_deref(),
++        Some("New"),
++        "a renamed row edits its own label"
++    );
++    cancel(&mut panels);
++}
++
++// R3.2 — Enter labels THAT task. Hostile: thread B holds the same task id.
++#[gpui::test]
++async fn panel_actions_rename_confirm_labels_only_that_row(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let connection = StopConnection::new();
++    let a = open_thread_on(&panels.agent_panel, connection.clone(), "A", &mut panels.cx);
++    send_tasks(
++        &a,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let b = open_thread_on(&panels.agent_panel, connection, "B", &mut panels.cx);
++    send_tasks(
++        &b,
++        vec![wire_task("t", "running", 2_000, None)],
++        &mut panels.cx,
++    );
++    let (sa, sb) = (
++        session_of(&a, &panels.cx).to_string(),
++        session_of(&b, &panels.cx).to_string(),
++    );
++    assert_ne!(sa, sb);
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    rename_to(&mut panels, &sa, "t", "Renamed A");
++
++    assert_eq!(editor_text(&mut panels), None, "Enter closes the editor");
++    assert_eq!(
++        store_label(&sa, "t", &mut panels.cx).as_deref(),
++        Some("Renamed A")
++    );
++    assert_eq!(store_label(&sb, "t", &mut panels.cx), None);
++    let stored = load(&db).await;
++    assert_eq!(
++        find(&stored, &sa, "t").unwrap().label.as_deref(),
++        Some("Renamed A")
++    );
++    assert_eq!(find(&stored, &sb, "t").unwrap().label, None);
++    let strings = a11y_strings(&mut panels.cx);
++    assert_eq!(count(&strings, "Open thread: Renamed A"), 1);
++    assert_eq!(count(&strings, "Open thread: Task t"), 1);
++}
++
++// R3.4 — more than 60 characters typed: the first 60 are kept.
++#[gpui::test]
++async fn panel_actions_rename_keeps_the_first_sixty_characters(cx: &mut TestAppContext) {
++    let (_db, mut panels, session) = one_live_task(cx).await;
++    let long = format!("{}{}", "a".repeat(60), "b".repeat(15));
++    rename_to(&mut panels, &session, "t", &long);
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx),
++        Some("a".repeat(60))
++    );
++}
++
++// R3.5 — Escape closes the editor and keeps the previous label. Hostile (gotcha): the blur the
++// closing editor raises must not confirm the text Escape cancelled.
++#[gpui::test]
++async fn panel_actions_rename_escape_keeps_the_previous_label(cx: &mut TestAppContext) {
++    let (db, mut panels, session) = one_live_task(cx).await;
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Discarded first");
++    cancel(&mut panels);
++    assert_eq!(editor_text(&mut panels), None);
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx),
++        None,
++        "no label was set"
++    );
++
++    rename_to(&mut panels, &session, "t", "Old");
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Discarded second");
++    cancel(&mut panels);
++    draw(&mut panels.cx);
++
++    assert_eq!(editor_text(&mut panels), None);
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx).as_deref(),
++        Some("Old")
++    );
++    assert_eq!(
++        find(&load(&db).await, &session, "t")
++            .unwrap()
++            .label
++            .as_deref(),
++        Some("Old")
++    );
++}
++
++// R3.6 — losing focus confirms, as Enter would.
++#[gpui::test]
++async fn panel_actions_rename_blur_confirms_the_label(cx: &mut TestAppContext) {
++    let (_db, mut panels, session) = one_live_task(cx).await;
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Blurred name");
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            let handle = panel.focus_handle(cx);
++            window.focus(&handle, cx);
++        });
++    panels.cx.run_until_parked();
++
++    assert_eq!(editor_text(&mut panels), None);
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx).as_deref(),
++        Some("Blurred name")
++    );
++}
++
++// R3.7 — a blank label removes the edit and shows the agent's description again.
++#[gpui::test]
++async fn panel_actions_rename_blank_label_restores_the_description(cx: &mut TestAppContext) {
++    let (_db, mut panels, session) = one_live_task(cx).await;
++    rename_to(&mut panels, &session, "t", "Old");
++    assert_eq!(count(&a11y_strings(&mut panels.cx), "Open thread: Old"), 1);
++
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "   ");
++    confirm(&mut panels);
++
++    assert_eq!(store_label(&session, "t", &mut panels.cx), None);
++    let strings = a11y_strings(&mut panels.cx);
++    assert_eq!(count(&strings, "Open thread: Task t"), 1);
++    assert_eq!(count(&strings, "Open thread: Old"), 0);
++}
++
++// R3.11, Q14 — every row offers Rename — running, ended, interrupted, archived — with a
++// screen-reader label, and its control opens the editor on THAT row.
++#[gpui::test]
++async fn panel_actions_rename_is_offered_on_every_row(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    // Running at the last shutdown: the startup sweep marks it interrupted.
++    db.insert_started(&record("older", "lost", AgentTaskStatus::Running, 300))
++        .await
++        .unwrap();
++    for (task, at) in [("done", 400), ("old", 500)] {
++        db.insert_started(&record("older", task, AgentTaskStatus::Running, at))
++            .await
++            .unwrap();
++        db.update_ended(&record("older", task, AgentTaskStatus::Completed, at))
++            .await
++            .unwrap();
++    }
++    db.set_archived(&[key("older", "old")], true).await.unwrap();
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("run", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        for filter in [
++            TaskFilter::Active,
++            TaskFilter::Finished,
++            TaskFilter::Failed,
++            TaskFilter::Archived,
++        ] {
++            panel.set_filter(filter, true, cx);
++        }
++    });
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    let strings = a11y_strings(&mut panels.cx);
++    for task in ["run", "done", "lost", "old"] {
++        assert_eq!(
++            count(&strings, &format!("Rename: Task {task}")),
++            1,
++            "{task} offers Rename"
++        );
++    }
++    for (selector, task) in [
++        ("agent-tasks-rename-run", "run"),
++        ("agent-tasks-rename-done", "done"),
++        ("agent-tasks-rename-lost", "lost"),
++        ("agent-tasks-rename-old", "old"),
++    ] {
++        draw(&mut panels.cx);
++        let bounds = panels
++            .cx
++            .debug_bounds(selector)
++            .unwrap_or_else(|| panic!("{selector} is painted"));
++        panels.cx.simulate_click(bounds.center(), Modifiers::none());
++        panels.cx.run_until_parked();
++        assert_eq!(
++            editor_text(&mut panels),
++            Some(format!("Task {task}")),
++            "{selector} opens the editor on its own row"
++        );
++        cancel(&mut panels);
++    }
++}
++
++// ── Red-first: the editor sits in a row whose click opens the thread (gotcha 1) ──────────────
++
++/// Two live threads, A then B, each holding one running task. B is the agent panel's active
++/// thread, so anything that opens A's thread shows in `active_session`.
++async fn two_threads(
++    cx: &mut TestAppContext,
++    task_a: &str,
++    task_b: &str,
++) -> (Panels, String, String) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let connection = StopConnection::new();
++    let a = open_thread_on(&panels.agent_panel, connection.clone(), "A", &mut panels.cx);
++    send_tasks(
++        &a,
++        vec![wire_task(task_a, "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let b = open_thread_on(&panels.agent_panel, connection, "B", &mut panels.cx);
++    send_tasks(
++        &b,
++        vec![wire_task(task_b, "running", 2_000, None)],
++        &mut panels.cx,
++    );
++    let (sa, sb) = (
++        session_of(&a, &panels.cx).to_string(),
++        session_of(&b, &panels.cx).to_string(),
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++    assert_eq!(
++        active_session_text(&panels),
++        Some(sb.clone()),
++        "B is the active thread"
++    );
++    (panels, sa, sb)
++}
++
++fn active_session_text(panels: &Panels) -> Option<String> {
++    active_session(panels).map(|session| session.to_string())
++}
++
++// R3.2, R5.5 — Enter (bound as in the default keymap) confirms the rename and opens nothing.
++#[gpui::test]
++async fn panel_actions_rename_enter_in_the_editor_does_not_open_the_thread(
++    cx: &mut TestAppContext,
++) {
++    let (mut panels, sa, sb) = two_threads(cx, "t", "t").await;
++    panels
++        .cx
++        .update(|_, cx| cx.bind_keys([KeyBinding::new("enter", menu::Confirm, None)]));
++    start(&mut panels, &sa, "t");
++    type_text(&mut panels, "Renamed A");
++    panels.cx.simulate_keystrokes("enter");
++    panels.cx.run_until_parked();
++
++    assert_eq!(
++        editor_text(&mut panels),
++        None,
++        "Enter confirms and closes the editor"
++    );
++    assert_eq!(
++        store_label(&sa, "t", &mut panels.cx).as_deref(),
++        Some("Renamed A")
++    );
++    assert_eq!(
++        active_session_text(&panels),
++        Some(sb),
++        "Enter does not open thread A"
++    );
++}
++
++// R3.5 — the Escape key in an editor is `editor::Cancel` in the default keymap, not
++// `menu::Cancel`; it must cancel the rename all the same.
++#[gpui::test]
++async fn panel_actions_rename_escape_key_in_the_editor_cancels(cx: &mut TestAppContext) {
++    let (_db, mut panels, session) = one_live_task(cx).await;
++    panels.cx.update(|_, cx| {
++        cx.bind_keys([KeyBinding::new(
++            "escape",
++            editor::actions::Cancel,
++            Some("Editor"),
++        )])
++    });
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Discarded");
++    panels.cx.simulate_keystrokes("escape");
++    panels.cx.run_until_parked();
++
++    assert_eq!(editor_text(&mut panels), None, "Escape closes the editor");
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx),
++        None,
++        "no label was set"
++    );
++}
++
++// R3.1, R5.5 — a click inside the open editor edits; it never reaches the row's Open Thread.
++#[gpui::test]
++async fn panel_actions_rename_click_in_the_editor_does_not_open_the_thread(
++    cx: &mut TestAppContext,
++) {
++    let (mut panels, sa, sb) = two_threads(cx, "ta", "tb").await;
++    start(&mut panels, &sa, "ta");
++    draw(&mut panels.cx);
++    let bounds = panels
++        .cx
++        .debug_bounds("agent-tasks-row-label-ta")
++        .expect("the renamed row's label slot is painted");
++    panels.cx.simulate_click(bounds.center(), Modifiers::none());
++    panels.cx.run_until_parked();
++
++    assert_eq!(
++        active_session_text(&panels),
++        Some(sb),
++        "the click does not open thread A"
++    );
++    assert_eq!(
++        editor_text(&mut panels).as_deref(),
++        Some("Task ta"),
++        "the editor stays open"
++    );
++    assert!(editor_focused(&mut panels), "the editor keeps focus");
++}
++
++// R3.11, R5.5 — the Rename control opens the editor and nothing else.
++#[gpui::test]
++async fn panel_actions_rename_click_on_rename_does_not_open_the_thread(cx: &mut TestAppContext) {
++    let (mut panels, _sa, sb) = two_threads(cx, "ta", "tb").await;
++    draw(&mut panels.cx);
++    let bounds = panels
++        .cx
++        .debug_bounds("agent-tasks-rename-ta")
++        .expect("the Rename control is painted");
++    panels.cx.simulate_click(bounds.center(), Modifiers::none());
++    panels.cx.run_until_parked();
++
++    assert_eq!(
++        active_session_text(&panels),
++        Some(sb),
++        "Rename does not open thread A"
++    );
++    assert_eq!(editor_text(&mut panels).as_deref(), Some("Task ta"));
++    assert!(editor_focused(&mut panels), "the editor takes focus");
++}
+diff --git a/crates/agent_tasks_panel/src/panel/dock_default_tests.rs b/crates/agent_tasks_panel/src/panel/dock_default_tests.rs
+new file mode 100644
+index 0000000..6a93607
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/dock_default_tests.rs
+@@ -0,0 +1,154 @@
++// Story 022, task 7.2 — the Agent Tasks panel docks at the bottom unless a known dock was saved
++// (R6.1, R6.2, R5.7). Module path: `panel::dock_default`. Hostile fixtures come before benign
++// ones: a saved dock must never be folded into the new default.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/dock_default_tests.rs"]
++//     mod dock_default;
++//
++// Contract assumed beyond design.md (adjust HERE when the implementation drifts):
++//   - `saved_position(Result<Option<String>>) -> DockPosition` is the panel module's pure
++//     reading of the stored value (private, reachable from this child module);
++//   - the stored texts are `left`, `right`, `bottom` under `Panel::panel_key()`;
++//   - a read error is logged at error level and carries its cause.
++//
++// Not covered: the log line for an unknown saved value — it is a warning, and the crate's log
++// capture exposes only error lines.
++
++use anyhow::anyhow;
++use gpui::{Entity, TestAppContext, VisualTestContext, px};
++use workspace::dock::{DockPosition, Panel};
++
++use super::saved_position;
++use crate::AgentTasksPanel;
++use crate::test_helpers::*;
++
++async fn reload(panels: &mut Panels) -> Entity<AgentTasksPanel> {
++    let weak = panels.workspace.downgrade();
++    let loading = panels
++        .cx
++        .update(|window, cx| AgentTasksPanel::load(weak, window.to_async(cx)));
++    panels.cx.run_until_parked();
++    loading.await.expect("the Agent Tasks panel loads again")
++}
++
++fn position_of(panel: &Entity<AgentTasksPanel>, cx: &mut VisualTestContext) -> DockPosition {
++    panel.update_in(cx, |panel, window, cx| panel.position(window, cx))
++}
++
++async fn save(panels: &mut Panels, value: &str) {
++    let kvp = panels.cx.update(|_, cx| db::kvp::KeyValueStore::global(cx));
++    kvp.write_kvp(
++        <AgentTasksPanel as Panel>::panel_key().to_string(),
++        value.to_string(),
++    )
++    .await
++    .unwrap();
++}
++
++// R5.7 first (hostile: a saved dock must not collapse into the default), then R6.1 / R6.2.
++#[test]
++fn panel_dock_default_saved_position_honours_a_saved_dock_and_falls_back_to_the_bottom() {
++    assert_eq!(saved_position(Ok(Some("left".into()))), DockPosition::Left);
++    assert_eq!(
++        saved_position(Ok(Some("right".into()))),
++        DockPosition::Right
++    );
++    assert_eq!(
++        saved_position(Ok(Some("bottom".into()))),
++        DockPosition::Bottom
++    );
++
++    assert_eq!(
++        saved_position(Ok(None)),
++        DockPosition::Bottom,
++        "no saved value docks at the bottom"
++    );
++    for unknown in ["upside-down", "", "top"] {
++        assert_eq!(
++            saved_position(Ok(Some(unknown.into()))),
++            DockPosition::Bottom,
++            "a saved value naming no known dock ({unknown:?}) docks at the bottom"
++        );
++    }
++
++    capture_logs();
++    assert_eq!(
++        saved_position(Err(anyhow!("kvp table is locked"))),
++        DockPosition::Bottom,
++        "a read error docks at the bottom"
++    );
++    let errors = error_lines();
++    assert!(
++        errors
++            .iter()
++            .any(|line| line.contains("kvp table is locked")),
++        "the read error is logged with its cause: {errors:?}"
++    );
++}
++
++// R6.1 — a fresh profile: the panel sits in the BOTTOM dock, 320 px, and not in the left one.
++#[gpui::test]
++async fn panel_dock_default_fresh_profile_docks_the_panel_at_the_bottom_at_320px(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            assert_eq!(panel.position(window, cx), DockPosition::Bottom);
++            assert_eq!(panel.default_size(window, cx), px(320.));
++        });
++    let (in_bottom, in_left) = panels.workspace.read_with(&panels.cx, |workspace, cx| {
++        (
++            workspace
++                .bottom_dock()
++                .read(cx)
++                .panel::<AgentTasksPanel>()
++                .is_some(),
++            workspace
++                .left_dock()
++                .read(cx)
++                .panel::<AgentTasksPanel>()
++                .is_some(),
++        )
++    });
++    assert!(in_bottom, "the bottom dock holds the panel");
++    assert!(!in_left, "the left dock does not");
++}
++
++// R5.7 first (hostile: each saved dock survives a reload), then R6.2 (an unknown saved value
++// docks at the bottom on reload).
++#[gpui::test]
++async fn panel_dock_default_reload_honours_a_saved_dock_and_falls_back_to_the_bottom(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++
++    for (value, expected) in [
++        ("left", DockPosition::Left),
++        ("right", DockPosition::Right),
++        ("bottom", DockPosition::Bottom),
++    ] {
++        save(&mut panels, value).await;
++        let reloaded = reload(&mut panels).await;
++        assert_eq!(
++            position_of(&reloaded, &mut panels.cx),
++            expected,
++            "a saved {value:?} is honoured"
++        );
++    }
++
++    save(&mut panels, "upside-down").await;
++    let reloaded = reload(&mut panels).await;
++    assert_eq!(
++        position_of(&reloaded, &mut panels.cx),
++        DockPosition::Bottom,
++        "an unknown saved value docks at the bottom"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/label_contract_tests.rs b/crates/agent_tasks_panel/src/panel/label_contract_tests.rs
+new file mode 100644
+index 0000000..aa71e9e
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/label_contract_tests.rs
+@@ -0,0 +1,294 @@
++// Story 022, task 5.3 — the label contract: what the store writes is what the card and every
++// panel read, across windows and a restart (R3.3, R3.8, R3.10). Module path:
++// `panel::label_contract`.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/label_contract_tests.rs"]
++//     mod label_contract;
++//
++// Same assumptions as `panel::actions_rename` (start_rename / rename_editor / menu actions,
++// `agent_ui::TaskLabels`, `Window::debug_a11y_tree_json()`), and the card's `Watch: {label}`.
++
++use std::path::Path;
++
++use acp_thread::AgentTaskStatus;
++use agent_ui::{AgentPanel, TaskLabels, collapse_label, display_label};
++use fs::FakeFs;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, Workspace};
++
++use crate::AgentTasksPanel;
++use crate::test_helpers::*;
++
++fn ensure_labels(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        if !cx.has_global::<TaskLabels>() {
++            cx.set_global(TaskLabels::default());
++        }
++    });
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Docks the Agent Tasks panel open, so its rows are painted.
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++/// Every string of the window's accessibility tree (screen-reader labels among them). GPUI's
++/// test windows build no tree, so the labels the panel rendered are read instead, plus the
++/// card's row labels.
++fn a11y_strings(cx: &mut VisualTestContext) -> Vec<String> {
++    draw(cx);
++    let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
++        let mut strings: Vec<String> = super::RENDERED_ARIA_LABELS
++            .with_borrow(|labels| labels.iter().map(ToString::to_string).collect());
++        strings.extend(card_watch_labels(cx));
++        return strings;
++    };
++    let value: serde_json::Value = serde_json::from_str(&json).expect("the tree is JSON");
++    let mut strings = Vec::new();
++    collect_strings(&value, &mut strings);
++    strings
++}
++
++/// The card's Watch labels as its rows name them. agent_ui records its rendered labels only in
++/// its own test builds, so this reads the card's rows and the `TaskLabels` global it renders
++/// from, through agent_ui's own label rules. The agent panel and this panel share the left dock
++/// by default, so the card is brought on screen for the reading and this panel shown again.
++fn card_watch_labels(cx: &mut VisualTestContext) -> Vec<String> {
++    let Some(workspace) = cx.update(|window, cx| {
++        let multi_workspace = window.root::<MultiWorkspace>().flatten()?;
++        Some(multi_workspace.read(cx).workspace().clone())
++    }) else {
++        return Vec::new();
++    };
++    let Some(agent_panel) =
++        workspace.read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx))
++    else {
++        return Vec::new();
++    };
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentPanel>(window, cx);
++    });
++    draw(cx);
++    let painted = cx.debug_bounds("tasks-card").is_some();
++    let strings = cx.update(|_, cx| {
++        let card = agent_panel.read(cx).tasks_card().read(cx);
++        if !painted || card.is_minimized() {
++            return Vec::new();
++        }
++        let labels = cx.try_global::<TaskLabels>();
++        let mut strings = Vec::new();
++        for group in card.rows(cx) {
++            for row in group.rows {
++                let key = (group.session_id.clone(), row.task.id.clone());
++                let user_label = labels.and_then(|labels| labels.get(&key));
++                let shown = display_label(&collapse_label(
++                    user_label.map_or(row.task.description.as_ref(), |label| label.as_ref()),
++                ));
++                let verb = if row.watched {
++                    "Stop watching"
++                } else {
++                    "Watch"
++                };
++                strings.push(format!("{verb}: {shown}"));
++            }
++        }
++        strings
++    });
++    show_panel(&workspace, cx);
++    strings
++}
++
++fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
++    match value {
++        serde_json::Value::String(text) => out.push(text.clone()),
++        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
++        serde_json::Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
++        _ => {}
++    }
++}
++
++fn count(strings: &[String], label: &str) -> usize {
++    strings.iter().filter(|text| text.as_str() == label).count()
++}
++
++fn rename_to(panels: &mut Panels, session: &str, task: &str, text: &str) {
++    let target = key(session, task);
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.start_rename(target, window, cx)
++        });
++    panels.cx.run_until_parked();
++    panels.cx.simulate_input(text);
++    panels.cx.dispatch_action(menu::Confirm);
++    panels.cx.run_until_parked();
++}
++
++async fn open_window(
++    cx: &mut TestAppContext,
++    root: &str,
++) -> (Entity<Workspace>, VisualTestContext) {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    fs.insert_tree(root, json!({ "file.txt": "" })).await;
++    let project = Project::test(fs.clone(), [Path::new(root)], cx).await;
++    let multi_workspace =
++        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace
++        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++        .unwrap();
++    let cx = VisualTestContext::from_window(multi_workspace.into(), cx);
++    cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(900.)));
++    (workspace, cx)
++}
++
++// R3.3 — a rename in the panel shows in the open card at once; hostile: thread B's row with the
++// same task id keeps its description.
++#[gpui::test]
++async fn panel_label_contract_rename_reaches_the_open_card(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let connection = StopConnection::new();
++    let a = open_thread_on(&panels.agent_panel, connection.clone(), "A", &mut panels.cx);
++    send_tasks(
++        &a,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let b = open_thread_on(&panels.agent_panel, connection, "B", &mut panels.cx);
++    send_tasks(
++        &b,
++        vec![wire_task("t", "running", 2_000, None)],
++        &mut panels.cx,
++    );
++    let session_a = session_of(&a, &panels.cx).to_string();
++    show_panel(&panels.workspace, &mut panels.cx);
++    assert_eq!(count(&a11y_strings(&mut panels.cx), "Watch: Task t"), 2);
++
++    rename_to(&mut panels, &session_a, "t", "Renamed");
++
++    let strings = a11y_strings(&mut panels.cx);
++    assert_eq!(
++        count(&strings, "Watch: Renamed"),
++        1,
++        "the card shows the rename without reopening"
++    );
++    assert_eq!(
++        count(&strings, "Watch: Task t"),
++        1,
++        "thread B's card row is untouched"
++    );
++    assert_eq!(count(&strings, "Open thread: Renamed"), 1);
++}
++
++// R3.10 — a rename in one window shows in every open window's panel.
++#[gpui::test]
++async fn panel_label_contract_rename_shows_in_a_second_window(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "completed", 1_000, Some((1, 1)))],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++
++    let (second, mut second_cx) = open_window(cx, "/second").await;
++    let weak = second.downgrade();
++    let loading = second_cx.update(|window, cx| AgentTasksPanel::load(weak, window.to_async(cx)));
++    second_cx.run_until_parked();
++    let second_panel = loading.await.expect("the second window's panel loads");
++    second.update_in(&mut second_cx, |workspace, window, cx| {
++        workspace.add_panel(second_panel.clone(), window, cx);
++    });
++    show_panel(&second, &mut second_cx);
++    show_panel(&panels.workspace, &mut panels.cx);
++    assert_eq!(
++        count(&a11y_strings(&mut second_cx), "Open thread: Task t"),
++        1
++    );
++
++    rename_to(&mut panels, &session, "t", "Seen everywhere");
++
++    let strings = a11y_strings(&mut second_cx);
++    assert_eq!(count(&strings, "Open thread: Seen everywhere"), 1);
++    assert_eq!(count(&strings, "Open thread: Task t"), 0);
++}
++
++// R3.8 — a label confirmed before a restart shows after it, in the panel and in the card. The
++// label is in the database before Zeo starts; the thread's session is the one the card keys by.
++#[gpui::test]
++async fn panel_label_contract_restart_shows_the_stored_label_in_panel_and_card(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    let connection = StopConnection::new();
++    // StopConnection numbers its sessions from 1: the first thread opened on it is this one.
++    let first_session = "tasks-panel-session-1";
++    db.insert_started(&record(first_session, "t", AgentTaskStatus::Running, 1_000))
++        .await
++        .unwrap();
++    db.set_label(&key(first_session, "t"), Some("Before restart"))
++        .await
++        .unwrap();
++
++    // As in Zeo, agent_ui::init has set the label global before the history store loads.
++    cx.update(|cx| cx.set_global(TaskLabels::default()));
++    let mut panels = open_panels(cx).await;
++    let a = open_thread_on(&panels.agent_panel, connection.clone(), "A", &mut panels.cx);
++    assert_eq!(
++        session_of(&a, &panels.cx).to_string(),
++        first_session,
++        "fixture: the session the label was stored under"
++    );
++    send_tasks(
++        &a,
++        vec![wire_task("t", "running", 2_000, None)],
++        &mut panels.cx,
++    );
++    let b = open_thread_on(&panels.agent_panel, connection, "B", &mut panels.cx);
++    send_tasks(
++        &b,
++        vec![wire_task("t", "running", 3_000, None)],
++        &mut panels.cx,
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    let strings = a11y_strings(&mut panels.cx);
++    assert_eq!(
++        count(&strings, "Open thread: Before restart"),
++        1,
++        "the panel shows the stored label"
++    );
++    assert_eq!(
++        count(&strings, "Watch: Before restart"),
++        1,
++        "the card shows the stored label"
++    );
++    assert_eq!(
++        count(&strings, "Watch: Task t"),
++        1,
++        "thread B's task is not labelled"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/list_label_tests.rs b/crates/agent_tasks_panel/src/panel/list_label_tests.rs
+new file mode 100644
+index 0000000..82c396e
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/list_label_tests.rs
+@@ -0,0 +1,389 @@
++// Story 022, task 5.1 — panel rows draw their label on one line, from the user's label or the
++// description, and name the task by its displayed label for screen readers (R1.1, R1.6, R3.9,
++// R5.2, R5.3). Module path: `panel::list_label`.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/list_label_tests.rs"]
++//     mod list_label;
++//
++// Contract assumed beyond design.md (adjust HERE when the implementation drifts):
++//   - the row's label sits in an element with debug selector `agent-tasks-row-label-{task_id}`;
++//   - `agent_ui::TaskLabels` is re-exported at agent_ui's root; tests set the global, as
++//     `agent_ui::init` does in Zeo;
++//   - screen-reader labels are read from `Window::debug_a11y_tree_json()`, or — GPUI's test
++//     windows build no accessibility tree — from the panel's `RENDERED_ARIA_LABELS`;
++//   - the Open Thread tooltip's text carries debug selector `agent-tasks-tooltip-open-{task_id}`.
++
++use std::time::Duration;
++
++use acp_thread::AgentTaskStatus;
++use agent_ui::TaskLabels;
++use gpui::{Entity, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, px};
++use serde_json::json;
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++const HEREDOC: &str = "cat > f <<'EOF'\n{\"a\": 1}\nEOF";
++const HEREDOC_SHOWN: &str = "cat > f <<'EOF' {\"a\": 1} EOF";
++
++fn ensure_labels(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        if !cx.has_global::<TaskLabels>() {
++            cx.set_global(TaskLabels::default());
++        }
++    });
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Docks the Agent Tasks panel open, so its rows are painted.
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn described(id: &str, description: &str, status: &str, at: u64) -> serde_json::Value {
++    let mut task = wire_task(id, status, at, None);
++    task["description"] = json!(description);
++    task
++}
++
++/// Every string of the window's accessibility tree (screen-reader labels among them). GPUI's
++/// test windows build no tree, so the labels the panel rendered are read instead.
++fn a11y_strings(cx: &mut VisualTestContext) -> Vec<String> {
++    draw(cx);
++    let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
++        return super::RENDERED_ARIA_LABELS
++            .with_borrow(|labels| labels.iter().map(ToString::to_string).collect());
++    };
++    let value: serde_json::Value = serde_json::from_str(&json).expect("the tree is JSON");
++    let mut strings = Vec::new();
++    collect_strings(&value, &mut strings);
++    strings
++}
++
++fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
++    match value {
++        serde_json::Value::String(text) => out.push(text.clone()),
++        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
++        serde_json::Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
++        _ => {}
++    }
++}
++
++fn count(strings: &[String], label: &str) -> usize {
++    strings.iter().filter(|text| text.as_str() == label).count()
++}
++
++fn store_label(session: &str, task: &str, cx: &mut VisualTestContext) -> Option<String> {
++    cx.update(|_, cx| {
++        let store = TaskHistoryStore::global(cx);
++        let records = store.read(cx).records().to_vec();
++        find(&records, session, task).and_then(|entry| entry.label.as_ref().map(|l| l.to_string()))
++    })
++}
++
++fn height(selector: &'static str, cx: &mut VisualTestContext) -> Pixels {
++    cx.debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"))
++        .size
++        .height
++}
++
++fn advance(cx: &mut VisualTestContext, duration: Duration) {
++    cx.executor().advance_clock(duration);
++    cx.run_until_parked();
++}
++
++/// Rests the pointer on `selector` (after moving it away) and says whether `tooltip` shows.
++fn tooltip_shows(
++    selector: &'static str,
++    tooltip: &'static str,
++    cx: &mut VisualTestContext,
++) -> bool {
++    cx.simulate_mouse_move(Point::new(px(1.), px(1.)), None, Modifiers::none());
++    advance(cx, Duration::from_millis(100));
++    draw(cx);
++    let bounds = cx
++        .debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"));
++    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
++    advance(cx, Duration::from_secs(1));
++    draw(cx);
++    cx.debug_bounds(tooltip).is_some()
++}
++
++/// Stores a finished task of `old-session` whose description is a heredoc.
++async fn store_heredoc_task(
++    db: &crate::AgentTaskHistoryDb,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++) {
++    let mut running = record("old-session", task, AgentTaskStatus::Running, at);
++    running.description = HEREDOC.into();
++    db.insert_started(&running).await.unwrap();
++    let mut done = record("old-session", task, status, at);
++    done.description = HEREDOC.into();
++    db.update_ended(&done).await.unwrap();
++}
++
++// R1.1 — the bug: a heredoc description is drawn on one line, like any other label.
++#[gpui::test]
++async fn panel_list_label_multi_line_description_paints_one_line(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![
++            described("multi", HEREDOC, "running", 1_000),
++            described("single", "Write the fixture", "running", 2_000),
++        ],
++        &mut panels.cx,
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    let single = height("agent-tasks-row-label-single", &mut panels.cx);
++    assert_eq!(
++        height("agent-tasks-row-label-multi", &mut panels.cx),
++        single
++    );
++}
++
++// R1.6 — every control of the row names the task by its displayed label.
++#[gpui::test]
++async fn panel_list_label_screen_reader_labels_use_the_displayed_label(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    let long = format!("{} {}", "a".repeat(30), "b".repeat(40));
++    let long_shown = format!("{}…", long.chars().take(59).collect::<String>());
++    send_tasks(
++        &thread,
++        vec![
++            described("multi", HEREDOC, "running", 1_000),
++            described("long", &long, "running", 2_000),
++        ],
++        &mut panels.cx,
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++    let strings = a11y_strings(&mut panels.cx);
++
++    for prefix in ["Open thread", "Stop"] {
++        assert_eq!(
++            count(&strings, &format!("{prefix}: {HEREDOC_SHOWN}")),
++            1,
++            "{prefix}"
++        );
++        assert_eq!(
++            count(&strings, &format!("{prefix}: {long_shown}")),
++            1,
++            "{prefix}"
++        );
++    }
++    assert!(
++        !strings
++            .iter()
++            .any(|text| text.starts_with("Open thread:") && text.contains('\n'))
++    );
++}
++
++// R5.2 — a one-line label of at most 60 characters reads exactly as before.
++#[gpui::test]
++async fn panel_list_label_short_label_is_unchanged(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++    assert_eq!(
++        count(&a11y_strings(&mut panels.cx), "Open thread: Task t1"),
++        1
++    );
++}
++
++// R5.3 + R1.1 — foreground shell rows already in the history (multi-line commands) still list,
++// filter and archive, on one line; none is deleted.
++#[gpui::test]
++async fn panel_list_label_stored_foreground_rows_list_filter_and_archive(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    for (task, status, at) in [
++        ("fg1", AgentTaskStatus::Completed, 1_000),
++        ("fg2", AgentTaskStatus::Completed, 2_000),
++        ("fg3", AgentTaskStatus::Failed, 3_000),
++    ] {
++        let mut running = record("old-session", task, AgentTaskStatus::Running, at);
++        running.description = HEREDOC.into();
++        db.insert_started(&running).await.unwrap();
++        let mut done = record("old-session", task, status, at);
++        done.description = HEREDOC.into();
++        db.update_ended(&done).await.unwrap();
++    }
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    let visible = visible_keys(&mut panels);
++    assert!(visible.contains(&("old-session".into(), "fg1".into())));
++    assert!(visible.contains(&("old-session".into(), "fg2".into())));
++    assert_eq!(
++        count(
++            &a11y_strings(&mut panels.cx),
++            &format!("Open thread: {HEREDOC_SHOWN}")
++        ),
++        2
++    );
++
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.archive(&key("old-session", "fg1"), cx)
++    });
++    panels.cx.run_until_parked();
++    assert!(!visible_keys(&mut panels).contains(&("old-session".into(), "fg1".into())));
++
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Archived, true, cx);
++        panel.set_filter(TaskFilter::Failed, true, cx);
++    });
++    panels.cx.run_until_parked();
++    let visible = visible_keys(&mut panels);
++    for task in ["fg1", "fg2", "fg3"] {
++        assert!(
++            visible.contains(&("old-session".into(), task.into())),
++            "{task} is kept"
++        );
++    }
++}
++
++// R3.9 — a renamed row keeps its label when the agent's description changes; another thread
++// holding the same task id shows its own description.
++#[gpui::test]
++async fn panel_list_label_user_label_wins_over_a_changed_description(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let connection = StopConnection::new();
++    let a = open_thread_on(&panels.agent_panel, connection.clone(), "A", &mut panels.cx);
++    send_tasks(
++        &a,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let b = open_thread_on(&panels.agent_panel, connection, "B", &mut panels.cx);
++    send_tasks(
++        &b,
++        vec![wire_task("t", "running", 2_000, None)],
++        &mut panels.cx,
++    );
++    let session_a = session_of(&a, &panels.cx);
++    assert_ne!(session_a, session_of(&b, &panels.cx));
++
++    let store = panels.cx.update(|_, cx| TaskHistoryStore::global(cx));
++    store.update(&mut panels.cx, |store, cx| {
++        store.rename(key(&session_a.to_string(), "t"), "Renamed", cx)
++    });
++    panels.cx.run_until_parked();
++    send_tasks(
++        &a,
++        vec![described("t", "Changed by the agent", "running", 1_000)],
++        &mut panels.cx,
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    let strings = a11y_strings(&mut panels.cx);
++    assert_eq!(count(&strings, "Open thread: Renamed"), 1);
++    assert_eq!(count(&strings, "Open thread: Changed by the agent"), 0);
++    assert_eq!(
++        count(&strings, "Open thread: Task t"),
++        1,
++        "thread B's row is not renamed"
++    );
++    assert_eq!(
++        store_label(&session_a.to_string(), "t", &mut panels.cx).as_deref(),
++        Some("Renamed")
++    );
++}
++
++// R1.5 — resting on a row's label shows the whole label in the Open Thread tooltip, not the cut
++// one the row shows. Measured against a row whose description *is* the long row's displayed
++// text: were the tooltip cut too, the two would be the same size.
++#[gpui::test]
++async fn panel_list_label_open_thread_tooltip_holds_the_full_label(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    let long = "word ".repeat(40);
++    let shown = format!("{}…", long.trim_end().chars().take(59).collect::<String>());
++    send_tasks(
++        &thread,
++        vec![
++            described("long", &long, "running", 1_000),
++            described("cut", &shown, "running", 2_000),
++        ],
++        &mut panels.cx,
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    let tooltip_size =
++        |selector: &'static str, tooltip: &'static str, cx: &mut VisualTestContext| {
++            assert!(tooltip_shows(selector, tooltip, cx), "{tooltip} shows");
++            cx.debug_bounds(tooltip).expect("the tooltip").size
++        };
++    let cut = tooltip_size(
++        "agent-tasks-row-label-cut",
++        "agent-tasks-tooltip-open-cut",
++        &mut panels.cx,
++    );
++    let full = tooltip_size(
++        "agent-tasks-row-label-long",
++        "agent-tasks-tooltip-open-long",
++        &mut panels.cx,
++    );
++    assert!(
++        full.height > cut.height || full.width > cut.width,
++        "the tooltip shows all {} characters, not the {} the row shows: {full:?} vs {cut:?}",
++        long.trim_end().chars().count(),
++        shown.chars().count()
++    );
++}
++
++// R1.6 — Archive and Unarchive name the task by its displayed label too.
++#[gpui::test]
++async fn panel_list_label_archive_and_unarchive_use_the_displayed_label(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    store_heredoc_task(&db, "done", AgentTaskStatus::Completed, 1_000).await;
++    store_heredoc_task(&db, "old", AgentTaskStatus::Completed, 2_000).await;
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.archive(&key("old-session", "old"), cx);
++        panel.set_filter(TaskFilter::Archived, true, cx);
++    });
++    panels.cx.run_until_parked();
++    show_panel(&panels.workspace, &mut panels.cx);
++    let strings = a11y_strings(&mut panels.cx);
++
++    assert_eq!(count(&strings, &format!("Archive: {HEREDOC_SHOWN}")), 1);
++    assert_eq!(count(&strings, &format!("Unarchive: {HEREDOC_SHOWN}")), 1);
++    assert!(
++        !strings.iter().any(|text| text.contains('\n')),
++        "no screen-reader label carries a line break: {strings:?}"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/list_tests.rs b/crates/agent_tasks_panel/src/panel/list_tests.rs
+index f5cbc99..6ccd8e8 100644
+--- a/crates/agent_tasks_panel/src/panel/list_tests.rs
++++ b/crates/agent_tasks_panel/src/panel/list_tests.rs
+@@ -46,7 +46,9 @@ fn pair(session: &str, task: &str) -> (String, String) {
+ 
+ // R2.1, Q14 — dock, size, icon, tooltip and toggle action; `init` created the store.
+ #[gpui::test]
+-async fn panel_list_docks_left_by_default_at_320px_and_accepts_every_dock(cx: &mut TestAppContext) {
++async fn panel_list_docks_at_the_bottom_by_default_at_320px_and_accepts_every_dock(
++    cx: &mut TestAppContext,
++) {
+     init_base(cx);
+     let mut panels = open_panels(cx).await;
+ 
+@@ -60,7 +62,7 @@ async fn panel_list_docks_left_by_default_at_320px_and_accepts_every_dock(cx: &m
+     panels
+         .tasks_panel
+         .update_in(&mut panels.cx, |panel, window, cx| {
+-            assert!(matches!(panel.position(window, cx), DockPosition::Left));
++            assert!(matches!(panel.position(window, cx), DockPosition::Bottom));
+             assert_eq!(panel.default_size(window, cx), px(320.));
+             for position in [
+                 DockPosition::Left,
+@@ -89,7 +91,7 @@ async fn panel_list_toggle_focus_action_opens_the_panel_in_its_dock(cx: &mut Tes
+     let tasks_panel_id = panels.tasks_panel.entity_id();
+     let shown = |panels: &Panels| {
+         panels.workspace.read_with(&panels.cx, |workspace, cx| {
+-            let dock = workspace.left_dock().read(cx);
++            let dock = workspace.bottom_dock().read(cx);
+             dock.is_open()
+                 && dock.visible_panel().map(|panel| panel.panel_id()) == Some(tasks_panel_id)
+         })
+diff --git a/crates/agent_tasks_panel/src/panel/persistence_tests.rs b/crates/agent_tasks_panel/src/panel/persistence_tests.rs
+index 9e2149a..764fb21 100644
+--- a/crates/agent_tasks_panel/src/panel/persistence_tests.rs
++++ b/crates/agent_tasks_panel/src/panel/persistence_tests.rs
+@@ -35,7 +35,7 @@ async fn panel_dock_position_moves_the_panel_and_survives_a_reload(cx: &mut gpui
+     let mut panels = open_panels(cx).await;
+     assert_eq!(
+         position_of(&panels.tasks_panel, &mut panels.cx),
+-        DockPosition::Left
++        DockPosition::Bottom
+     );
+ 
+     move_to(&mut panels, DockPosition::Right);
+@@ -64,7 +64,7 @@ async fn panel_dock_position_moves_the_panel_and_survives_a_reload(cx: &mut gpui
+ }
+ 
+ #[gpui::test]
+-async fn panel_dock_position_falls_back_to_left_on_an_unknown_saved_value(
++async fn panel_dock_position_falls_back_to_the_bottom_on_an_unknown_saved_value(
+     cx: &mut gpui::TestAppContext,
+ ) {
+     init_base(cx);
+@@ -78,5 +78,5 @@ async fn panel_dock_position_falls_back_to_left_on_an_unknown_saved_value(
+     .unwrap();
+ 
+     let reloaded = reload(&mut panels).await;
+-    assert_eq!(position_of(&reloaded, &mut panels.cx), DockPosition::Left);
++    assert_eq!(position_of(&reloaded, &mut panels.cx), DockPosition::Bottom);
+ }
+diff --git a/crates/agent_tasks_panel/src/panel/rename_vanish_tests.rs b/crates/agent_tasks_panel/src/panel/rename_vanish_tests.rs
+new file mode 100644
+index 0000000..649e96a
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/rename_vanish_tests.rs
+@@ -0,0 +1,353 @@
++// Story 022, task 7.1 — a rename editor that stops being shown discards the edit (R3.13), while
++// a blur to another element still confirms it (R3.6, narrowed). Module path:
++// `panel::rename_vanish`. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/rename_vanish_tests.rs"]
++//     mod rename_vanish;
++//
++// Contract assumed beyond design.md (adjust HERE when the implementation drifts):
++//   - `AgentTasksPanel::start_rename(&mut self, key, window, cx)` opens the editor and
++//     `rename_editor(&self) -> Option<Entity<Editor>>` exposes it while open;
++//   - the editor confirms on `menu::Confirm`;
++//   - `set_filter(filter, enabled, cx)` toggles a list filter;
++//   - the list scrolls through the panel's `scroll_handle` (`UniformListScrollHandle`), and the
++//     filter toggles keep their focus handles in `filter_focus_handles` (`TaskFilter::ALL`
++//     order) — both private fields, reachable from this child module.
++//
++// Not covered: a task record removed from the history — the store offers no removal, so the
++// "removed" route of R3.13 is exercised through its effect (the row leaves the list) by a status
++// change and by a filter change.
++
++use agent_ui::TaskLabels;
++use gpui::{Entity, Focusable as _, ScrollStrategy, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++fn ensure_labels(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        if !cx.has_global::<TaskLabels>() {
++            cx.set_global(TaskLabels::default());
++        }
++    });
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Draws twice: the frame that drops the editor, then the one that settles focus after it.
++fn settle(cx: &mut VisualTestContext) {
++    draw(cx);
++    draw(cx);
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn store_label(session: &str, task: &str, cx: &mut VisualTestContext) -> Option<String> {
++    cx.update(|_, cx| {
++        let store = TaskHistoryStore::global(cx);
++        let records = store.read(cx).records().to_vec();
++        find(&records, session, task).and_then(|entry| entry.label.as_ref().map(|l| l.to_string()))
++    })
++}
++
++fn start(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.start_rename(target, window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++fn editor_text(panels: &mut Panels) -> Option<String> {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.rename_editor().map(|editor| editor.read(cx).text(cx))
++    })
++}
++
++fn editor_focused(panels: &mut Panels) -> bool {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel
++                .rename_editor()
++                .is_some_and(|editor| editor.focus_handle(cx).is_focused(window))
++        })
++}
++
++fn type_text(panels: &mut Panels, text: &str) {
++    panels.cx.simulate_input(text);
++    panels.cx.run_until_parked();
++}
++
++fn confirm(panels: &mut Panels) {
++    panels.cx.dispatch_action(menu::Confirm);
++    panels.cx.run_until_parked();
++}
++
++fn rename_to(panels: &mut Panels, session: &str, task: &str, text: &str) {
++    start(panels, session, task);
++    type_text(panels, text);
++    confirm(panels);
++}
++
++fn set_filter(panels: &mut Panels, filter: TaskFilter, enabled: bool) {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(filter, enabled, cx)
++    });
++    panels.cx.run_until_parked();
++}
++
++/// Thread A holds a RUNNING task `t`, thread B an ENDED task with the same id `t` — the same
++/// task id in two threads, so only the (session, task) pair tells the two rows apart.
++async fn same_id_in_two_threads(cx: &mut TestAppContext) -> (Panels, String, String) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let a = open_live_thread(&mut panels, "A");
++    send_tasks(
++        &a,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let b = open_live_thread(&mut panels, "B");
++    send_tasks(
++        &b,
++        vec![wire_task("t", "completed", 2_000, None)],
++        &mut panels.cx,
++    );
++    let (sa, sb) = (
++        session_of(&a, &panels.cx).to_string(),
++        session_of(&b, &panels.cx).to_string(),
++    );
++    show_panel(&panels.workspace, &mut panels.cx);
++    (panels, sa, sb)
++}
++
++// R3.13 via a filter change. Hostile, stay-apart half first: hiding thread B's row must not close
++// the editor open on thread A's row of the SAME task id — the editor stays, focused, with its
++// text, and Enter still labels A only. Then the vanishing half: hiding the renamed row itself
++// closes the editor and keeps the previous label, and turning the filter back on brings back
++// neither the editor nor the half-typed text.
++#[gpui::test]
++async fn panel_actions_rename_vanish_filter_hiding_the_row_keeps_the_previous_label(
++    cx: &mut TestAppContext,
++) {
++    let (mut panels, sa, sb) = same_id_in_two_threads(cx).await;
++
++    start(&mut panels, &sa, "t");
++    type_text(&mut panels, "Still typing");
++    set_filter(&mut panels, TaskFilter::Finished, false);
++    settle(&mut panels.cx);
++    assert_eq!(
++        editor_text(&mut panels).as_deref(),
++        Some("Still typing"),
++        "hiding another thread's row with the same task id leaves this rename open"
++    );
++    assert!(editor_focused(&mut panels), "the editor keeps focus");
++    confirm(&mut panels);
++    assert_eq!(
++        store_label(&sa, "t", &mut panels.cx).as_deref(),
++        Some("Still typing")
++    );
++    assert_eq!(
++        store_label(&sb, "t", &mut panels.cx),
++        None,
++        "B's row was not renamed"
++    );
++    set_filter(&mut panels, TaskFilter::Finished, true);
++    settle(&mut panels.cx);
++
++    rename_to(&mut panels, &sb, "t", "Old");
++    assert_eq!(
++        store_label(&sb, "t", &mut panels.cx).as_deref(),
++        Some("Old")
++    );
++    start(&mut panels, &sb, "t");
++    type_text(&mut panels, "Half typed");
++    set_filter(&mut panels, TaskFilter::Finished, false);
++    settle(&mut panels.cx);
++
++    assert_eq!(
++        store_label(&sb, "t", &mut panels.cx).as_deref(),
++        Some("Old"),
++        "a rename whose row a filter hid keeps the previous label"
++    );
++    assert_eq!(
++        editor_text(&mut panels),
++        None,
++        "the hidden row's editor is closed"
++    );
++    assert_eq!(
++        store_label(&sa, "t", &mut panels.cx).as_deref(),
++        Some("Still typing"),
++        "the other thread's label is untouched"
++    );
++
++    set_filter(&mut panels, TaskFilter::Finished, true);
++    settle(&mut panels.cx);
++    assert_eq!(
++        editor_text(&mut panels),
++        None,
++        "showing the row again reopens nothing"
++    );
++    assert_eq!(
++        store_label(&sb, "t", &mut panels.cx).as_deref(),
++        Some("Old")
++    );
++}
++
++// R3.13 via the record: a running row that fails while being renamed leaves the list (Failed is
++// off by default) — the edit is discarded and the previous label kept.
++#[gpui::test]
++async fn panel_actions_rename_vanish_row_leaving_the_list_keeps_the_previous_label(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    rename_to(&mut panels, &session, "t", "Old");
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Half typed");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "failed", 1_000, None)],
++        &mut panels.cx,
++    );
++    settle(&mut panels.cx);
++    assert!(
++        find_row(&mut panels, &session, "t").is_none(),
++        "the failed row is no longer listed"
++    );
++
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx).as_deref(),
++        Some("Old"),
++        "a rename whose row left the list keeps the previous label"
++    );
++    assert_eq!(editor_text(&mut panels), None, "its editor is closed");
++}
++
++// R3.13 via scrolling: a rename on the top row, then the list scrolled to its last line so the
++// renamed row is drawn no more — the edit is discarded and the previous label kept.
++#[gpui::test]
++async fn panel_actions_rename_vanish_row_scrolled_out_of_view_keeps_the_previous_label(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Long");
++    // 120 running rows — far more than any dock shows. `t119` is the newest, so it is listed
++    // first.
++    let tasks = (0..120)
++        .map(|n| wire_task(&format!("t{n}"), "running", 1_000 + n * 10, None))
++        .collect();
++    send_tasks(&thread, tasks, &mut panels.cx);
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    rename_to(&mut panels, &session, "t119", "Old");
++    start(&mut panels, &session, "t119");
++    type_text(&mut panels, "Half typed");
++    assert!(
++        editor_focused(&mut panels),
++        "the editor is shown and focused"
++    );
++
++    let last = panels.tasks_panel.update(&mut panels.cx, |panel, _| {
++        panel.entries.len().saturating_sub(1)
++    });
++    assert!(last > 100, "every row is a line of the list");
++    panels.tasks_panel.update(&mut panels.cx, |panel, _| {
++        panel
++            .scroll_handle
++            .scroll_to_item(last, ScrollStrategy::Top)
++    });
++    settle(&mut panels.cx);
++    let at_end = panels.tasks_panel.update(&mut panels.cx, |panel, _| {
++        panel.scroll_handle.is_scrolled_to_end()
++    });
++    assert_eq!(
++        at_end,
++        Some(true),
++        "the list is scrollable and scrolled to its last line, away from the renamed row"
++    );
++
++    assert_eq!(
++        store_label(&session, "t119", &mut panels.cx).as_deref(),
++        Some("Old"),
++        "a rename scrolled out of view keeps the previous label"
++    );
++    assert_eq!(editor_text(&mut panels), None, "its editor is closed");
++}
++
++// R3.6 narrowed and R3.13 side by side. Hostile half first: focus moving from the editor to
++// another element — a filter toggle — confirms, as Enter would. Then a blur that leaves NOTHING
++// focused — what a vanished editor raises — discards the edit and keeps that label.
++#[gpui::test]
++async fn panel_actions_rename_vanish_blur_with_nothing_focused_discards_but_a_blur_to_another_element_confirms(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    ensure_labels(&mut panels.cx);
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace, &mut panels.cx);
++
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Kept");
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            let toggle = panel.filter_focus_handles[0].clone();
++            window.focus(&toggle, cx);
++        });
++    settle(&mut panels.cx);
++    assert_eq!(editor_text(&mut panels), None);
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx).as_deref(),
++        Some("Kept"),
++        "focus moved to a filter toggle confirms the label"
++    );
++
++    start(&mut panels, &session, "t");
++    type_text(&mut panels, "Half typed");
++    panels.cx.update(|window, cx| window.blur(cx));
++    settle(&mut panels.cx);
++
++    assert_eq!(
++        store_label(&session, "t", &mut panels.cx).as_deref(),
++        Some("Kept"),
++        "a blur with nothing focused discards the edit"
++    );
++    assert_eq!(editor_text(&mut panels), None, "the editor is closed");
++}
+diff --git a/crates/agent_tasks_panel/src/store.rs b/crates/agent_tasks_panel/src/store.rs
+index 6719acf..fc31082 100644
+--- a/crates/agent_tasks_panel/src/store.rs
++++ b/crates/agent_tasks_panel/src/store.rs
+@@ -15,13 +15,15 @@ use std::{cmp, sync::atomic::Ordering};
+ 
+ use acp_thread::{AgentTask, AgentTaskId};
+ use agent_client_protocol::schema::v1 as acp;
+-use agent_ui::{TaskActivity, TaskRecord, TasksCard, ThreadTitleChanged};
++use agent_ui::{
++    TaskActivity, TaskLabels, TaskRecord, TasksCard, ThreadTitleChanged, normalize_user_label,
++};
+ use anyhow::Result;
+ use collections::HashMap;
+ use futures::{StreamExt as _, channel::mpsc};
+ use gpui::{
+-    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription, Task,
+-    WeakEntity,
++    App, AppContext as _, BorrowAppContext as _, Context, Entity, EntityId, Global, SharedString,
++    Subscription, Task, WeakEntity,
+ };
+ 
+ use crate::{AgentTaskHistoryDb, HistoryEntry};
+@@ -76,8 +78,15 @@ pub type TaskKey = (acp::SessionId, AgentTaskId);
+ enum HistoryWrite {
+     Started(TaskRecord),
+     Ended(TaskRecord),
+-    Archived { keys: Vec<TaskKey>, archived: bool },
++    Archived {
++        keys: Vec<TaskKey>,
++        archived: bool,
++    },
+     Titled(ThreadTitleChanged),
++    Labeled {
++        key: TaskKey,
++        label: Option<SharedString>,
++    },
+ }
+ 
+ impl HistoryWrite {
+@@ -90,6 +99,7 @@ impl HistoryWrite {
+                 db.update_thread_title(&change.session_id, &change.title)
+                     .await
+             }
++            Self::Labeled { key, label } => db.set_label(key, label.as_deref()).await,
+         };
+         if let Err(error) = result {
+             log::error!(
+@@ -124,6 +134,10 @@ impl HistoryWrite {
+                 format!("the {action} of {tasks}")
+             }
+             Self::Titled(change) => format!("the new title of session {}", change.session_id),
++            Self::Labeled {
++                key: (session_id, task_id),
++                ..
++            } => format!("the label of task {task_id} in session {session_id}"),
+         }
+     }
+ }
+@@ -297,13 +311,48 @@ impl TaskHistoryStore {
+         self.set_archived(keys, true, cx);
+     }
+ 
++    /// Sets the user's label of `key` (R3.2), or clears it when `text` is blank. Memory and the
++    /// `TaskLabels` global change before the write, so a failed write still shows the label
++    /// this session (R3.12). Every window's panel observes this one store (R3.10).
++    pub fn rename(&mut self, key: TaskKey, text: &str, cx: &mut Context<Self>) {
++        let Some(index) = self.position(&key.0, &key.1) else {
++            return;
++        };
++        let label = normalize_user_label(text);
++        self.records[index].label = label.clone();
++        if cx.has_global::<TaskLabels>() {
++            cx.update_global::<TaskLabels, _>(|labels, _| labels.set(key.clone(), label.clone()));
++        }
++        self.queue_write(HistoryWrite::Labeled { key, label });
++        cx.notify();
++    }
++
+     fn finish_loading(
+         &mut self,
+         loaded: Result<Vec<HistoryEntry>, SharedString>,
+         cx: &mut Context<Self>,
+     ) {
+         match loaded {
+-            Ok(records) => self.records = records,
++            Ok(records) => {
++                self.records = records;
++                // The loaded labels are the whole truth after a restart (R3.8): a key the
++                // global held from before is dropped.
++                if cx.has_global::<TaskLabels>() {
++                    let labels = self
++                        .records
++                        .iter()
++                        .filter_map(|entry| {
++                            let label = entry.label.clone()?;
++                            let key = (
++                                entry.record.session_id.clone(),
++                                entry.record.task_id.clone(),
++                            );
++                            Some((key, label))
++                        })
++                        .collect::<Vec<_>>();
++                    cx.update_global::<TaskLabels, _>(|global, _| global.replace_all(labels));
++                }
++            }
+             Err(cause) => {
+                 log::error!("agent task history is unavailable this session: {cause}");
+                 self.availability = Availability::Unavailable(cause);
+@@ -350,6 +399,7 @@ impl TaskHistoryStore {
+         self.insert_entry(HistoryEntry {
+             record: record.clone(),
+             archived: false,
++            label: None,
+         });
+         self.queue_write(HistoryWrite::Started(record));
+     }
+@@ -468,3 +518,7 @@ mod archive;
+ #[cfg(test)]
+ #[path = "store/title_tests.rs"]
+ mod title;
++
++#[cfg(test)]
++#[path = "store/rename_tests.rs"]
++mod rename;
+diff --git a/crates/agent_tasks_panel/src/store/rename_tests.rs b/crates/agent_tasks_panel/src/store/rename_tests.rs
+new file mode 100644
+index 0000000..498f40f
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/store/rename_tests.rs
+@@ -0,0 +1,272 @@
++// Story 022, task 4.2 — `TaskHistoryStore::rename` (R3.2, R3.4, R3.7, R3.8, R3.9, R3.12, Q4).
++// Module path: `store::rename`. Hostile fixtures come before benign ones.
++//
++// Declared in `src/store.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "store/rename_tests.rs"]
++//     mod rename;
++//
++// Contract assumed beyond design.md: `agent_ui::TaskLabels` is re-exported at agent_ui's root.
++// Tests set the global themselves, as `agent_ui::init` does in Zeo (the rig does not run it).
++
++use acp_thread::AgentTaskStatus;
++use agent_ui::TaskLabels;
++use gpui::{AppContext as _, Entity, SharedString, TestAppContext, VisualTestContext};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, HistoryEntry, TaskHistoryStore};
++
++fn ensure_labels(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        if !cx.has_global::<TaskLabels>() {
++            cx.set_global(TaskLabels::default());
++        }
++    });
++}
++
++fn global_label(cx: &mut VisualTestContext, session: &str, task: &str) -> Option<String> {
++    cx.update(|_, cx| {
++        cx.try_global::<TaskLabels>().and_then(|labels| {
++            labels
++                .get(&key(session, task))
++                .map(|label| label.to_string())
++        })
++    })
++}
++
++fn entries(store: &Entity<TaskHistoryStore>, cx: &VisualTestContext) -> Vec<HistoryEntry> {
++    store.read_with(cx, |store, _| store.records().to_vec())
++}
++
++fn label_of(entries: &[HistoryEntry], session: &str, task: &str) -> Option<String> {
++    find(entries, session, task)
++        .unwrap_or_else(|| panic!("({session}, {task}) should be recorded"))
++        .label
++        .as_ref()
++        .map(|label| label.to_string())
++}
++
++async fn seeded_store(
++    name: &'static str,
++    finished: &[(&str, &str)],
++    cx: &mut TestAppContext,
++) -> (AgentTaskHistoryDb, Entity<TaskHistoryStore>, CardRig) {
++    let mut rig = card_rig(cx).await;
++    ensure_labels(&mut rig.cx);
++    let db = AgentTaskHistoryDb::open_test_db(name).await;
++    for (index, (session, task)) in finished.iter().enumerate() {
++        let at = 1_000 + index as i64 * 100;
++        db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++            .await
++            .unwrap();
++        db.update_ended(&record(session, task, AgentTaskStatus::Completed, at))
++            .await
++            .unwrap();
++    }
++    let store = rig.cx.new(|cx| TaskHistoryStore::new(db.clone(), cx));
++    rig.cx.run_until_parked();
++    let card = rig.card.clone();
++    store.update(&mut rig.cx, |store, cx| store.register_card(&card, cx));
++    rig.cx.run_until_parked();
++    (db, store, rig)
++}
++
++fn rename(
++    store: &Entity<TaskHistoryStore>,
++    session: &str,
++    task: &str,
++    text: &str,
++    rig: &mut CardRig,
++) {
++    store.update(&mut rig.cx, |store, cx| {
++        store.rename(key(session, task), text, cx)
++    });
++    rig.cx.run_until_parked();
++}
++
++// Hostile (wrong collapse): memory, database and global label the pair only.
++#[gpui::test]
++async fn store_rename_labels_only_its_own_pair_everywhere(cx: &mut TestAppContext) {
++    let pairs = [
++        ("s1", "t1"),
++        ("s2", "t1"),
++        ("s1", "t2"),
++        ("s10", "t1"),
++        ("s:1", "x"),
++        ("s", "1:x"),
++    ];
++    let (db, store, mut rig) = seeded_store("store_rename_own_pair", &pairs, cx).await;
++
++    rename(&store, "s1", "t1", "Renamed", &mut rig);
++    rename(&store, "s", "1:x", "Third", &mut rig);
++
++    for view in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(label_of(&view, "s1", "t1").as_deref(), Some("Renamed"));
++        assert_eq!(label_of(&view, "s", "1:x").as_deref(), Some("Third"));
++        for (session, task) in [("s2", "t1"), ("s1", "t2"), ("s10", "t1"), ("s:1", "x")] {
++            assert_eq!(label_of(&view, session, task), None, "{session}/{task}");
++        }
++        assert_eq!(
++            find(&view, "s1", "t1").unwrap().record.description.as_ref(),
++            "Task t1",
++            "the description is kept as it was"
++        );
++    }
++    assert_eq!(
++        global_label(&mut rig.cx, "s1", "t1").as_deref(),
++        Some("Renamed")
++    );
++    assert_eq!(global_label(&mut rig.cx, "s2", "t1"), None);
++    assert_eq!(global_label(&mut rig.cx, "s:1", "x"), None);
++}
++
++// R3.4 — the text is collapsed and cut to 60 characters, with no ellipsis.
++#[gpui::test]
++async fn store_rename_collapses_and_keeps_sixty_characters(cx: &mut TestAppContext) {
++    let (db, store, mut rig) =
++        seeded_store("store_rename_sixty", &[("s1", "t1"), ("s1", "t2")], cx).await;
++    rename(&store, "s1", "t1", "  Fix\n the\t build  ", &mut rig);
++    let long = format!("{}{}", "a".repeat(60), "b".repeat(15));
++    rename(&store, "s1", "t2", &long, &mut rig);
++
++    for view in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(
++            label_of(&view, "s1", "t1").as_deref(),
++            Some("Fix the build")
++        );
++        assert_eq!(label_of(&view, "s1", "t2"), Some("a".repeat(60)));
++    }
++    assert_eq!(global_label(&mut rig.cx, "s1", "t2"), Some("a".repeat(60)));
++}
++
++// R3.7 — a blank label removes the user's label everywhere.
++#[gpui::test]
++async fn store_rename_to_blank_removes_the_label(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store("store_rename_blank", &[("s1", "t1")], cx).await;
++    rename(&store, "s1", "t1", "Old", &mut rig);
++    rename(&store, "s1", "t1", "  \n\t ", &mut rig);
++
++    for view in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(label_of(&view, "s1", "t1"), None);
++    }
++    assert_eq!(global_label(&mut rig.cx, "s1", "t1"), None);
++}
++
++// R3.9 — later updates of a renamed task, with a changed description, keep the label.
++#[gpui::test]
++async fn store_rename_survives_later_updates_of_the_task(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store("store_rename_later_updates", &[], cx).await;
++    let card = rig.card.clone();
++    emit(
++        &card,
++        started(&record("s1", "run", AgentTaskStatus::Running, 5_000)),
++        &mut rig.cx,
++    );
++    rename(&store, "s1", "run", "Mine", &mut rig);
++
++    let mut again = record("s1", "run", AgentTaskStatus::Running, 5_000);
++    again.description = "Changed by the agent".into();
++    emit(&card, started(&again), &mut rig.cx);
++    let mut done = record("s1", "run", AgentTaskStatus::Completed, 5_000);
++    done.description = "Changed again".into();
++    emit(&card, ended(&done), &mut rig.cx);
++
++    for view in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(label_of(&view, "s1", "run").as_deref(), Some("Mine"));
++    }
++    assert_eq!(
++        global_label(&mut rig.cx, "s1", "run").as_deref(),
++        Some("Mine")
++    );
++}
++
++// R3.8 — a new store over the same database (a restart) loads every label and publishes them
++// to the global, replacing whatever it held.
++#[gpui::test]
++async fn store_rename_restart_loads_and_publishes_every_label(cx: &mut TestAppContext) {
++    let (db, store, mut rig) =
++        seeded_store("store_rename_restart", &[("s1", "t1"), ("s2", "t1")], cx).await;
++    rename(&store, "s1", "t1", "Before restart", &mut rig);
++
++    rig.cx.update(|_, cx| {
++        let mut stale = TaskLabels::default();
++        stale.set(key("s9", "t9"), Some(SharedString::from("Stale")));
++        cx.set_global(stale);
++    });
++    let restarted = rig.cx.new(|cx| TaskHistoryStore::new(db.clone(), cx));
++    rig.cx.run_until_parked();
++
++    assert_eq!(
++        label_of(&entries(&restarted, &rig.cx), "s1", "t1").as_deref(),
++        Some("Before restart")
++    );
++    assert_eq!(label_of(&entries(&restarted, &rig.cx), "s2", "t1"), None);
++    assert_eq!(
++        global_label(&mut rig.cx, "s1", "t1").as_deref(),
++        Some("Before restart")
++    );
++    assert_eq!(global_label(&mut rig.cx, "s2", "t1"), None);
++    assert_eq!(
++        global_label(&mut rig.cx, "s9", "t9"),
++        None,
++        "the loaded labels replace the global"
++    );
++}
++
++// R3.12, Q4 — a failed write keeps the label for the session and logs both ids.
++#[gpui::test]
++async fn store_rename_write_failure_keeps_the_label_and_logs_ids(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store(
++        "store_rename_write_failure",
++        &[("session-r1", "task-r1")],
++        cx,
++    )
++    .await;
++    drop_history_table(&db).await;
++    capture_logs();
++
++    rename(&store, "session-r1", "task-r1", "Kept", &mut rig);
++
++    assert_eq!(
++        label_of(&entries(&store, &rig.cx), "session-r1", "task-r1").as_deref(),
++        Some("Kept")
++    );
++    assert_eq!(
++        global_label(&mut rig.cx, "session-r1", "task-r1").as_deref(),
++        Some("Kept")
++    );
++    let errors = error_lines();
++    assert!(
++        errors
++            .iter()
++            .any(|line| line.contains("session-r1") && line.contains("task-r1")),
++        "the failed label write is logged with both ids: {errors:?}"
++    );
++}
++
++// A task the history does not hold is not labelled anywhere.
++#[gpui::test]
++async fn store_rename_of_an_unknown_task_changes_nothing(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store("store_rename_unknown", &[("s1", "t1")], cx).await;
++    rename(&store, "nowhere", "t1", "Ghost", &mut rig);
++
++    assert_eq!(entries(&store, &rig.cx).len(), 1);
++    assert_eq!(load(&db).await.len(), 1);
++    assert_eq!(label_of(&entries(&store, &rig.cx), "s1", "t1"), None);
++    assert_eq!(global_label(&mut rig.cx, "nowhere", "t1"), None);
++}
++
++// Without the label global (agent_ui::init not run), rename still labels memory and the row.
++#[gpui::test]
++async fn store_rename_without_the_label_global_still_labels_the_history(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store("store_rename_no_global", &[("s1", "t1")], cx).await;
++    rig.cx.update(|_, cx| {
++        cx.remove_global::<TaskLabels>();
++    });
++    rename(&store, "s1", "t1", "Still mine", &mut rig);
++
++    for view in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(label_of(&view, "s1", "t1").as_deref(), Some("Still mine"));
++    }
++}
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 294cbb9..4208d36 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -25,6 +25,7 @@ mod model_selector;
+ mod model_selector_popover;
+ mod profile_selector;
+ mod set_as_default;
++mod task_label;
+ mod tasks_card;
+ mod terminal_codegen;
+ mod terminal_inline_assistant;
+@@ -78,7 +79,10 @@ pub use crate::agent_panel::{
+ use crate::agent_registry_ui::AgentRegistryPage;
+ pub use crate::inline_assistant::InlineAssistant;
+ pub use crate::message_editor::MessageEditorEvent;
+-pub use crate::tasks_card::{TaskActivity, TaskRecord, TasksCard, ThreadTitleChanged};
++pub use crate::task_label::{
++    TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
++};
++pub use crate::tasks_card::{TaskActivity, TaskKey, TaskRecord, TasksCard, ThreadTitleChanged};
+ pub use crate::thread_metadata_store::ThreadId;
+ pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
+ pub use conversation_view::open_markdown_in_workspace;
+@@ -605,6 +609,9 @@ pub fn init(
+ ) {
+     agent::ThreadStore::init_global(cx);
+     prompt_store::init(cx);
++    if !cx.has_global::<TaskLabels>() {
++        cx.set_global(TaskLabels::default());
++    }
+ 
+     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {
+         let workspaces: Vec<_> = workspace::AppState::global(cx)
+diff --git a/crates/agent_ui/src/task_label.rs b/crates/agent_ui/src/task_label.rs
+new file mode 100644
+index 0000000..f27e064
+--- /dev/null
++++ b/crates/agent_ui/src/task_label.rs
+@@ -0,0 +1,83 @@
++//! What a task's label looks like wherever a row shows it: one line, at most
++//! [`TASK_LABEL_MAX_CHARS`] characters. `Label::truncate` alone does not give that — it stops
++//! soft wrapping, but a `\n` in the text (a Bash heredoc, say) still starts a new line inside a
++//! fixed-height row and draws over the rows below.
++//!
++//! Also the labels the user gave tasks in the Agent Tasks panel, held in a global so the Tasks
++//! card can show them without depending on the panel's crate.
++
++use collections::HashMap;
++use gpui::{Global, SharedString};
++
++use crate::tasks_card::TaskKey;
++
++/// The most characters a task label shows, and the most a renamed label keeps.
++pub const TASK_LABEL_MAX_CHARS: usize = 60;
++
++/// `text` with every run of whitespace — line breaks and tabs included — collapsed to one
++/// space and trimmed, never cut: the tooltip's text and the rename editor's starting text.
++pub fn collapse_label(text: &str) -> SharedString {
++    text.split_whitespace().collect::<Vec<_>>().join(" ").into()
++}
++
++/// The one line a row shows for `text`: collapsed, then, only when longer than
++/// [`TASK_LABEL_MAX_CHARS`], cut to 59 characters followed by `…`.
++pub fn display_label(text: &str) -> SharedString {
++    let collapsed = collapse_label(text);
++    if collapsed.chars().count() <= TASK_LABEL_MAX_CHARS {
++        return collapsed;
++    }
++    // `truncate_and_trailoff` keeps its count of characters and then appends the `…`.
++    util::truncate_and_trailoff(&collapsed, TASK_LABEL_MAX_CHARS - 1).into()
++}
++
++/// What Rename stores for `text`: collapsed and cut to [`TASK_LABEL_MAX_CHARS`] characters with
++/// no ellipsis, or `None` when nothing but whitespace was typed — the agent's description then
++/// shows again.
++pub fn normalize_user_label(text: &str) -> Option<SharedString> {
++    let collapsed = collapse_label(text);
++    if collapsed.is_empty() {
++        return None;
++    }
++    Some(
++        collapsed
++            .chars()
++            .take(TASK_LABEL_MAX_CHARS)
++            .collect::<String>()
++            .into(),
++    )
++}
++
++/// The labels the user gave tasks, keyed by the `(session, task)` pair: the Agent Tasks panel
++/// writes them, the Tasks card shows them in place of the agent's description.
++#[derive(Default)]
++pub struct TaskLabels(HashMap<TaskKey, SharedString>);
++
++impl Global for TaskLabels {}
++
++impl TaskLabels {
++    pub fn get(&self, key: &TaskKey) -> Option<&SharedString> {
++        self.0.get(key)
++    }
++
++    /// Sets `key`'s label; `None` removes it.
++    pub fn set(&mut self, key: TaskKey, label: Option<SharedString>) {
++        match label {
++            Some(label) => {
++                self.0.insert(key, label);
++            }
++            None => {
++                self.0.remove(&key);
++            }
++        }
++    }
++
++    /// Replaces every label with `labels`: what the history holds once it has loaded.
++    pub fn replace_all(&mut self, labels: impl IntoIterator<Item = (TaskKey, SharedString)>) {
++        self.0 = labels.into_iter().collect();
++    }
++}
++
++#[cfg(test)]
++#[path = "task_label/task_label_tests.rs"]
++mod tests;
+diff --git a/crates/agent_ui/src/task_label/task_label_tests.rs b/crates/agent_ui/src/task_label/task_label_tests.rs
+new file mode 100644
+index 0000000..d9aef1e
+--- /dev/null
++++ b/crates/agent_ui/src/task_label/task_label_tests.rs
+@@ -0,0 +1,239 @@
++// Story 022, task 2.1 — one display line, the stored user label, and the label global
++// (R1.3, R1.4, R3.4, R3.7, R5.2). Module path: `task_label::tests`.
++//
++// Declared in `src/task_label.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "task_label/task_label_tests.rs"]
++//     mod tests;
++//
++// Hostile fixtures come before benign ones.
++
++use acp_thread::AgentTaskId;
++use agent_client_protocol::schema::v1 as acp;
++use gpui::SharedString;
++
++use crate::task_label::{
++    TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
++};
++
++const HEREDOC: &str = "cat > f <<'EOF'\n{\"a\": 1}\nEOF";
++
++fn key(session: &str, task: &str) -> (acp::SessionId, AgentTaskId) {
++    (
++        acp::SessionId::new(session.to_string()),
++        AgentTaskId::from(task.to_string()),
++    )
++}
++
++fn chars(text: &str) -> usize {
++    text.chars().count()
++}
++
++#[test]
++fn task_label_limit_is_sixty_characters() {
++    assert_eq!(TASK_LABEL_MAX_CHARS, 60);
++}
++
++// ── display_label: one line (R1.3) ─────────────────────────────────────────
++
++// The bug's fixture: a heredoc command.
++#[test]
++fn task_label_display_collapses_a_multi_line_heredoc_to_one_line() {
++    let shown = display_label(HEREDOC);
++    assert_eq!(shown.as_ref(), "cat > f <<'EOF' {\"a\": 1} EOF");
++    assert!(!shown.contains('\n'));
++}
++
++// Hostile: every kind of line break or tab a text system may honour, and runs of them.
++#[test]
++fn task_label_display_collapses_every_whitespace_run_to_one_space() {
++    for (input, expected) in [
++        ("a\r\nb", "a b"),
++        ("a\tb", "a b"),
++        ("a \t\n\r  b", "a b"),
++        ("a\u{0B}b\u{0C}c", "a b c"),
++        ("a\u{85}b\u{2028}c\u{2029}d", "a b c d"),
++        ("\n\n  leading and trailing \t\n", "leading and trailing"),
++    ] {
++        let shown = display_label(input);
++        assert_eq!(shown.as_ref(), expected, "input {input:?}");
++        assert!(
++            !shown.chars().any(|c| c.is_whitespace() && c != ' '),
++            "only plain spaces remain for {input:?}: {shown:?}"
++        );
++    }
++}
++
++// ── display_label: 60 characters (R1.4, R5.2) ──────────────────────────────
++
++// Hostile boundary: exactly 60 characters is NOT longer than 60, so it is not cut.
++#[test]
++fn task_label_display_keeps_exactly_sixty_characters_uncut() {
++    let sixty = "a".repeat(60);
++    assert_eq!(display_label(&sixty).as_ref(), sixty);
++}
++
++// Hostile: the length is counted after collapsing, so whitespace runs never cause a cut.
++#[test]
++fn task_label_display_counts_characters_after_collapsing() {
++    let text = format!("{}\n\n\n\n\t{}", "a".repeat(40), "b".repeat(19));
++    let shown = display_label(&text);
++    assert_eq!(chars(&shown), 60);
++    assert!(
++        !shown.ends_with('…'),
++        "60 collapsed characters are not cut: {shown:?}"
++    );
++}
++
++#[test]
++fn task_label_display_cuts_sixty_one_characters_to_fifty_nine_and_an_ellipsis() {
++    let long = "a".repeat(61);
++    let shown = display_label(&long);
++    assert_eq!(chars(&shown), 60);
++    assert_eq!(shown.as_ref(), format!("{}…", "a".repeat(59)));
++}
++
++// Hostile: multi-byte characters are counted as characters, never split.
++#[test]
++fn task_label_display_counts_multi_byte_characters_and_never_splits_one() {
++    for unit in ["é", "日", "🦀"] {
++        let long = unit.repeat(80);
++        let shown = display_label(&long);
++        assert_eq!(chars(&shown), 60, "{unit}");
++        assert_eq!(shown.as_ref(), format!("{}…", unit.repeat(59)), "{unit}");
++
++        let sixty = unit.repeat(60);
++        assert_eq!(
++            display_label(&sixty).as_ref(),
++            sixty,
++            "{unit}: 60 characters stay"
++        );
++    }
++}
++
++#[test]
++fn task_label_display_cuts_a_long_multi_line_label_after_collapsing() {
++    let text = format!("{}\n{}", "x".repeat(50), "y".repeat(50));
++    let shown = display_label(&text);
++    assert_eq!(
++        shown.as_ref(),
++        format!("{} {}…", "x".repeat(50), "y".repeat(8))
++    );
++}
++
++// R5.2: a one-line label of at most 60 characters is displayed exactly as before.
++#[test]
++fn task_label_display_keeps_a_short_one_line_label_byte_identical() {
++    for label in ["Run the linter", "Task t1", "Explore the task feed", ""] {
++        assert_eq!(display_label(label).as_ref(), label);
++    }
++}
++
++// ── normalize_user_label: what Rename stores (R3.4, R3.7) ──────────────────
++
++// Hostile: blank input is no label at all, whatever the whitespace.
++#[test]
++fn task_label_normalize_returns_none_for_empty_or_whitespace_only_text() {
++    for blank in ["", " ", "\n", " \t\r\n  ", "\u{2028}"] {
++        assert_eq!(normalize_user_label(blank), None, "{blank:?}");
++    }
++}
++
++#[test]
++fn task_label_normalize_keeps_the_first_sixty_characters_without_an_ellipsis() {
++    let long = format!("{}{}", "a".repeat(60), "b".repeat(15));
++    let stored = normalize_user_label(&long).expect("a long label is kept");
++    assert_eq!(stored.as_ref(), "a".repeat(60));
++    assert!(!stored.contains('…'));
++
++    let wide = "日".repeat(75);
++    assert_eq!(
++        normalize_user_label(&wide).expect("kept").as_ref(),
++        "日".repeat(60)
++    );
++}
++
++#[test]
++fn task_label_normalize_collapses_and_trims() {
++    assert_eq!(
++        normalize_user_label("  Fix\n the\t  build  ").map(|l| l.to_string()),
++        Some("Fix the build".to_string())
++    );
++    assert_eq!(
++        normalize_user_label("Run the tests").map(|l| l.to_string()),
++        Some("Run the tests".to_string())
++    );
++}
++
++// ── TaskLabels: keyed by the (session, task) pair (R3.3) ───────────────────
++
++// Hostile (wrong collapse): the same task id in another session, another task id in the same
++// session, and pairs whose parts concatenate alike are different tasks.
++#[test]
++fn task_label_labels_keep_every_other_pair_apart() {
++    let mut labels = TaskLabels::default();
++    labels.set(key("s1", "t1"), Some(SharedString::from("Renamed")));
++    labels.set(key("s:1", "x"), Some(SharedString::from("Colon")));
++
++    assert_eq!(labels.get(&key("s2", "t1")), None);
++    assert_eq!(labels.get(&key("s1", "t2")), None);
++    assert_eq!(labels.get(&key("s1t", "1")), None);
++    assert_eq!(labels.get(&key("s", "1:x")), None);
++    assert_eq!(
++        labels.get(&key("s:1", "x")).map(|l| l.as_ref()),
++        Some("Colon")
++    );
++}
++
++// Hostile (wrong split): a key built from fresh strings finds the label set under equal parts.
++#[test]
++fn task_label_labels_find_a_label_through_an_equal_key_built_separately() {
++    let mut labels = TaskLabels::default();
++    labels.set(key("s1", "t1"), Some(SharedString::from("Renamed")));
++    let session = String::from("s") + "1";
++    let task = String::from("t") + "1";
++    assert_eq!(
++        labels.get(&key(&session, &task)).map(|l| l.as_ref()),
++        Some("Renamed")
++    );
++}
++
++#[test]
++fn task_label_labels_set_none_removes_and_replace_all_replaces() {
++    let mut labels = TaskLabels::default();
++    labels.set(key("s1", "t1"), Some(SharedString::from("First")));
++    labels.set(key("s1", "t1"), Some(SharedString::from("Second")));
++    assert_eq!(
++        labels.get(&key("s1", "t1")).map(|l| l.as_ref()),
++        Some("Second")
++    );
++    labels.set(key("s1", "t1"), None);
++    assert_eq!(labels.get(&key("s1", "t1")), None);
++
++    labels.set(key("stale", "t"), Some(SharedString::from("Stale")));
++    labels.replace_all([(key("s2", "t2"), SharedString::from("Loaded"))]);
++    assert_eq!(
++        labels.get(&key("stale", "t")),
++        None,
++        "replace_all drops what it does not list"
++    );
++    assert_eq!(
++        labels.get(&key("s2", "t2")).map(|l| l.as_ref()),
++        Some("Loaded")
++    );
++}
++
++// ── collapse_label: the full text, on one line, never cut (R1.5, R3.1) ─────
++
++// Hostile: a long multi-line text keeps every character, so the tooltip and the rename editor
++// never lose what `display_label` cuts.
++#[test]
++fn task_label_collapse_keeps_every_character_of_a_long_heredoc_on_one_line() {
++    let body = "x".repeat(200);
++    let text = format!("cat > f <<'EOF'\n{body}\n  EOF\n");
++    let collapsed = collapse_label(&text);
++    assert_eq!(collapsed.as_ref(), format!("cat > f <<'EOF' {body} EOF"));
++    assert!(!collapsed.contains('\n'));
++    assert!(!collapsed.contains('…'));
++}
+diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
+index 2f699cd..f3a3b11 100644
+--- a/crates/agent_ui/src/tasks_card.rs
++++ b/crates/agent_ui/src/tasks_card.rs
+@@ -30,6 +30,7 @@ use ui::{ButtonLike, Chip, CommonAnimationExt as _, Tooltip, prelude::*};
+ 
+ use crate::DEFAULT_THREAD_TITLE;
+ use crate::conversation_view::ConversationView;
++use crate::task_label::{TaskLabels, collapse_label, display_label};
+ 
+ mod tray;
+ 
+@@ -88,6 +89,19 @@ mod activity;
+ #[path = "tasks_card/title_tests.rs"]
+ mod title;
+ 
++#[cfg(test)]
++#[path = "tasks_card/label_tests.rs"]
++mod label;
++
++// GPUI's test windows never activate their accessibility tree (the test platform's
++// `a11y_init` drops the activation callback), so `debug_a11y_tree_json` has nothing to
++// show; tests read the row controls' screen-reader labels of the last render from here.
++#[cfg(test)]
++thread_local! {
++    pub(crate) static RENDERED_ARIA_LABELS: std::cell::RefCell<Vec<SharedString>> =
++        std::cell::RefCell::default();
++}
++
+ /// How long an ended task's final status stays on the card (R1.6).
+ pub(crate) const ENDED_ROW_TTL: Duration = Duration::from_secs(10);
+ 
+@@ -96,7 +110,7 @@ const ELAPSED_TICK: Duration = Duration::from_secs(1);
+ 
+ /// A task is named by its thread and its id: two threads may run tasks with the
+ /// same id, and the adapter only promises uniqueness within a session.
+-pub(crate) type TaskKey = (acp::SessionId, AgentTaskId);
++pub type TaskKey = (acp::SessionId, AgentTaskId);
+ 
+ /// Whether the thread of a session is in front of the user right now. The panel
+ /// that hosts the card answers it; see `TasksCard::with_in_view_query`.
+@@ -244,6 +258,8 @@ pub struct TasksCard {
+     _tick: Option<Task<()>>,
+     /// Re-evaluates the tick when the card is enabled or disabled in settings.
+     _settings_observation: Subscription,
++    /// Repaints the rows when the user renames a task in the Agent Tasks panel (R3.3).
++    _labels_observation: Subscription,
+     minimize_focus_handle: FocusHandle,
+     pill_focus_handle: FocusHandle,
+     /// One per control of each row on show, kept across renders so keyboard focus
+@@ -319,6 +335,7 @@ impl TasksCard {
+             _tick: None,
+             _settings_observation: cx
+                 .observe_global::<SettingsStore>(|card, cx| card.update_tick(cx)),
++            _labels_observation: cx.observe_global::<TaskLabels>(|_, cx| cx.notify()),
+             minimize_focus_handle: control_focus_handle(cx),
+             pill_focus_handle: control_focus_handle(cx),
+             row_focus_handles: HashMap::default(),
+@@ -1236,6 +1253,8 @@ impl TasksCard {
+ 
+ impl Render for TasksCard {
+     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        #[cfg(test)]
++        RENDERED_ARIA_LABELS.with_borrow_mut(Vec::clear);
+         let groups = self.rows(cx);
+         self.forget_focus_of_rows_gone(&groups);
+         // `AgentPanel` only hosts the card while it is visible; this keeps a stray
+@@ -1445,6 +1464,13 @@ impl TasksCard {
+         let task_id = task.id.clone();
+         let key: TaskKey = (session_id.clone(), task_id.clone());
+         let element_key = format!("{}-{}", session_id.0, task_id);
++        // `try_global`: the global is absent wherever `agent_ui::init` did not run.
++        let user_label = cx
++            .try_global::<TaskLabels>()
++            .and_then(|labels| labels.get(&key))
++            .cloned();
++        let full_label = collapse_label(user_label.as_ref().unwrap_or(&task.description));
++        let shown_label = display_label(&full_label);
+ 
+         let (chip_label, chip_tooltip) = if task.background {
+             ("Background", "Running in the Background")
+@@ -1498,7 +1524,7 @@ impl TasksCard {
+         .icon_color(Color::Muted)
+         .selected_icon(IconName::EyeOff)
+         .toggle_state(watched)
+-        .aria_label(format!("{watch_aria}: {}", task.description))
++        .aria_label(row_aria_label(format!("{watch_aria}: {shown_label}")))
+         .tooltip(card_tooltip(
+             format!("watch-{task_id}").into(),
+             watch_tooltip.into(),
+@@ -1525,7 +1551,7 @@ impl TasksCard {
+             )
+             .icon_size(IconSize::Small)
+             .icon_color(Color::Muted)
+-            .aria_label(format!("Stop: {}", task.description))
++            .aria_label(row_aria_label(format!("Stop: {shown_label}")))
+             .tooltip(card_tooltip(
+                 format!("stop-{task_id}").into(),
+                 "Stop This Task".into(),
+@@ -1554,7 +1580,7 @@ impl TasksCard {
+         )
+         .icon_size(IconSize::Small)
+         .icon_color(Color::Muted)
+-        .aria_label(format!("Open in thread: {}", task.description))
++        .aria_label(row_aria_label(format!("Open in thread: {shown_label}")))
+         .tooltip(card_tooltip(
+             format!("open-{task_id}").into(),
+             "Open Thread at This Task".into(),
+@@ -1584,7 +1610,7 @@ impl TasksCard {
+             )
+             .icon_size(IconSize::Small)
+             .icon_color(Color::Muted)
+-            .aria_label(format!("Send to background: {}", task.description))
++            .aria_label(row_aria_label(format!("Send to background: {shown_label}")))
+             .tooltip(card_tooltip(
+                 format!("background-{task_id}").into(),
+                 "Send to Background".into(),
+@@ -1615,11 +1641,25 @@ impl TasksCard {
+                     .color(Color::Muted),
+             )
+             .child(
+-                div().flex_1().min_w_0().child(
+-                    Label::new(task.description.clone())
+-                        .size(LabelSize::Small)
+-                        .truncate(),
+-                ),
++                // `truncate` alone stops soft wrapping but still breaks at a `\n`, so the
++                // text is cut to one line first (R1.2); the tooltip holds the whole of it.
++                div()
++                    .id(SharedString::from(format!(
++                        "tasks-card-label-{element_key}"
++                    )))
++                    .debug_selector({
++                        let task_id = task_id.clone();
++                        move || format!("tasks-card-label-{task_id}")
++                    })
++                    .flex_1()
++                    .min_w_0()
++                    .tooltip(card_tooltip(format!("label-{task_id}").into(), full_label))
++                    .child(
++                        Label::new(shown_label)
++                            .size(LabelSize::Small)
++                            .single_line()
++                            .truncate(),
++                    ),
+             )
+             .child(
+                 // Not a control — it does nothing when clicked — so it takes no focus;
+@@ -1705,6 +1745,14 @@ fn control_focus_handle(cx: &mut App) -> FocusHandle {
+     cx.focus_handle().tab_stop(true).tab_index(0)
+ }
+ 
++/// A row control's screen-reader label, recorded in test builds (see `RENDERED_ARIA_LABELS`).
++fn row_aria_label(text: String) -> SharedString {
++    let label = SharedString::from(text);
++    #[cfg(test)]
++    RENDERED_ARIA_LABELS.with_borrow_mut(|labels| labels.push(label.clone()));
++    label
++}
++
+ /// A text tooltip like `Tooltip::text`, whose text carries the debug selector
+ /// `tasks-card-tooltip-{name}`, so tests can tell which control raised it (Q14).
+ fn card_tooltip(
+diff --git a/crates/agent_ui/src/tasks_card/label_tests.rs b/crates/agent_ui/src/tasks_card/label_tests.rs
+new file mode 100644
+index 0000000..33a3f21
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/label_tests.rs
+@@ -0,0 +1,355 @@
++// Story 022, task 3.1 — card rows draw their label on one line, show the full text in a
++// tooltip, use the displayed label for screen readers, and show the user's label
++// (R1.2, R1.5, R1.6, R3.3, R5.2). Module path: `tasks_card::label`.
++//
++// Declared in `src/tasks_card.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "tasks_card/label_tests.rs"]
++//     mod label;
++//
++// Contract assumed beyond design.md (adjust HERE when the implementation drifts):
++//   - the row's label sits in an element with debug selector `tasks-card-label-{task_id}`, whose
++//     tooltip is `card_tooltip("label-{task_id}", full)` (selector `tasks-card-tooltip-label-{task_id}`);
++//   - `crate::task_label::TaskLabels` (`default`, `set`), read by the card with `try_global`;
++//   - screen-reader labels are read from `Window::debug_a11y_tree_json()`.
++
++use std::time::Duration;
++
++use acp_thread::AgentTaskId;
++use gpui::{
++    BorrowAppContext as _, Modifiers, Pixels, Point, SharedString, TestAppContext,
++    VisualTestContext, px,
++};
++use serde_json::json;
++
++use super::test_helpers::*;
++use crate::task_label::TaskLabels;
++
++const HEREDOC: &str = "cat > f <<'EOF'\n{\"a\": 1}\nEOF";
++const HEREDOC_SHOWN: &str = "cat > f <<'EOF' {\"a\": 1} EOF";
++
++fn described(id: &str, description: &str, started_at_ms: u64) -> serde_json::Value {
++    let mut task = wire_task(id, "running", true, started_at_ms);
++    task["description"] = json!(description);
++    task
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn height(selector: &'static str, cx: &mut VisualTestContext) -> Pixels {
++    cx.debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"))
++        .size
++        .height
++}
++
++fn tooltip_shows(
++    selector: &'static str,
++    tooltip: &'static str,
++    cx: &mut VisualTestContext,
++) -> bool {
++    cx.simulate_mouse_move(Point::new(px(1.), px(1.)), None, Modifiers::none());
++    advance(cx, Duration::from_millis(100));
++    draw(cx);
++    let bounds = cx
++        .debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"));
++    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
++    advance(cx, Duration::from_secs(1));
++    draw(cx);
++    cx.debug_bounds(tooltip).is_some()
++}
++
++/// Every string of the window's accessibility tree (labels among them). GPUI's test windows
++/// never activate that tree, so without one this reads the screen-reader labels the card's row
++/// controls were given on the last render.
++fn a11y_strings(cx: &mut VisualTestContext) -> Vec<String> {
++    draw(cx);
++    let Some(json) = cx.update(|window, _| window.debug_a11y_tree_json()) else {
++        return super::RENDERED_ARIA_LABELS
++            .with_borrow(|labels| labels.iter().map(ToString::to_string).collect());
++    };
++    let value: serde_json::Value = serde_json::from_str(&json).expect("the tree is JSON");
++    let mut strings = Vec::new();
++    collect_strings(&value, &mut strings);
++    strings
++}
++
++fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
++    match value {
++        serde_json::Value::String(text) => out.push(text.clone()),
++        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
++        serde_json::Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
++        _ => {}
++    }
++}
++
++fn count(strings: &[String], label: &str) -> usize {
++    strings.iter().filter(|text| text.as_str() == label).count()
++}
++
++fn set_label(
++    key: (agent_client_protocol::schema::v1::SessionId, AgentTaskId),
++    label: Option<&str>,
++    cx: &mut VisualTestContext,
++) {
++    cx.update(|_, cx| {
++        if !cx.has_global::<TaskLabels>() {
++            cx.set_global(TaskLabels::default());
++        }
++        cx.update_global::<TaskLabels, _>(|labels, _| {
++            labels.set(
++                key,
++                label.map(|label| SharedString::from(label.to_string())),
++            )
++        });
++    });
++    cx.run_until_parked();
++}
++
++// R1.2 — the bug: a heredoc description drew three lines over the rows below. Hostile third:
++// a long one-line description must not soft-wrap either.
++#[gpui::test]
++async fn test_label_multi_line_description_paints_a_one_line_row(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            described("multi", HEREDOC, 1_000),
++            described("single", "Write the fixture", 2_000),
++            described("long", &"word ".repeat(40), 3_000),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let single = height("tasks-card-row-single", &mut cx);
++    assert_eq!(
++        height("tasks-card-row-multi", &mut cx),
++        single,
++        "a multi-line label is one line"
++    );
++    assert_eq!(
++        height("tasks-card-row-long", &mut cx),
++        single,
++        "a long label does not wrap"
++    );
++    let single_label = height("tasks-card-label-single", &mut cx);
++    assert_eq!(height("tasks-card-label-multi", &mut cx), single_label);
++    assert_eq!(height("tasks-card-label-long", &mut cx), single_label);
++}
++
++// R1.5 — the pointer on the label shows the full text in a tooltip.
++#[gpui::test]
++async fn test_label_tooltip_shows_on_the_row_label(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            described("multi", HEREDOC, 1_000),
++            described("long", &"word ".repeat(40), 2_000),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++    assert!(tooltip_shows(
++        "tasks-card-label-multi",
++        "tasks-card-tooltip-label-multi",
++        &mut cx
++    ));
++    assert!(tooltip_shows(
++        "tasks-card-label-long",
++        "tasks-card-tooltip-label-long",
++        &mut cx
++    ));
++}
++
++// R1.6 — every control's screen-reader label names the task by its displayed label.
++#[gpui::test]
++async fn test_label_screen_reader_labels_use_the_displayed_label(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let long = format!("{} {}", "a".repeat(30), "b".repeat(40));
++    let long_shown = format!("{}…", long.chars().take(59).collect::<String>());
++    send_tasks(
++        &a,
++        vec![
++            described("multi", HEREDOC, 1_000),
++            described("long", &long, 2_000),
++        ],
++        &mut cx,
++    );
++    let strings = a11y_strings(&mut cx);
++
++    for prefix in ["Watch", "Open in thread", "Stop"] {
++        assert_eq!(
++            count(&strings, &format!("{prefix}: {HEREDOC_SHOWN}")),
++            1,
++            "{prefix}"
++        );
++        assert_eq!(
++            count(&strings, &format!("{prefix}: {long_shown}")),
++            1,
++            "{prefix}"
++        );
++    }
++    assert!(
++        !strings
++            .iter()
++            .any(|text| text.starts_with("Watch:") && text.contains('\n')),
++        "no screen-reader label carries a line break"
++    );
++    assert!(!strings.iter().any(|text| *text == format!("Watch: {long}")));
++}
++
++// R5.2 — a one-line label of at most 60 characters reads exactly as before.
++#[gpui::test]
++async fn test_label_short_one_line_label_is_unchanged(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![described("t1", "Run the linter", 1_000)], &mut cx);
++    let strings = a11y_strings(&mut cx);
++    assert_eq!(count(&strings, "Watch: Run the linter"), 1);
++    assert!(
++        !strings
++            .iter()
++            .any(|text| text.starts_with("Watch:") && text.contains('…'))
++    );
++}
++
++// R3.3 — a user label replaces the description in the open card, at once, and only on its own
++// task. Hostile: thread B holds the same task id.
++#[gpui::test]
++async fn test_label_user_label_replaces_the_description_of_its_task_only(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    let b = open_titled_thread(&panel, &connection, "B", &mut cx);
++    send_tasks(&b, vec![wire_task("t1", "running", true, 2_000)], &mut cx);
++    let session_a = session_of(&a, &cx);
++    assert_ne!(session_a, session_of(&b, &cx));
++    assert_eq!(count(&a11y_strings(&mut cx), "Watch: Task t1"), 2);
++
++    set_label(
++        (session_a.clone(), AgentTaskId::from("t1")),
++        Some("Renamed by the user"),
++        &mut cx,
++    );
++    let strings = a11y_strings(&mut cx);
++    assert_eq!(
++        count(&strings, "Watch: Renamed by the user"),
++        1,
++        "A's row, repainted without a new snapshot"
++    );
++    assert_eq!(
++        count(&strings, "Watch: Task t1"),
++        1,
++        "B's row keeps its description"
++    );
++
++    set_label((session_a, AgentTaskId::from("t1")), None, &mut cx);
++    let strings = a11y_strings(&mut cx);
++    assert_eq!(count(&strings, "Watch: Renamed by the user"), 0);
++    assert_eq!(
++        count(&strings, "Watch: Task t1"),
++        2,
++        "a removed label shows the description again"
++    );
++}
++
++// Gotcha: the card must paint where `agent_ui::init` did not set the label global.
++#[gpui::test]
++async fn test_label_card_paints_without_the_label_global(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    cx.update(|_, cx| {
++        if cx.has_global::<TaskLabels>() {
++            cx.remove_global::<TaskLabels>();
++        }
++    });
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![wire_task("t1", "running", true, 1_000)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-row-t1").is_some());
++    assert_eq!(count(&a11y_strings(&mut cx), "Watch: Task t1"), 1);
++}
++
++// R1.6 — Send to background names the task by its displayed label too.
++#[gpui::test]
++async fn test_label_send_to_background_aria_label_uses_the_displayed_label(
++    cx: &mut TestAppContext,
++) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let mut foreground = described("multi", HEREDOC, 1_000);
++    foreground["background"] = json!(false);
++    send_tasks(&a, vec![foreground], &mut cx);
++    let strings = a11y_strings(&mut cx);
++    assert_eq!(
++        count(&strings, &format!("Send to background: {HEREDOC_SHOWN}")),
++        1
++    );
++    assert!(
++        !strings
++            .iter()
++            .any(|text| text.starts_with("Send to background:") && text.contains('\n'))
++    );
++}
++
++// R1.5 — the tooltip holds the whole label, not the cut one the row shows. Measured against a row
++// whose description *is* the long row's displayed text: were the tooltip cut too, the two would
++// be the same size.
++#[gpui::test]
++async fn test_label_tooltip_text_is_the_untruncated_label(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let long = "word ".repeat(40);
++    let shown = format!("{}…", long.trim_end().chars().take(59).collect::<String>());
++    send_tasks(
++        &a,
++        vec![
++            described("long", &long, 1_000),
++            described("cut", &shown, 2_000),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    assert!(tooltip_shows(
++        "tasks-card-label-cut",
++        "tasks-card-tooltip-label-cut",
++        &mut cx
++    ));
++    let cut = cx
++        .debug_bounds("tasks-card-tooltip-label-cut")
++        .expect("the cut row's tooltip")
++        .size;
++    assert!(tooltip_shows(
++        "tasks-card-label-long",
++        "tasks-card-tooltip-label-long",
++        &mut cx
++    ));
++    let full = cx
++        .debug_bounds("tasks-card-tooltip-label-long")
++        .expect("the long row's tooltip")
++        .size;
++    assert!(
++        full.height > cut.height || full.width > cut.width,
++        "the tooltip shows all {} characters, not the {} the row shows: {full:?} vs {cut:?}",
++        long.trim_end().chars().count(),
++        shown.chars().count()
++    );
++}
