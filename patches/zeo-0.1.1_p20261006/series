@@ -246,6 +246,14 @@
 # migration. After 0041, whose panel and history it changes, so it rides this
 # flag BY DEPENDENCY (story 025).
 0042-agent-tasks-panel-delete-archived.patch
+# 0043: while the agent waits on an answer to its question (0027's card,
+# 0030's pending state), Enter and the send chords do nothing in the
+# composer -- no send, no newline -- under the new question_pending key
+# context, bound to the no-op agent::IgnoreSendWhileQuestionPending rather
+# than null, which would let Enter through as a newline. The Send button
+# still sends, BY CHOICE of the operator (story 017). Generic ACP, so it
+# rides this flag BY CHOICE, like 0027 and 0030.
+0043-question-card-swallows-enter.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
