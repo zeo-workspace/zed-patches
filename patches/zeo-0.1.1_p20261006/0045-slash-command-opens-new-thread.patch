@@ -53,15 +53,15 @@ Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
 0014 and 0026, and needs no adapter feature.
 ---
  crates/agent_ui/src/agent_panel.rs            |  72 ++++
- .../tests/prefilled_prompt_tests.rs           | 284 ++++++++++++++
+ .../tests/prefilled_prompt_tests.rs           | 305 +++++++++++++++
  .../tests/slash_command_button_tests.rs       | 180 +++++++++
  .../tests/slash_command_contract_tests.rs     |  66 ++++
  crates/agent_ui/src/agent_ui.rs               |  17 +
- .../src/conversation_view/thread_view.rs      |  74 +++-
+ .../src/conversation_view/thread_view.rs      |  75 +++-
  .../src/slash_command_in_code_block_tests.rs  | 143 +++++++
  .../markdown/src/code_block_action_tests.rs   | 368 ++++++++++++++++++
  crates/markdown/src/markdown.rs               |  58 +++
- 9 files changed, 1252 insertions(+), 10 deletions(-)
+ 9 files changed, 1274 insertions(+), 10 deletions(-)
  create mode 100644 crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs
  create mode 100644 crates/agent_ui/src/agent_panel/tests/slash_command_button_tests.rs
  create mode 100644 crates/agent_ui/src/agent_panel/tests/slash_command_contract_tests.rs
@@ -69,7 +69,7 @@ Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
  create mode 100644 crates/markdown/src/code_block_action_tests.rs
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 56c43a0..50c1448 100644
+index 56c43a0..88a7c22 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -2119,6 +2119,72 @@ impl AgentPanel {
@@ -78,17 +78,17 @@ index 56c43a0..50c1448 100644
  
 +    /// Opens a new thread for `agent` with `text` in its composer -- never sent:
 +    /// the operator reviews it and sends it. An agent that is no longer
-+    /// configured opens nothing and says so.
++    /// configured opens nothing and says so. `source_session` is the session whose
++    /// message offered the command -- a subagent's, when the click came from one,
++    /// which the panel's active thread (always the root) would misreport.
 +    pub fn new_thread_with_prefilled_prompt(
 +        &mut self,
 +        agent: Agent,
++        source_session: acp::SessionId,
 +        text: String,
 +        window: &mut Window,
 +        cx: &mut Context<Self>,
 +    ) {
-+        let source_session = self
-+            .active_agent_thread(cx)
-+            .map(|thread| thread.read(cx).session_id().to_string());
 +        let agent_id = agent.id();
 +        let is_available = match &agent {
 +            Agent::Custom { id } => self
@@ -102,7 +102,7 @@ index 56c43a0..50c1448 100644
 +        };
 +        if !is_available {
 +            log::warn!(
-+                "prefilled thread not opened: agent {agent_id} is not available (source session {source_session:?})"
++                "prefilled thread not opened: agent {agent_id} is not available (source session {source_session})"
 +            );
 +            struct PrefilledAgentUnavailableToast;
 +            self.workspace
@@ -123,7 +123,7 @@ index 56c43a0..50c1448 100644
 +            return;
 +        }
 +        log::info!(
-+            "opening a prefilled thread: agent {agent_id}, source session {source_session:?}, command length {}",
++            "opening a prefilled thread: agent {agent_id}, source session {source_session}, command length {}",
 +            text.len()
 +        );
 +        self.external_thread(
@@ -160,10 +160,10 @@ index 56c43a0..50c1448 100644
      use crate::test_support::{
 diff --git a/crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs b/crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs
 new file mode 100644
-index 0000000..b9b37c4
+index 0000000..5a85d06
 --- /dev/null
 +++ b/crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,305 @@
 +//! `AgentPanel::new_thread_with_prefilled_prompt` (story 020, Task 4.1; R2.1-R2.5, Q4).
 +//!
 +//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
@@ -348,8 +348,15 @@ index 0000000..b9b37c4
 +    );
 +    let toasts = notification_count(&workspace, &cx);
 +
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
 +    panel.update_in(&mut cx, |panel, window, cx| {
-+        panel.new_thread_with_prefilled_prompt(Agent::Stub, COMMAND.to_string(), window, cx);
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session.clone(),
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
 +    });
 +    settle(&mut cx);
 +
@@ -386,8 +393,15 @@ index 0000000..b9b37c4
 +    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
 +    let text = "/review  @src/main.rs /tmp/x";
 +
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
 +    panel.update_in(&mut cx, |panel, window, cx| {
-+        panel.new_thread_with_prefilled_prompt(Agent::Stub, text.to_string(), window, cx);
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session.clone(),
++            text.to_string(),
++            window,
++            cx,
++        );
 +    });
 +    settle(&mut cx);
 +
@@ -412,8 +426,15 @@ index 0000000..b9b37c4
 +    let retired = Agent::Custom {
 +        id: "retired-agent".into(),
 +    };
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
 +    panel.update_in(&mut cx, |panel, window, cx| {
-+        panel.new_thread_with_prefilled_prompt(retired, COMMAND.to_string(), window, cx);
++        panel.new_thread_with_prefilled_prompt(
++            retired,
++            source_session.clone(),
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
 +    });
 +    settle(&mut cx);
 +
@@ -735,7 +756,7 @@ index d5e593b..b416e75 100644
  mod tests {
      use super::*;
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 1ac7f53..57f25c8 100644
+index 1ac7f53..2470810 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -2,7 +2,7 @@ use crate::{
@@ -810,7 +831,7 @@ index 1ac7f53..57f25c8 100644
                          )
                          .when(is_constrained, |this| {
                              this.child(
-@@ -13085,6 +13097,48 @@ impl ThreadView {
+@@ -13085,6 +13097,49 @@ impl ThreadView {
          })
      }
  
@@ -846,6 +867,7 @@ index 1ac7f53..57f25c8 100644
 +                    panel.update(cx, |panel, cx| {
 +                        panel.new_thread_with_prefilled_prompt(
 +                            Agent::from(agent_id.clone()),
++                            session_id.clone(),
 +                            command,
 +                            window,
 +                            cx,
