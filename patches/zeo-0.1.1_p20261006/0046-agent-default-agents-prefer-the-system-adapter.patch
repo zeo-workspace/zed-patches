@@ -1,0 +1,808 @@
+From 4ffc10e143a9b77d5103bcb95f99d46f337c4d72 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Wed, 7 Oct 2026 10:49:19 -0300
+Subject: [PATCH] agent: default Claude agents prefer the system adapter over
+ npm
+
+Patch 0033 made Claude Agent (Plus) and Claude Agent TUI default agents, but
+always launched them through `npm install <package>@latest` -- even on a
+Gentoo system where the claude-agent-acp-plus / claude-agent-acp-tui USE flags
+had already installed the Portage-built adapter under /usr/bin. The installed
+binary was dead weight, the version that ran was whatever npm published last
+(no release-age cooldown), and the ebuilds still asked for hand-written
+agent_servers entries duplicating the defaults. Story 019, 2026-10-07.
+
+The rule: on every start of one of the two Zeo ids, run the system binary when
+it exists and is executable, npm otherwise.
+
+  agent_registry_store.rs adds zeo_agent_launch_source(id, probe), a pure
+  resolver: claude-agent-acp-plus -> /usr/bin/claude-agent-acp-plus,
+  claude-agent-tui -> /usr/bin/claude-agent-acp-tui (the TUI id and its
+  binary name differ; tests pin both directions). Ok(true) gives the system
+  path; Ok(false) or any probe error gives 0033's npm spec; any other id
+  gets npm without a probe. The production probe,
+  zeo_system_binary_is_executable, follows symlinks (npm installs bins as
+  symlinks) and wants a regular file with an executable bit; a missing path
+  or a dangling symlink is Ok(false), so a zeo-bin user without the adapter
+  sees no warning on every start.
+
+  agent_server_store.rs gives LocalRegistryNpxAgent a launch_probe and
+  consults it in get_command, once per start -- installing or removing the
+  adapter takes effect on the next thread with no rebuild. The system branch
+  returns the absolute binary with the registry args, Zed's extra args and
+  env, and no node and no npm install; the npm branch is unchanged. Every
+  launch logs one line, `zeo agent launch: agent_id=... source=system
+  path=...` or `source=npm package=...`; a probe error logs at WARN with the
+  agent id and falls back.
+
+Absolute paths, never a bare name: a bare command depends on the spawn-time
+PATH. The decision is at launch time, not build time, because zeo-bin is
+built once for every user and cannot read USE flags; the same code serves
+app-editors/zeo (binary present whenever its USE flag is on) and zeo-bin
+(present only if the user installed the adapter). Inside the Flatpak the
+host's /usr/bin is not visible, so it takes the npm path by construction.
+
+What is unchanged: the agent ids (0036 stores thread configuration per id),
+and the settings merge -- a user agent_servers entry with the same id
+replaces the default and is never resolved through this rule. default.json's
+comment now says the system adapter is tried first.
+
+Tests: the resolver's hostile cases (look-alike ids, the TUI name mismatch,
+probe errors), the production probe against a non-executable file, a
+directory, a missing path, a dangling symlink, an executable and a symlink to
+one; get_command keeps npm for other registry agents, rechecks every start,
+and launches the system binary without preparing an npm install; with
+default.json both defaults resolve the system binary and a user entry of the
+same id wins.
+---
+
+diff --git a/assets/settings/default.json b/assets/settings/default.json
+index e2ad83d..7d46c3e 100644
+--- a/assets/settings/default.json
++++ b/assets/settings/default.json
+@@ -2981,8 +2981,10 @@
+   "context_servers": {},
+   // Configures agent servers available in the agent panel.
+   //
+-  // Zeo enables its two Claude adapters by default. Both are installed on first
+-  // use from npm (always the latest published version) with Zeo's own Node
++  // Zeo enables its two Claude adapters by default. Each start runs the adapter
++  // a system package installed (/usr/bin/claude-agent-acp-plus,
++  // /usr/bin/claude-agent-acp-tui) when it is there; otherwise it is installed
++  // from npm (always the latest published version) with Zeo's own Node
+   // runtime, so nothing has to be installed beforehand. Claude Agent TUI also
+   // needs the `claude` CLI on the system.
+   "agent_servers": {
+diff --git a/crates/project/src/agent_registry_store.rs b/crates/project/src/agent_registry_store.rs
+index 8237574..6d7baeb 100644
+--- a/crates/project/src/agent_registry_store.rs
++++ b/crates/project/src/agent_registry_store.rs
+@@ -338,7 +338,9 @@ impl AgentRegistryStore {
+ /// fetch and with no network at all. `@latest` makes every launch run
+ /// `npm install <package>@latest`, which is how they track the newest
+ /// published adapter without a Zeo rebuild (`bounded_npm_package_spec` leaves a
+-/// non-semver tag alone). assets/settings/default.json enables both.
++/// non-semver tag alone). assets/settings/default.json enables both. When a
++/// system package installed the adapter, it runs instead of the npm package:
++/// see `zeo_agent_launch_source`.
+ pub const ZEO_PLUS_AGENT_ID: &str = "claude-agent-acp-plus";
+ pub const ZEO_TUI_AGENT_ID: &str = "claude-agent-tui";
+ 
+@@ -389,6 +391,76 @@ fn with_zeo_agents(mut agents: Vec<RegistryAgent>) -> Vec<RegistryAgent> {
+     agents
+ }
+ 
++/// Where a Zeo default agent is launched from.
++#[derive(Debug, PartialEq)]
++pub enum ZeoLaunchSource {
++    /// The adapter a package manager installed, as an absolute path -- never a
++    /// bare name, which would depend on the spawn-time `PATH`.
++    System(PathBuf),
++    /// The npm registry package, as `zeo_agents()` ships it. Empty for an id
++    /// that is not a Zeo default: the caller keeps its own package then.
++    Npm(String),
++}
++
++/// The binary the system package installs for each Zeo default agent. The TUI
++/// agent's id is `claude-agent-tui` but its binary is `claude-agent-acp-tui`.
++fn zeo_system_binary(agent_id: &str) -> Option<&'static str> {
++    match agent_id {
++        ZEO_PLUS_AGENT_ID => Some("/usr/bin/claude-agent-acp-plus"),
++        ZEO_TUI_AGENT_ID => Some("/usr/bin/claude-agent-acp-tui"),
++        _ => None,
++    }
++}
++
++/// Decides, at launch time, whether a Zeo default agent runs the adapter a
++/// package manager installed or the npm package. `probe` answers "exists and is
++/// executable"; an error counts as absent, so a broken install falls back to
++/// npm instead of failing the launch -- the caller's probe logs the error.
++/// Any other id resolves to npm without probing anything.
++pub fn zeo_agent_launch_source(
++    agent_id: &str,
++    probe: impl Fn(&Path) -> std::io::Result<bool>,
++) -> ZeoLaunchSource {
++    let Some(binary) = zeo_system_binary(agent_id) else {
++        return ZeoLaunchSource::Npm(String::new());
++    };
++    let binary = Path::new(binary);
++    if let Ok(true) = probe(binary) {
++        return ZeoLaunchSource::System(binary.to_path_buf());
++    }
++    let spec = zeo_agents()
++        .into_iter()
++        .find_map(|agent| match agent {
++            RegistryAgent::Npx(agent) if agent.metadata.id.0.as_ref() == agent_id => {
++                Some(agent.package.to_string())
++            }
++            _ => None,
++        })
++        .unwrap_or_default();
++    ZeoLaunchSource::Npm(spec)
++}
++
++/// The production probe for `zeo_agent_launch_source`: a regular file, through
++/// symlinks, with an executable bit. A missing path -- a dangling symlink
++/// included -- is `Ok(false)`, not an error, so a `zeo-bin` user without the
++/// adapter installed gets no warning on every start.
++pub fn zeo_system_binary_is_executable(path: &Path) -> std::io::Result<bool> {
++    let metadata = match std::fs::metadata(path) {
++        Ok(metadata) => metadata,
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
++        Err(error) => return Err(error),
++    };
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt as _;
++        Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
++    }
++    #[cfg(not(unix))]
++    {
++        Ok(metadata.is_file())
++    }
++}
++
+ struct RegistryFetchResult {
+     index: RegistryIndex,
+     raw_body: Vec<u8>,
+@@ -775,7 +847,11 @@ mod zeo_agent_tests {
+                 panic!("{} should be an npx agent", agent.id().0);
+             };
+             assert!(agent.package.ends_with("@latest"), "{}", agent.package);
+-            assert!(agent.package.starts_with("@lucascouts/"), "{}", agent.package);
++            assert!(
++                agent.package.starts_with("@lucascouts/"),
++                "{}",
++                agent.package
++            );
+         }
+     }
+ 
+@@ -794,4 +870,176 @@ mod zeo_agent_tests {
+         };
+         assert_eq!(plus.package.as_ref(), "registry-provided@1.0.0");
+     }
++
++    const ZEO_PLUS_SYSTEM_BINARY: &str = "/usr/bin/claude-agent-acp-plus";
++    const ZEO_TUI_SYSTEM_BINARY: &str = "/usr/bin/claude-agent-acp-tui";
++    const ZEO_PLUS_NPM_SPEC: &str = "@lucascouts/claude-agent-acp-plus@latest";
++    const ZEO_TUI_NPM_SPEC: &str = "@lucascouts/claude-agent-tui@latest";
++
++    /// Runs the resolver with `answer` as the probe and returns every path the
++    /// probe was asked about, in order.
++    fn resolve_recording(
++        agent_id: &str,
++        answer: impl Fn(&Path) -> std::io::Result<bool>,
++    ) -> (ZeoLaunchSource, Vec<PathBuf>) {
++        let probed = std::cell::RefCell::new(Vec::new());
++        let source = zeo_agent_launch_source(agent_id, |path: &Path| {
++            probed.borrow_mut().push(path.to_path_buf());
++            answer(path)
++        });
++        (source, probed.into_inner())
++    }
++
++    /// Hostile (wrong collapse): ids that look like a Zeo default but are not
++    /// one -- including the TUI *binary* name used as an id -- never resolve to
++    /// a system path, even when every probed path exists and is executable.
++    #[test]
++    fn zeo_agent_launch_source_never_gives_a_system_path_to_another_id() {
++        for agent_id in [
++            "claude-agent-acp-tui",
++            "claude-acp",
++            "claude-agent",
++            "claude-agent-acp-plus-dev",
++            "CLAUDE-AGENT-ACP-PLUS",
++            "",
++        ] {
++            let (source, _) = resolve_recording(agent_id, |_| Ok(true));
++            assert!(
++                matches!(source, ZeoLaunchSource::Npm(_)),
++                "{agent_id:?} is not a Zeo default agent and must not launch a system binary, got {source:?}"
++            );
++        }
++    }
++
++    /// Hostile (wrong split): the TUI agent's id is `claude-agent-tui`, but its
++    /// binary is `claude-agent-acp-tui`. A binary named after the id must not
++    /// count, and the Plus agent must never pick up the TUI binary.
++    #[test]
++    fn zeo_agent_launch_source_probes_the_tui_binary_not_the_tui_id() {
++        fn only(wanted: &'static str) -> impl Fn(&Path) -> std::io::Result<bool> {
++            move |path: &Path| Ok(path == Path::new(wanted))
++        }
++
++        let (source, probed) =
++            resolve_recording(ZEO_TUI_AGENT_ID, only("/usr/bin/claude-agent-tui"));
++        assert_eq!(source, ZeoLaunchSource::Npm(ZEO_TUI_NPM_SPEC.to_string()));
++        assert_eq!(probed, vec![PathBuf::from(ZEO_TUI_SYSTEM_BINARY)]);
++
++        let (source, _) = resolve_recording(ZEO_PLUS_AGENT_ID, only(ZEO_TUI_SYSTEM_BINARY));
++        assert_eq!(source, ZeoLaunchSource::Npm(ZEO_PLUS_NPM_SPEC.to_string()));
++
++        let (source, _) = resolve_recording(ZEO_TUI_AGENT_ID, only(ZEO_PLUS_SYSTEM_BINARY));
++        assert_eq!(source, ZeoLaunchSource::Npm(ZEO_TUI_NPM_SPEC.to_string()));
++
++        let (source, _) = resolve_recording(ZEO_TUI_AGENT_ID, only(ZEO_TUI_SYSTEM_BINARY));
++        assert_eq!(
++            source,
++            ZeoLaunchSource::System(PathBuf::from(ZEO_TUI_SYSTEM_BINARY))
++        );
++    }
++
++    /// Q4: a probe error (permission denied, broken symlink) is never read as
++    /// "present" -- it falls back to the npm package.
++    #[test]
++    fn zeo_agent_launch_source_falls_back_to_npm_on_a_probe_error() {
++        for kind in [
++            std::io::ErrorKind::PermissionDenied,
++            std::io::ErrorKind::NotFound,
++            std::io::ErrorKind::Other,
++        ] {
++            for (agent_id, spec) in [
++                (ZEO_PLUS_AGENT_ID, ZEO_PLUS_NPM_SPEC),
++                (ZEO_TUI_AGENT_ID, ZEO_TUI_NPM_SPEC),
++            ] {
++                let (source, _) = resolve_recording(agent_id, |_| Err(std::io::Error::from(kind)));
++                assert_eq!(
++                    source,
++                    ZeoLaunchSource::Npm(spec.to_string()),
++                    "{agent_id} with a probe error {kind:?}"
++                );
++            }
++        }
++    }
++
++    /// R2.1: absent or not executable (`Ok(false)`) launches the package patch
++    /// 0033 ships, with its `@latest` spec, and the two specs stay distinct.
++    #[test]
++    fn zeo_agent_launch_source_falls_back_to_npm_when_the_binary_is_absent() {
++        let (plus, _) = resolve_recording(ZEO_PLUS_AGENT_ID, |_| Ok(false));
++        let (tui, _) = resolve_recording(ZEO_TUI_AGENT_ID, |_| Ok(false));
++        assert_eq!(plus, ZeoLaunchSource::Npm(ZEO_PLUS_NPM_SPEC.to_string()));
++        assert_eq!(tui, ZeoLaunchSource::Npm(ZEO_TUI_NPM_SPEC.to_string()));
++        assert_ne!(plus, tui);
++    }
++
++    /// R1.1, R1.2, R3.1 (benign): with the binary present each default agent
++    /// resolves to its own absolute `/usr/bin` path, under the ids 0033 ships.
++    #[test]
++    fn zeo_agent_launch_source_picks_the_system_binary_when_present() {
++        assert_eq!(ZEO_PLUS_AGENT_ID, "claude-agent-acp-plus");
++        assert_eq!(ZEO_TUI_AGENT_ID, "claude-agent-tui");
++
++        let (plus, probed) = resolve_recording(ZEO_PLUS_AGENT_ID, |_| Ok(true));
++        assert_eq!(
++            plus,
++            ZeoLaunchSource::System(PathBuf::from(ZEO_PLUS_SYSTEM_BINARY))
++        );
++        assert_eq!(probed, vec![PathBuf::from(ZEO_PLUS_SYSTEM_BINARY)]);
++
++        let (tui, _) = resolve_recording(ZEO_TUI_AGENT_ID, |_| Ok(true));
++        assert_eq!(
++            tui,
++            ZeoLaunchSource::System(PathBuf::from(ZEO_TUI_SYSTEM_BINARY))
++        );
++
++        for source in [&plus, &tui] {
++            let ZeoLaunchSource::System(path) = source else {
++                unreachable!()
++            };
++            assert!(
++                path.is_absolute(),
++                "{path:?} must be absolute, never a bare name"
++            );
++        }
++    }
++
++    /// The production probe answers "exists and is executable": a plain file,
++    /// a directory, a missing path or a dangling symlink never counts as
++    /// launchable; an executable file -- or a symlink to one, which is how npm
++    /// installs a package's bin under /usr/bin -- does.
++    #[cfg(unix)]
++    #[test]
++    fn zeo_agent_launch_source_production_probe_requires_an_executable_file() {
++        use std::os::unix::fs::{PermissionsExt as _, symlink};
++
++        let dir = tempfile::tempdir().unwrap();
++        let path = |name: &str| dir.path().join(name);
++        let set_mode = |name: &str, mode: u32| {
++            std::fs::set_permissions(path(name), std::fs::Permissions::from_mode(mode)).unwrap()
++        };
++
++        std::fs::write(path("not-executable"), b"#!/bin/sh\n").unwrap();
++        set_mode("not-executable", 0o644);
++        std::fs::create_dir(path("a-directory")).unwrap();
++        set_mode("a-directory", 0o755);
++        symlink(path("nowhere"), path("dangling-link")).unwrap();
++        std::fs::write(path("executable"), b"#!/bin/sh\n").unwrap();
++        set_mode("executable", 0o755);
++        symlink(path("executable"), path("link-to-executable")).unwrap();
++
++        for hostile in ["not-executable", "a-directory", "missing", "dangling-link"] {
++            let answer = zeo_system_binary_is_executable(&path(hostile));
++            assert!(
++                !matches!(answer, Ok(true)),
++                "{hostile} must not be launchable, got {answer:?}"
++            );
++        }
++        for launchable in ["executable", "link-to-executable"] {
++            let answer = zeo_system_binary_is_executable(&path(launchable));
++            assert!(
++                matches!(answer, Ok(true)),
++                "{launchable} must be launchable, got {answer:?}"
++            );
++        }
++    }
+ }
+diff --git a/crates/project/src/agent_server_store.rs b/crates/project/src/agent_server_store.rs
+index efe255c..e17f376 100644
+--- a/crates/project/src/agent_server_store.rs
++++ b/crates/project/src/agent_server_store.rs
+@@ -27,7 +27,10 @@ use url::Url;
+ use util::{ResultExt as _, debug_panic};
+ 
+ use crate::ProjectEnvironment;
+-use crate::agent_registry_store::{AgentRegistryStore, RegistryAgent, RegistryTargetConfig};
++use crate::agent_registry_store::{
++    AgentRegistryStore, RegistryAgent, RegistryTargetConfig, ZeoLaunchSource,
++    zeo_agent_launch_source, zeo_system_binary_is_executable,
++};
+ 
+ use crate::worktree_store::WorktreeStore;
+ 
+@@ -431,6 +434,7 @@ impl AgentServerStore {
+                                         distribution_env: agent.env.clone(),
+                                         settings_env: env.clone(),
+                                         new_version_available_tx: None,
++                                        launch_probe: Arc::new(zeo_system_binary_is_executable),
+                                     })
+                                         as Box<dyn ExternalAgentServer>,
+                                     ExternalAgentSource::Registry,
+@@ -1346,6 +1350,9 @@ struct LocalRegistryNpxAgent {
+     distribution_env: HashMap<String, String>,
+     settings_env: HashMap<String, String>,
+     new_version_available_tx: Option<watch::Sender<Option<String>>>,
++    /// Answers "exists and is executable" for a Zeo default agent's system
++    /// binary; `zeo_system_binary_is_executable` outside tests.
++    launch_probe: Arc<dyn Fn(&Path) -> std::io::Result<bool> + Send + Sync>,
+ }
+ 
+ impl ExternalAgentServer for LocalRegistryNpxAgent {
+@@ -1376,6 +1383,20 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
+         let distribution_env = self.distribution_env.clone();
+         let settings_env = self.settings_env.clone();
+ 
++        // Decided on every start, so installing or removing the system adapter
++        // takes effect without a rebuild. Only Zeo's default ids are probed.
++        let launch_probe = self.launch_probe.clone();
++        let launch_source = zeo_agent_launch_source(&registry_id, |path| {
++            let answer = launch_probe(path);
++            if let Err(error) = &answer {
++                log::warn!(
++                    "zeo agent launch: probe failed, falling back to npm agent_id={registry_id} path={} error={error}",
++                    path.display()
++                );
++            }
++            answer
++        });
++
+         cx.spawn(async move |cx| {
+             let mut env = project_environment
+                 .update(cx, |project_environment, cx| {
+@@ -1384,6 +1405,31 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
+                 .await
+                 .unwrap_or_default();
+ 
++            match &launch_source {
++                ZeoLaunchSource::System(path) => {
++                    log::info!(
++                        "zeo agent launch: agent_id={registry_id} source=system path={}",
++                        path.display()
++                    );
++                    env.extend(distribution_env);
++                    env.extend(extra_env);
++                    env.extend(settings_env);
++                    let mut command_args = args;
++                    command_args.extend(extra_args);
++                    return Ok(AgentServerCommand {
++                        path: path.clone(),
++                        args: command_args,
++                        env: Some(env),
++                    });
++                }
++                ZeoLaunchSource::Npm(spec) if !spec.is_empty() => {
++                    log::info!(
++                        "zeo agent launch: agent_id={registry_id} source=npm package={package}"
++                    );
++                }
++                ZeoLaunchSource::Npm(_) => {}
++            }
++
+             let install_dir = paths::external_agents_dir()
+                 .join("registry")
+                 .join("npx")
+@@ -2376,4 +2422,363 @@ mod tests {
+             );
+         });
+     }
++
++    const ZEO_PLUS_SYSTEM_BINARY: &str = "/usr/bin/claude-agent-acp-plus";
++    const ZEO_TUI_SYSTEM_BINARY: &str = "/usr/bin/claude-agent-acp-tui";
++
++    fn make_zeo_npx_agent(
++        cx: &mut TestAppContext,
++        fs: Arc<fs::FakeFs>,
++        registry_id: &str,
++        package: &str,
++        probe: impl Fn(&Path) -> std::io::Result<bool> + Send + Sync + 'static,
++    ) -> LocalRegistryNpxAgent {
++        cx.update(|cx| {
++            let fs: Arc<dyn Fs> = fs;
++            let worktree_store =
++                cx.new(|cx| WorktreeStore::local(false, fs.clone(), WorktreeIdCounter::get(cx)));
++            let project_environment = cx.new(|cx| {
++                crate::ProjectEnvironment::new(None, worktree_store.downgrade(), None, false, cx)
++            });
++            LocalRegistryNpxAgent {
++                fs,
++                node_runtime: NodeRuntime::unavailable(),
++                project_environment,
++                registry_id: Arc::from(registry_id),
++                version: "latest".into(),
++                package: package.to_string().into(),
++                args: Vec::new(),
++                distribution_env: HashMap::default(),
++                settings_env: HashMap::default(),
++                new_version_available_tx: None,
++                launch_probe: Arc::new(probe),
++            }
++        })
++    }
++
++    fn npx_install_dir(registry_id: &str) -> PathBuf {
++        paths::external_agents_dir()
++            .join("registry")
++            .join("npx")
++            .join(sanitize_path_component(registry_id))
++    }
++
++    async fn start(
++        cx: &mut TestAppContext,
++        agent: &mut LocalRegistryNpxAgent,
++        extra_args: Vec<String>,
++        extra_env: HashMap<String, String>,
++    ) -> Result<AgentServerCommand> {
++        let task = cx.update(|cx| agent.get_command(extra_args, extra_env, &mut cx.to_async()));
++        let result = task.await;
++        cx.run_until_parked();
++        result
++    }
++
++    async fn clear_npx_dir(fs: &fs::FakeFs, registry_id: &str) {
++        fs.remove_dir(
++            &npx_install_dir(registry_id),
++            RemoveOptions {
++                recursive: true,
++                ignore_if_not_exists: true,
++            },
++        )
++        .await
++        .unwrap();
++    }
++
++    async fn assert_took_npm_path(
++        fs: &fs::FakeFs,
++        registry_id: &str,
++        result: Result<AgentServerCommand>,
++        context: &str,
++    ) {
++        assert!(
++            result.is_err(),
++            "{context}: expected the npm path (which fails on an unavailable node runtime), got {result:?}"
++        );
++        assert!(
++            fs.is_dir(&npx_install_dir(registry_id)).await,
++            "{context}: the npm path should have created the npx install dir"
++        );
++    }
++
++    async fn assert_took_system_path(
++        fs: &fs::FakeFs,
++        registry_id: &str,
++        result: Result<AgentServerCommand>,
++        binary: &str,
++        context: &str,
++    ) -> AgentServerCommand {
++        let command = result.unwrap_or_else(|error| {
++            panic!("{context}: expected a launch of {binary}, got an error: {error:#}")
++        });
++        assert_eq!(command.path, PathBuf::from(binary), "{context}");
++        assert!(
++            !fs.is_dir(&npx_install_dir(registry_id)).await,
++            "{context}: a system launch must not prepare an npm install (R1.3)"
++        );
++        command
++    }
++
++    /// Hostile (wrong collapse): every other registry npx agent -- including
++    /// one whose id is the TUI *binary* name -- keeps the npm path even when the
++    /// probe says every path is an executable; only the Zeo id switches.
++    #[gpui::test]
++    async fn zeo_agent_launch_other_registry_agents_keep_npm(cx: &mut TestAppContext) {
++        let fs = fs::FakeFs::new(cx.executor());
++        for (registry_id, package) in [
++            ("claude-acp", "@agentclientprotocol/claude-agent-acp@1.0.0"),
++            (
++                "claude-agent-acp-tui",
++                "@lucascouts/claude-agent-tui@latest",
++            ),
++        ] {
++            let mut agent = make_zeo_npx_agent(cx, fs.clone(), registry_id, package, |_| Ok(true));
++            let result = start(cx, &mut agent, Vec::new(), HashMap::default()).await;
++            assert_took_npm_path(&fs, registry_id, result, registry_id).await;
++        }
++
++        let mut plus = make_zeo_npx_agent(
++            cx,
++            fs.clone(),
++            crate::agent_registry_store::ZEO_PLUS_AGENT_ID,
++            "@lucascouts/claude-agent-acp-plus@latest",
++            |_| Ok(true),
++        );
++        let result = start(cx, &mut plus, Vec::new(), HashMap::default()).await;
++        assert_took_system_path(
++            &fs,
++            crate::agent_registry_store::ZEO_PLUS_AGENT_ID,
++            result,
++            ZEO_PLUS_SYSTEM_BINARY,
++            "plus with the binary present",
++        )
++        .await;
++    }
++
++    /// R2.1, Q4, R3.3, R1.2: the source is decided on every start of the same
++    /// agent -- a probe error and an absent binary both fall back to npm,
++    /// installing the adapter switches the next start to it, removing it
++    /// switches back, all with no rebuild of the agent.
++    #[gpui::test]
++    async fn zeo_agent_launch_falls_back_to_npm_and_rechecks_every_start(cx: &mut TestAppContext) {
++        let fs = fs::FakeFs::new(cx.executor());
++        let tui = crate::agent_registry_store::ZEO_TUI_AGENT_ID;
++        let answers: Arc<std::sync::Mutex<Vec<std::io::Result<bool>>>> =
++            Arc::new(std::sync::Mutex::new(vec![
++                Ok(false),
++                Ok(true),
++                Ok(false),
++                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
++            ]));
++        let probe_answers = answers.clone();
++        let mut agent = make_zeo_npx_agent(
++            cx,
++            fs.clone(),
++            tui,
++            "@lucascouts/claude-agent-tui@latest",
++            move |_| {
++                probe_answers
++                    .lock()
++                    .unwrap()
++                    .pop()
++                    .expect("the probe should be asked exactly once per start")
++            },
++        );
++
++        let result = start(cx, &mut agent, Vec::new(), HashMap::default()).await;
++        assert_took_npm_path(&fs, tui, result, "start 1, probe error").await;
++
++        clear_npx_dir(&fs, tui).await;
++        let result = start(cx, &mut agent, Vec::new(), HashMap::default()).await;
++        assert_took_npm_path(&fs, tui, result, "start 2, binary absent").await;
++
++        clear_npx_dir(&fs, tui).await;
++        let result = start(cx, &mut agent, Vec::new(), HashMap::default()).await;
++        assert_took_system_path(
++            &fs,
++            tui,
++            result,
++            ZEO_TUI_SYSTEM_BINARY,
++            "start 3, installed",
++        )
++        .await;
++
++        let result = start(cx, &mut agent, Vec::new(), HashMap::default()).await;
++        assert_took_npm_path(&fs, tui, result, "start 4, removed again").await;
++
++        assert!(answers.lock().unwrap().is_empty(), "one probe per start");
++    }
++
++    /// R1.1, R1.3 (benign): with the adapter installed, the Plus agent runs the
++    /// absolute system binary directly -- not through node -- with Zed's extra
++    /// args and env, and nothing is prepared for npm.
++    #[gpui::test]
++    async fn zeo_agent_launch_system_binary_runs_without_npm(cx: &mut TestAppContext) {
++        let fs = fs::FakeFs::new(cx.executor());
++        let plus = crate::agent_registry_store::ZEO_PLUS_AGENT_ID;
++        let probed = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
++        let recorder = probed.clone();
++        let mut agent = make_zeo_npx_agent(
++            cx,
++            fs.clone(),
++            plus,
++            "@lucascouts/claude-agent-acp-plus@latest",
++            move |path| {
++                recorder.lock().unwrap().push(path.to_path_buf());
++                Ok(path == Path::new(ZEO_PLUS_SYSTEM_BINARY))
++            },
++        );
++
++        let mut extra_env = HashMap::default();
++        extra_env.insert("ZEO_EXTRA".to_string(), "1".to_string());
++        let result = start(cx, &mut agent, vec!["--from-zed".to_string()], extra_env).await;
++        let command =
++            assert_took_system_path(&fs, plus, result, ZEO_PLUS_SYSTEM_BINARY, "plus installed")
++                .await;
++
++        assert_eq!(command.args, vec!["--from-zed".to_string()]);
++        assert!(
++            !command.args.iter().any(|arg| arg.contains("node_modules")),
++            "a system launch must not point at an npm-installed script: {:?}",
++            command.args
++        );
++        assert_eq!(
++            command.env.as_ref().and_then(|env| env.get("ZEO_EXTRA")),
++            Some(&"1".to_string())
++        );
++        assert_eq!(
++            *probed.lock().unwrap(),
++            vec![PathBuf::from(ZEO_PLUS_SYSTEM_BINARY)]
++        );
++    }
++
++    fn zeo_registry_agent(id: &str, package: &str) -> RegistryAgent {
++        RegistryAgent::Npx(RegistryNpxAgent {
++            metadata: RegistryAgentMetadata {
++                id: AgentId::new(SharedString::from(id.to_string())),
++                name: SharedString::from(id.to_string()),
++                description: SharedString::from(""),
++                version: SharedString::from("latest"),
++                repository: None,
++                website: None,
++                license_url: None,
++                icon_path: None,
++            },
++            package: SharedString::from(package.to_string()),
++            args: Vec::new(),
++            env: HashMap::default(),
++        })
++    }
++
++    /// Replaces the probe of the store-built default agent `id` and starts it.
++    async fn start_store_default(
++        cx: &mut TestAppContext,
++        store: &gpui::Entity<AgentServerStore>,
++        id: &str,
++        binary_present: bool,
++    ) -> Result<AgentServerCommand> {
++        let task = store.update(cx, |store, cx| {
++            let agent = store
++                .get_external_agent(&AgentId::new(SharedString::from(id.to_string())))
++                .unwrap_or_else(|| panic!("{id} should be registered by default"));
++            let npx = agent
++                .as_any_mut()
++                .downcast_mut::<LocalRegistryNpxAgent>()
++                .unwrap_or_else(|| panic!("{id} should be a registry npx agent by default"));
++            npx.launch_probe = Arc::new(move |_| Ok(binary_present));
++            npx.get_command(Vec::new(), HashMap::default(), &mut cx.to_async())
++        });
++        let result = task.await;
++        cx.run_until_parked();
++        result
++    }
++
++    /// R3.1, R3.2: with default.json as 0033 ships it, both ids resolve
++    /// through the system-binary rule; a user `agent_servers` entry with the
++    /// same id replaces the default for that id only -- the user's command
++    /// runs even though the system binary is present -- and the other default
++    /// keeps applying.
++    #[gpui::test]
++    async fn zeo_agent_settings_user_entry_wins_over_the_system_binary(cx: &mut TestAppContext) {
++        use crate::agent_registry_store::{ZEO_PLUS_AGENT_ID, ZEO_TUI_AGENT_ID};
++        use gpui::BorrowAppContext as _;
++
++        init_test_settings(cx);
++        init_registry(
++            cx,
++            vec![
++                zeo_registry_agent(
++                    ZEO_PLUS_AGENT_ID,
++                    "@lucascouts/claude-agent-acp-plus@latest",
++                ),
++                zeo_registry_agent(ZEO_TUI_AGENT_ID, "@lucascouts/claude-agent-tui@latest"),
++            ],
++        );
++        let store = create_agent_server_store(cx);
++        cx.run_until_parked();
++
++        for (id, binary) in [
++            (ZEO_PLUS_AGENT_ID, "/usr/bin/claude-agent-acp-plus"),
++            (ZEO_TUI_AGENT_ID, "/usr/bin/claude-agent-acp-tui"),
++        ] {
++            let command = start_store_default(cx, &store, id, true)
++                .await
++                .unwrap_or_else(|error| panic!("{id} with its binary present: {error:#}"));
++            assert_eq!(command.path, PathBuf::from(binary), "{id}");
++
++            let result = start_store_default(cx, &store, id, false).await;
++            assert!(
++                result.is_err(),
++                "{id} with its binary absent should take the npm path, got {result:?}"
++            );
++        }
++
++        cx.update(|cx| {
++            cx.update_global::<SettingsStore, _>(|settings, cx| {
++                let _ = settings.set_user_settings(
++                    r#"{
++                        "agent_servers": {
++                            "claude-agent-acp-plus": {
++                                "type": "custom",
++                                "command": "/opt/user/claude-plus",
++                                "args": ["--mine"]
++                            }
++                        }
++                    }"#,
++                    cx,
++                );
++            });
++        });
++        cx.run_until_parked();
++
++        let plus_id = AgentId::new(SharedString::from(ZEO_PLUS_AGENT_ID.to_string()));
++        let task = store.update(cx, |store, cx| {
++            assert_eq!(
++                store.agent_source(&plus_id),
++                Some(ExternalAgentSource::Custom),
++                "the user's entry should replace the default"
++            );
++            let agent = store
++                .get_external_agent(&plus_id)
++                .expect("the user's entry should be registered under the same id");
++            assert!(
++                agent
++                    .as_any_mut()
++                    .downcast_mut::<LocalRegistryNpxAgent>()
++                    .is_none(),
++                "the user's entry must not be resolved through the system-binary rule"
++            );
++            agent.get_command(Vec::new(), HashMap::default(), &mut cx.to_async())
++        });
++        let command = task.await.expect("the user's command should start");
++        assert_eq!(command.path, PathBuf::from("/opt/user/claude-plus"));
++        assert_eq!(command.args, vec!["--mine".to_string()]);
++
++        let command = start_store_default(cx, &store, ZEO_TUI_AGENT_ID, true)
++            .await
++            .expect("the TUI default still applies");
++        assert_eq!(command.path, PathBuf::from("/usr/bin/claude-agent-acp-tui"));
++    }
+ }

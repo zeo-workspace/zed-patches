@@ -48,6 +48,14 @@
 # @latest from npm, installed by Zeo's own Node runtime on first use. A Zeo
 # feature with no adapter dependency at build time, so UNGROUPED.
 0033-agent-ship-Claude-Agent-Plus-and-Claude-Agent-TUI-as-default.patch
+# 0046: those two default agents run the adapter a system package installed
+# (/usr/bin/claude-agent-acp-plus, /usr/bin/claude-agent-acp-tui) when it exists
+# and is executable, decided on every start, and fall back to 0033's npm package
+# otherwise -- so the USE-flag build and zeo-bin share one rule, and the Flatpak,
+# which cannot see the host's /usr/bin, takes npm. Ids unchanged; a user entry
+# with the same id still wins. After 0033, whose code it changes, so UNGROUPED
+# like it (story 019).
+0046-agent-default-agents-prefer-the-system-adapter.patch
 
 # @feature: claude-agent-acp-plus
 0001-force-enable-claude-agent-acp-plus.patch
