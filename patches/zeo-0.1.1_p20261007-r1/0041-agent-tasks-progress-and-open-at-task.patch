@@ -1,0 +1,2996 @@
+From 5fbb0bda61263f68eb07988d974f969d7af0e6b6 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Tue, 6 Oct 2026 14:47:02 -0300
+Subject: [PATCH] agent: show running tasks' progress and open a task at its
+ tool call
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two gaps in the task surfaces of 0037 and 0035, story 023.
+
+The tasks card showed a running task's elapsed time, but its last tool
+and tool count only on rows the user chose to watch, so a stuck task and
+a busy one looked the same. Every running row now reads
+"<last tool> · <N> tools · <elapsed>", or "starting · <elapsed>" before
+the feed reports a tool use (a count of 0 never shows a tool), on a
+second line under the description: on one line it squeezed the
+description of a narrow card down to "Run...", so the description keeps
+the whole first line beside its chip and controls. It follows each new
+snapshot without watching or expanding the row, truncates and never
+wraps, and is gone once the task ends, taking its line with it; ended
+rows keep "<status> · <duration>", watched rows keep their details
+(tokens, last tool, summary). Selector tasks-card-progress-{task_id}.
+
+The Agent Tasks panel opened a past task's thread at the top, so finding
+what a background script ran meant scrolling the whole conversation. The
+row's open action is now "Open at Task": it opens the thread through
+0040's router in its project's window, scrolled to the tool call that
+started the task, where every command and edit it made is recorded.
+
+  * history: TaskRecord gains tool_call_id, copied from the feed's
+    toolCallId (0034; an empty id is treated as none). The history keeps
+    it. MIGRATION: a third step is appended to HISTORY_MIGRATIONS,
+    "ALTER TABLE agent_task_history ADD COLUMN tool_call_id TEXT"; steps
+    0 (0035) and 1 (0039's label) are untouched, so a database written by
+    an earlier Zeo opens with every record kept and a NULL id. A record
+    stored without an id is filled from a later report of the same task
+    (a replayed start, or its ending) through fill_tool_call_id, an
+    UPDATE ... WHERE tool_call_id IS NULL: a stored id is never replaced.
+    A failed fill is logged like the other history writes and memory
+    keeps the id.
+  * router: OpenAgentSessionOptions::tool_call_id, reserved by 0040, is
+    now honoured, and gains task_id for the log line. Once the thread is
+    loaded the router scrolls the ROOT thread to the ToolCall entry with
+    exactly that id (not a prefix: toolu_t1 never lands on toolu_t10) and
+    returns OpenedAgentSession::scrolled_to_tool_call. A subagent shown
+    full screen is switched back to the root thread first, or the scroll
+    would happen in a list nobody sees. An id that is not a root entry --
+    a nested subagent's call, or an unknown id -- opens without
+    scrolling, Ok(false), never an error. One INFO line names the
+    session, task and tool call when it scrolls. The card's own
+    open-at-tool-call (0037) shares the same lookup,
+    agent_panel::scroll_to_root_tool_call.
+  * panel: with no recorded id, or no scroll, the row says "Opened the
+    thread; this task has no entry to jump to", drawn muted because it is
+    an outcome, not a failure; a jump that lands clears it; a vanished
+    thread keeps "Thread no longer exists" and opens nothing. Three of
+    0040's assertions expected no notice after an open of a record with
+    no id, and now expect that one.
+
+Tests: agent_ui tasks_card progress 5 and progress_line 3, agent_session_router scroll 3, and
+conversation_view's subagent-full-screen case 1; agent_tasks_panel
+history_db tool_call_id (a database from the shipped step 0, exactly one
+step appended, fills scoped to their key, never overwritten), store
+tool_call_id 5, panel open_at_task 6 and tool_call_id_contract 2 (feed to
+memory to disk to reload keeps the exact spelling beside case, fold and
+trailing-space decoys; an id known only from disk scrolls to the exact
+entry). Suites: agent_tasks_panel 121, agent_ui tasks_card 104,
+agent_session_router 14.
+---
+
+diff --git a/crates/agent_tasks_panel/src/history_db.rs b/crates/agent_tasks_panel/src/history_db.rs
+index 8d0abd3..3f2605f 100644
+--- a/crates/agent_tasks_panel/src/history_db.rs
++++ b/crates/agent_tasks_panel/src/history_db.rs
+@@ -44,7 +44,7 @@ pub struct AgentTaskHistoryDb(ThreadSafeConnection);
+ 
+ /// The migration list lives in a `static` so that the list registered with `inventory` and
+ /// `AgentTaskHistoryDb::MIGRATIONS` are one allocation rather than two copies of a `const`.
+-static HISTORY_MIGRATIONS: [&str; 2] = [
++static HISTORY_MIGRATIONS: [&str; 3] = [
+     sql!(
+     CREATE TABLE IF NOT EXISTS agent_task_history(
+         session_id TEXT NOT NULL,
+@@ -66,6 +66,9 @@ static HISTORY_MIGRATIONS: [&str; 2] = [
+     ),
+     // Step 2 (story 022): the user's label of a task, NULL until renamed (R3.8, R4.1).
+     sql!(ALTER TABLE agent_task_history ADD COLUMN label TEXT;),
++    // Step 3 (story 023): the tool call that started the task, NULL when the feed gave none or
++    // the record predates the column (R2.1, R2.2).
++    sql!(ALTER TABLE agent_task_history ADD COLUMN tool_call_id TEXT;),
+ ];
+ 
+ impl Domain for AgentTaskHistoryDb {
+@@ -113,13 +116,14 @@ impl AgentTaskHistoryDb {
+             record.ended_at_ms,
+             record.tokens,
+             record.tool_uses,
++            record.tool_call_id.as_ref().map(|id| id.to_string()),
+         );
+         self.write(move |connection| {
+             connection.exec_bound(sql!(
+                 INSERT OR IGNORE INTO agent_task_history(
+                     session_id, task_id, thread_title, project, kind, description,
+-                    background, status, started_at, ended_at, tokens, tool_uses
+-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
++                    background, status, started_at, ended_at, tokens, tool_uses, tool_call_id
++                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ))?((identity, state))
+         })
+         .await
+@@ -148,6 +152,31 @@ impl AgentTaskHistoryDb {
+         .with_context(|| format!("recording the end of {ids}"))
+     }
+ 
++    /// Fills in the tool call that started a task recorded without one (R2.3). Only that
++    /// `(session_id, task_id)` row is written, and a stored id is never replaced: the start of a
++    /// task does not move.
++    pub async fn fill_tool_call_id(
++        &self,
++        session_id: &acp::SessionId,
++        task_id: &AgentTaskId,
++        tool_call_id: &str,
++    ) -> Result<()> {
++        let ids = ids_of(session_id, task_id);
++        let bindings = (
++            tool_call_id.to_string(),
++            session_id.to_string(),
++            task_id.to_string(),
++        );
++        self.write(move |connection| {
++            connection.exec_bound(sql!(
++                UPDATE agent_task_history SET tool_call_id = ?1
++                WHERE session_id = ?2 AND task_id = ?3 AND tool_call_id IS NULL
++            ))?(bindings)
++        })
++        .await
++        .with_context(|| format!("recording the tool call that started {ids}"))
++    }
++
+     /// Gives every task of `session_id` the thread's newest title. A thread's first task is
+     /// usually recorded under its provisional title (the user's prompt), and its group is
+     /// titled from these rows once the thread is no longer open.
+@@ -236,7 +265,7 @@ impl AgentTaskHistoryDb {
+     pub async fn load_all(&self) -> Result<Vec<HistoryEntry>> {
+         self.select::<HistoryEntry>(sql!(
+             SELECT session_id, task_id, thread_title, project, kind, description, background,
+-                status, started_at, ended_at, tokens, tool_uses, archived, label
++                status, started_at, ended_at, tokens, tool_uses, archived, label, tool_call_id
+             FROM agent_task_history
+             ORDER BY started_at DESC, session_id, task_id
+         ))?()
+@@ -260,6 +289,7 @@ impl Column for HistoryEntry {
+         let (tool_uses, next): (Option<u64>, i32) = Column::column(statement, next)?;
+         let (archived, next): (bool, i32) = Column::column(statement, next)?;
+         let (label, next): (Option<String>, i32) = Column::column(statement, next)?;
++        let (tool_call_id, next): (Option<String>, i32) = Column::column(statement, next)?;
+ 
+         let status = parse_status(&status)
+             .with_context(|| format!("reading the record of {session_id}/{task_id}"))?;
+@@ -276,6 +306,7 @@ impl Column for HistoryEntry {
+             status,
+             tokens,
+             tool_uses,
++            tool_call_id: tool_call_id.map(Into::into),
+         };
+         Ok((
+             HistoryEntry {
+@@ -334,3 +365,7 @@ mod statements;
+ #[cfg(test)]
+ #[path = "history_db/label_tests.rs"]
+ mod label;
++
++#[cfg(test)]
++#[path = "history_db/tool_call_id_tests.rs"]
++mod tool_call_id;
+diff --git a/crates/agent_tasks_panel/src/history_db/label_tests.rs b/crates/agent_tasks_panel/src/history_db/label_tests.rs
+index daa2fb2..efa5143 100644
+--- a/crates/agent_tasks_panel/src/history_db/label_tests.rs
++++ b/crates/agent_tasks_panel/src/history_db/label_tests.rs
+@@ -9,6 +9,7 @@
+ 
+ use acp_thread::AgentTaskStatus;
+ use db::sqlez::{connection::Connection, domain::Domain};
++use db::sqlez_macros::sql;
+ use gpui::TestAppContext;
+ 
+ use crate::AgentTaskHistoryDb;
+@@ -38,9 +39,10 @@ async fn seed(db: &AgentTaskHistoryDb, pairs: &[(&str, &str)]) {
+ // status and archive flag intact, gains a NULL label, and each row is renamable.
+ #[test]
+ fn history_db_label_migration_two_opens_a_step_one_database_intact() {
+-    assert_eq!(
+-        AgentTaskHistoryDb::MIGRATIONS.len(),
+-        2,
++    // Story 023 appends step 3 after this one, so the label step is checked at its index.
++    assert!(
++        AgentTaskHistoryDb::MIGRATIONS[1]
++            == sql!(ALTER TABLE agent_task_history ADD COLUMN label TEXT;),
+         "step 2 is appended after the 0035 step"
+     );
+     let connection = Connection::open_memory(Some("agent_task_history_label_step_one"));
+@@ -160,7 +162,7 @@ fn history_db_label_reopening_a_step_two_database_keeps_the_labels() {
+     .expect("run");
+     assert_eq!(
+         steps,
+-        vec![2],
++        vec![AgentTaskHistoryDb::MIGRATIONS.len() as i64],
+         "each step is recorded once, however often it reopens"
+     );
+ }
+diff --git a/crates/agent_tasks_panel/src/history_db/tool_call_id_tests.rs b/crates/agent_tasks_panel/src/history_db/tool_call_id_tests.rs
+new file mode 100644
+index 0000000..5c7fc30
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/history_db/tool_call_id_tests.rs
+@@ -0,0 +1,297 @@
++// Story 023, task 3.1 — the history stores the tool call that started each task, migrates a
++// pre-story database without losing a record, and fills a missing id in (R2.1, R2.2, R2.3,
++// Q11). Module path: `history_db::tool_call_id`. Wired in `src/history_db.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "history_db/tool_call_id_tests.rs"]
++//     mod tool_call_id;
++//
++// Validation filter: `history_db`.
++//
++// Contract: `HISTORY_MIGRATIONS[2]` adds the column (after story 022's label step); `TaskRecord::tool_call_id:
++// Option<SharedString>`; `AgentTaskHistoryDb::fill_tool_call_id(session_id, task_id,
++// tool_call_id)` — the argument types are adapted in `fill` below only.
++//
++// Hostile halves first. "The id of THIS task" must not wrongly COLLAPSE onto another row (a
++// fill of (s1, t1) touching (s1, t2) or (s2, t1)), and must not wrongly OVERWRITE (a later
++// different id replacing the one already stored). And step 0 as SHIPPED must still open —
++// an implementation that edits step 0 instead of appending passes every test that migrates
++// with `MIGRATIONS[..1]`, because that slice is the edited text.
++
++use acp_thread::{AgentTaskId, AgentTaskStatus};
++use agent_ui::TaskRecord;
++use db::sqlez::{connection::Connection, domain::Domain};
++use db::sqlez_macros::sql;
++use gpui::{SharedString, TestAppContext};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, HistoryEntry};
++
++/// Step 0 exactly as patch 0035 shipped it (the same tokens through the same macro), so a
++/// database created by a released Zeo is reproduced here byte for byte.
++const SHIPPED_STEP_0: &str = sql!(
++    CREATE TABLE IF NOT EXISTS agent_task_history(
++        session_id TEXT NOT NULL,
++        task_id TEXT NOT NULL,
++        thread_title TEXT,
++        project TEXT NOT NULL,
++        kind TEXT NOT NULL,
++        description TEXT NOT NULL,
++        background INTEGER NOT NULL,
++        status TEXT NOT NULL,
++        started_at INTEGER NOT NULL,
++        ended_at INTEGER,
++        tokens INTEGER,
++        tool_uses INTEGER,
++        archived INTEGER NOT NULL DEFAULT 0,
++        PRIMARY KEY(session_id, task_id)
++    ) STRICT;
++    CREATE INDEX IF NOT EXISTS agent_task_history_started ON agent_task_history(started_at);
++);
++
++async fn fill(db: &AgentTaskHistoryDb, session: &str, task: &str, tool_call_id: &str) {
++    db.fill_tool_call_id(
++        &sid(session),
++        &AgentTaskId::from(task.to_string()),
++        tool_call_id,
++    )
++    .await
++    .expect("fill_tool_call_id should succeed");
++}
++
++fn with_call(mut record: TaskRecord, id: &str) -> TaskRecord {
++    record.tool_call_id = Some(SharedString::from(id.to_string()));
++    record
++}
++
++fn call_of(rows: &[HistoryEntry], session: &str, task: &str) -> Option<String> {
++    find(rows, session, task)
++        .unwrap_or_else(|| panic!("{session}/{task} is recorded"))
++        .record
++        .tool_call_id
++        .as_ref()
++        .map(|id| id.to_string())
++}
++
++fn migrate_all(connection: &Connection) {
++    connection
++        .migrate(
++            AgentTaskHistoryDb::NAME,
++            AgentTaskHistoryDb::MIGRATIONS,
++            &mut |_, _, _| false,
++        )
++        .expect("the history migrations should apply");
++}
++
++fn run_raw(connection: &Connection, statement: &str) {
++    connection
++        .exec(statement)
++        .and_then(|mut run| run())
++        .expect("raw statement should run");
++}
++
++fn columns(connection: &Connection) -> Vec<String> {
++    connection
++        .select::<String>("SELECT name FROM pragma_table_info('agent_task_history')")
++        .expect("table_info should prepare")()
++    .expect("table_info should run")
++}
++
++// ── Migration (R2.2, Q11) ──────────────────────────────────────────────────
++
++// Hostile: a database created by the SHIPPED step 0, holding records, opens with the new list
++// — no "Migration changed" — keeps every record and gives each no tool call id.
++#[test]
++fn history_db_tool_call_id_pre_story_database_keeps_every_record() {
++    let connection = Connection::open_memory(Some("history_db_tool_call_id_pre_story"));
++    connection
++        .migrate(
++            AgentTaskHistoryDb::NAME,
++            &[SHIPPED_STEP_0],
++            &mut |_, _, _| false,
++        )
++        .expect("the shipped step 0 applies");
++    for (session, task, status) in [
++        ("s-old", "t-done", "completed"),
++        ("s-old", "t-failed", "failed"),
++        ("s-other", "t-done", "interrupted"),
++    ] {
++        run_raw(
++            &connection,
++            &format!(
++                "INSERT INTO agent_task_history \
++                 (session_id, task_id, thread_title, project, kind, description, background, \
++                  status, started_at, ended_at, tokens, tool_uses, archived) \
++                 VALUES ('{session}', '{task}', 'Old thread', 'zeo', 'shell', 'Old task', 1, \
++                         '{status}', 1000, 2000, 10, 2, 1)"
++            ),
++        );
++    }
++
++    migrate_all(&connection);
++    migrate_all(&connection);
++
++    assert!(
++        columns(&connection)
++            .iter()
++            .any(|column| column == "tool_call_id"),
++        "the column is added: {:?}",
++        columns(&connection)
++    );
++    let rows = connection
++        .select::<(String, String, String, i64, Option<String>)>(
++            "SELECT session_id, task_id, status, archived, tool_call_id FROM agent_task_history \
++             ORDER BY session_id, task_id",
++        )
++        .expect("select")()
++    .expect("run");
++    assert_eq!(
++        rows,
++        vec![
++            ("s-old".into(), "t-done".into(), "completed".into(), 1, None),
++            ("s-old".into(), "t-failed".into(), "failed".into(), 1, None),
++            (
++                "s-other".into(),
++                "t-done".into(),
++                "interrupted".into(),
++                1,
++                None
++            ),
++        ],
++        "every record survives, unchanged, with no tool call id"
++    );
++}
++
++// Q11 — the step is appended: step 0 is the shipped text, and a fresh database has the column.
++#[test]
++fn history_db_tool_call_id_is_one_step_appended_after_the_shipped_one() {
++    assert_eq!(
++        AgentTaskHistoryDb::MIGRATIONS[0],
++        SHIPPED_STEP_0,
++        "step 0 is never edited"
++    );
++    // Story 022's label step (0039) landed before this story: this story's step is the third.
++    assert!(
++        AgentTaskHistoryDb::MIGRATIONS[1]
++            == sql!(ALTER TABLE agent_task_history ADD COLUMN label TEXT;),
++        "the label step before it is left as shipped"
++    );
++    assert_eq!(
++        AgentTaskHistoryDb::MIGRATIONS.len(),
++        3,
++        "exactly one step is appended"
++    );
++    assert!(
++        AgentTaskHistoryDb::MIGRATIONS[2]
++            == sql!(ALTER TABLE agent_task_history ADD COLUMN tool_call_id TEXT;),
++        "the appended step adds the column"
++    );
++    let connection = Connection::open_memory(Some("history_db_tool_call_id_fresh"));
++    migrate_all(&connection);
++    assert!(
++        columns(&connection)
++            .iter()
++            .any(|column| column == "tool_call_id")
++    );
++}
++
++// ── fill_tool_call_id (R2.3) ───────────────────────────────────────────────
++
++// Hostile (wrong collapse): filling (s1, t1) leaves the other task of s1 and the same task id
++// of s2 without an id.
++#[gpui::test]
++async fn history_db_tool_call_id_fill_touches_only_its_own_task(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_tool_call_id_fill_own").await;
++    for (session, task) in [("s1", "t1"), ("s1", "t2"), ("s2", "t1")] {
++        db.insert_started(&record(session, task, AgentTaskStatus::Running, 1_000))
++            .await
++            .unwrap();
++    }
++
++    fill(&db, "s1", "t1", "toolu_s1_t1").await;
++
++    let rows = load(&db).await;
++    assert_eq!(call_of(&rows, "s1", "t1").as_deref(), Some("toolu_s1_t1"));
++    assert_eq!(
++        call_of(&rows, "s1", "t2"),
++        None,
++        "another task of the session"
++    );
++    assert_eq!(
++        call_of(&rows, "s2", "t1"),
++        None,
++        "the same task id in another session"
++    );
++}
++
++// Hostile (wrong overwrite): an id already stored is never replaced by a different one.
++#[gpui::test]
++async fn history_db_tool_call_id_fill_never_overwrites_a_stored_id(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_tool_call_id_no_overwrite").await;
++    db.insert_started(&with_call(
++        record("s1", "t1", AgentTaskStatus::Running, 1_000),
++        "toolu_first",
++    ))
++    .await
++    .unwrap();
++
++    fill(&db, "s1", "t1", "toolu_second").await;
++
++    assert_eq!(
++        call_of(&load(&db).await, "s1", "t1").as_deref(),
++        Some("toolu_first")
++    );
++}
++
++// R2.1, R2.2, R2.3 — benign: an id the record carries round-trips; a record without one reads
++// back as none (also a row written with the shipped columns only); a fill gives it one.
++#[gpui::test]
++async fn history_db_tool_call_id_round_trips_and_fills_a_missing_one(_cx: &mut TestAppContext) {
++    let db = AgentTaskHistoryDb::open_test_db("history_db_tool_call_id_round_trip").await;
++    db.insert_started(&with_call(
++        record("s1", "with", AgentTaskStatus::Running, 1_000),
++        "toolu_01Ab:Cd/é-9",
++    ))
++    .await
++    .unwrap();
++    db.insert_started(&record("s1", "without", AgentTaskStatus::Running, 2_000))
++        .await
++        .unwrap();
++    run_sql(
++        &db,
++        "INSERT INTO agent_task_history \
++         (session_id, task_id, project, kind, description, background, status, started_at) \
++         VALUES ('s0', 'legacy', 'zeo', 'shell', 'Legacy task', 0, 'completed', 500)",
++    )
++    .await;
++
++    let rows = load(&db).await;
++    assert_eq!(
++        call_of(&rows, "s1", "with").as_deref(),
++        Some("toolu_01Ab:Cd/é-9"),
++        "stored and read back byte for byte"
++    );
++    assert_eq!(call_of(&rows, "s1", "without"), None);
++    assert_eq!(
++        call_of(&rows, "s0", "legacy"),
++        None,
++        "a pre-story row has none"
++    );
++
++    fill(&db, "s1", "without", "toolu_late").await;
++    fill(&db, "s0", "legacy", "toolu_legacy").await;
++    let rows = load(&db).await;
++    assert_eq!(
++        call_of(&rows, "s1", "without").as_deref(),
++        Some("toolu_late")
++    );
++    assert_eq!(
++        call_of(&rows, "s0", "legacy").as_deref(),
++        Some("toolu_legacy")
++    );
++    assert_eq!(
++        call_of(&rows, "s1", "with").as_deref(),
++        Some("toolu_01Ab:Cd/é-9"),
++        "the other row is untouched"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
+index 7226dc5..8f65c16 100644
+--- a/crates/agent_tasks_panel/src/panel.rs
++++ b/crates/agent_tasks_panel/src/panel.rs
+@@ -36,6 +36,10 @@ use workspace::{
+ 
+ use crate::{Availability, HistoryEntry, TaskHistoryStore, TaskKey};
+ 
++/// What a row says when its thread opened but holds no entry for the task's starting tool call:
++/// no id was recorded, or the call belongs to a nested subagent (story 023 R3.3).
++const NO_ENTRY_NOTICE: &str = "Opened the thread; this task has no entry to jump to";
++
+ actions!(
+     agent_tasks_panel,
+     [
+@@ -453,6 +457,17 @@ impl AgentTasksPanel {
+             self.set_notice(key, "Thread no longer exists", cx);
+             return;
+         }
++        // "Open at Task" (story 023): the router scrolls to the call that started the task.
++        let tool_call_id = self
++            .store
++            .read(cx)
++            .records()
++            .iter()
++            .find(|entry| {
++                entry.record.session_id == *session_id && entry.record.task_id == *task_id
++            })
++            .and_then(|entry| entry.record.tool_call_id.clone())
++            .map(|id| acp::ToolCallId::new(id.to_string()));
+         let key = key.clone();
+         let workspace = self.workspace.clone();
+         let fallback_window = window.window_handle();
+@@ -465,7 +480,8 @@ impl AgentTasksPanel {
+                     OpenAgentSessionOptions {
+                         cwd: None,
+                         fallback_window: Some(fallback_window),
+-                        tool_call_id: None,
++                        tool_call_id,
++                        task_id: Some(key.1.clone()),
+                     },
+                     app_state,
+                     cx,
+@@ -483,7 +499,8 @@ impl AgentTasksPanel {
+     }
+ 
+     /// Shows how opening `key`'s thread ended: a failure on the task's row, with a WARN line
+-    /// naming the session and the task (story 024 R1.6); a success clears an earlier notice.
++    /// naming the session and the task (story 024 R1.6); an open with nothing to jump to says
++    /// so (story 023 R3.3); a jump clears an earlier notice.
+     fn finish_open(
+         &mut self,
+         key: &TaskKey,
+@@ -492,6 +509,9 @@ impl AgentTasksPanel {
+     ) {
+         let (session_id, task_id) = key;
+         match opened {
++            Ok(opened) if !opened.scrolled_to_tool_call => {
++                self.set_notice(key, NO_ENTRY_NOTICE, cx);
++            }
+             Ok(_) => {
+                 if self.notices.remove(key).is_some() {
+                     cx.notify();
+@@ -919,7 +939,7 @@ fn render_row(
+     let control_id =
+         |control: &'static str| ElementId::NamedChild(Arc::new(row_id.clone()), control.into());
+     let (detail, detail_color) = match row.notice.as_ref().or(row.error.as_ref()) {
+-        Some(message) => (message.clone(), Color::Error),
++        Some(message) => (message.clone(), notice_color(message)),
+         None => (row_detail(record).into(), status_color(record.status)),
+     };
+     // The user's label wins over the description, which `panel_row` keeps live (R3.9). The
+@@ -1102,7 +1122,16 @@ fn action_button(
+         .track_focus(focus_handle)
+ }
+ 
+-/// The Open Thread tooltip over `text`, a row's whole label. Its text carries the debug selector
++/// A failure is an error; "opened, with nothing to jump to" is an outcome, not one (R3.3).
++fn notice_color(notice: &str) -> Color {
++    if notice == NO_ENTRY_NOTICE {
++        Color::Muted
++    } else {
++        Color::Error
++    }
++}
++
++/// The tooltip naming the row's action, "Open at Task", over `text`, a row's whole label. Its text carries the debug selector
+ /// `agent-tasks-tooltip-open-{task_id}`, so tests can tell which row raised it.
+ fn open_thread_tooltip(
+     task_id: AgentTaskId,
+@@ -1121,7 +1150,7 @@ fn open_thread_tooltip(
+                     .child(text.clone())
+                     .into_any_element()
+             })
+-            .meta("Open Thread")
++            .meta("Open at Task")
+         })
+         .into()
+     }
+@@ -1475,3 +1504,11 @@ mod open_routing;
+ #[cfg(test)]
+ #[path = "panel/route_agreement_tests.rs"]
+ mod route_agreement;
++
++#[cfg(test)]
++#[path = "panel/open_at_task_tests.rs"]
++mod open_at_task;
++
++#[cfg(test)]
++#[path = "panel/tool_call_id_contract_tests.rs"]
++mod tool_call_id_contract;
+diff --git a/crates/agent_tasks_panel/src/panel/actions_tests.rs b/crates/agent_tasks_panel/src/panel/actions_tests.rs
+index a3cbfe2..056fd0f 100644
+--- a/crates/agent_tasks_panel/src/panel/actions_tests.rs
++++ b/crates/agent_tasks_panel/src/panel/actions_tests.rs
+@@ -82,9 +82,13 @@ async fn panel_actions_click_opens_the_thread_of_the_task(cx: &mut TestAppContex
+         Some(a.clone()),
+         "opens thread A, not the latest"
+     );
++    // Story 023 R3.3: a record with no tool call id opens with nothing to jump to, and says so.
+     assert_eq!(
+-        find_row(&mut panels, &a.to_string(), "t").unwrap().notice,
+-        None
++        find_row(&mut panels, &a.to_string(), "t")
++            .unwrap()
++            .notice
++            .as_deref(),
++        Some(NO_ENTRY_NOTICE)
+     );
+ 
+     assert_eq!(
+diff --git a/crates/agent_tasks_panel/src/panel/open_at_task_tests.rs b/crates/agent_tasks_panel/src/panel/open_at_task_tests.rs
+new file mode 100644
+index 0000000..162a406
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/open_at_task_tests.rs
+@@ -0,0 +1,300 @@
++// Story 023, task 4.2 — "Open at Task": a history row opens its thread in its project's
++// window (story 024's routing) scrolled to the tool call that started the task (R3.1, R3.2,
++// R3.3, R3.4, R3.5). Module path: `panel::open_at_task`. Wired in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/open_at_task_tests.rs"]
++//     mod open_at_task;
++//
++// Validation filter: `open_at_task_`. Fixtures: `test_helpers.rs` (story-024 and story-023
++// blocks). A routing failure's notice and WARN line are story 024's
++// `panel_actions_open_failure_shows_the_reason`, not repeated here.
++//
++// Hostile halves first: a nested subagent's call must not scroll the root thread to a wrong
++// entry (its parent call); a task with no id must not scroll to some other tool call; a
++// vanished thread keeps its own notice even when the record carries an id.
++
++use acp_thread::AgentTaskStatus;
++use gpui::TestAppContext;
++
++use crate::test_helpers::*;
++
++// R3.3 — hostile: the nested subagent's call (`toolu_parent_child`) is not a root entry; the
++// root holds the call that spawned it (`toolu_parent`). The thread opens in A, unscrolled to
++// that parent, and the row says there was no entry to jump to.
++#[gpui::test]
++async fn open_at_task_of_a_nested_subagent_opens_without_a_jump_and_says_so(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let thread = thread_with_calls(
++        &mut a,
++        "Thread of A",
++        &["toolu_parent"],
++        vec![wire_task_with_call(
++            "nested-task",
++            "running",
++            1_000,
++            Some("toolu_parent_child"),
++            1,
++        )],
++    );
++    let session = session_of(&thread, &a.cx);
++    let parent = tool_call_index(&thread, "toolu_parent", &a.cx);
++    let _later = thread_with_task(&mut a, "Later thread of A", "u");
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let tasks_panel_b = b.tasks_panel().clone();
++
++    open_from(
++        &tasks_panel_b,
++        &key(&session.to_string(), "nested-task"),
++        &mut b.cx,
++    );
++    a.cx.run_until_parked();
++
++    let agent_panel_a = a.agent_panel().clone();
++    assert_eq!(
++        shown_session(&agent_panel_a, &a.cx),
++        Some(session.clone()),
++        "the thread still opens, in its project's window"
++    );
++    assert_ne!(
++        scroll_top(&agent_panel_a, &mut a.cx),
++        parent,
++        "never scrolled to the subagent's parent call"
++    );
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "nested-task", &mut b.cx).as_deref(),
++        Some(NO_ENTRY_NOTICE)
++    );
++}
++
++// R3.3 — hostile: a task the feed gave no tool call id opens its thread and stays off the
++// thread's only tool call; the row says there was no entry to jump to.
++#[gpui::test]
++async fn open_at_task_without_a_tool_call_id_opens_without_a_jump_and_says_so(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let thread = thread_with_calls(
++        &mut a,
++        "Thread of A",
++        &["toolu_someone_else"],
++        vec![wire_task_with_call("no-id-task", "running", 1_000, None, 0)],
++    );
++    let session = session_of(&thread, &a.cx);
++    let other = tool_call_index(&thread, "toolu_someone_else", &a.cx);
++    let _later = thread_with_task(&mut a, "Later thread of A", "u");
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let tasks_panel_b = b.tasks_panel().clone();
++    let recorded = find_record(&tasks_panel_b, &session, "no-id-task", &mut b.cx);
++    assert_eq!(
++        recorded, None,
++        "precondition: the record has no tool call id"
++    );
++
++    open_from(
++        &tasks_panel_b,
++        &key(&session.to_string(), "no-id-task"),
++        &mut b.cx,
++    );
++    a.cx.run_until_parked();
++
++    let agent_panel_a = a.agent_panel().clone();
++    assert_eq!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    assert_ne!(scroll_top(&agent_panel_a, &mut a.cx), other);
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "no-id-task", &mut b.cx).as_deref(),
++        Some(NO_ENTRY_NOTICE)
++    );
++}
++
++// R3.4 — hostile: a record that carries a tool call id but whose thread no longer exists
++// opens nothing and says "Thread no longer exists" — not the no-entry notice.
++#[gpui::test]
++async fn open_at_task_of_a_vanished_thread_opens_nothing(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    db.insert_started(&record_with_call(
++        "gone-session",
++        "gone-task",
++        AgentTaskStatus::Completed,
++        1_000,
++        Some("toolu_gone"),
++    ))
++    .await
++    .unwrap();
++    let mut panels = open_panels(cx).await;
++    let here = open_live_thread(&mut panels, "Still here");
++    let here = session_of(&here, &panels.cx);
++    let windows = window_count(&mut panels.cx);
++
++    let tasks_panel = panels.tasks_panel.clone();
++    open_from(
++        &tasks_panel,
++        &key("gone-session", "gone-task"),
++        &mut panels.cx,
++    );
++
++    let notice = find_row(&mut panels, "gone-session", "gone-task")
++        .expect("the row is still listed")
++        .notice
++        .expect("the row says why nothing opened");
++    assert!(notice.contains("Thread no longer exists"), "got {notice:?}");
++    assert!(!notice.contains("no entry to jump to"), "got {notice:?}");
++    assert_eq!(active_session(&panels), Some(here), "nothing else opened");
++    assert_eq!(window_count(&mut panels.cx), windows, "no window opened");
++}
++
++// R3.1, R3.2, R3.5 — benign: from window B, the task opens in A, scrolled to the tool call
++// that started it; no notice; one log line names the session, the task and the tool call.
++#[gpui::test]
++async fn open_at_task_from_another_window_lands_on_its_tool_call(cx: &mut TestAppContext) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let thread = thread_with_calls(
++        &mut a,
++        "Thread of A",
++        &["toolu_before", "toolu_jump_23", "toolu_after"],
++        vec![wire_task_with_call(
++            "task-jump-23",
++            "running",
++            1_000,
++            Some("toolu_jump_23"),
++            0,
++        )],
++    );
++    let session = session_of(&thread, &a.cx);
++    let start = tool_call_index(&thread, "toolu_jump_23", &a.cx);
++    let _later = thread_with_task(&mut a, "Later thread of A", "u");
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let tasks_panel_b = b.tasks_panel().clone();
++
++    capture_logs();
++    open_from(
++        &tasks_panel_b,
++        &key(&session.to_string(), "task-jump-23"),
++        &mut b.cx,
++    );
++    a.cx.run_until_parked();
++
++    let agent_panel_a = a.agent_panel().clone();
++    assert_eq!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(a.any_window()),
++        "A is raised"
++    );
++    assert_eq!(
++        scroll_top(&agent_panel_a, &mut a.cx),
++        start,
++        "the thread is scrolled to the task's starting tool call"
++    );
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "task-jump-23", &mut b.cx),
++        None
++    );
++    let session_text = session.to_string();
++    let lines: Vec<String> = log_lines()
++        .into_iter()
++        .filter(|line| {
++            line.contains(&session_text)
++                && line.contains("task-jump-23")
++                && line.contains("toolu_jump_23")
++        })
++        .collect();
++    assert_eq!(
++        lines.len(),
++        1,
++        "one log line names the session, the task and the tool call: {:?}",
++        log_lines()
++    );
++}
++
++/// The tool call id the panel's row holds for `task`.
++fn find_record(
++    panel: &gpui::Entity<crate::AgentTasksPanel>,
++    session: &agent_client_protocol::schema::v1::SessionId,
++    task: &str,
++    cx: &mut gpui::VisualTestContext,
++) -> Option<String> {
++    panel
++        .update(cx, |panel, cx| panel.groups(cx))
++        .into_iter()
++        .flat_map(|group| group.rows)
++        .find(|row| {
++            &row.entry.record.session_id == session && row.entry.record.task_id.as_ref() == task
++        })
++        .expect("the task is listed")
++        .entry
++        .record
++        .tool_call_id
++        .map(|id| id.to_string())
++}
++
++// Review follow-up: the no-entry notice reads as an outcome, not a failure, and a later jump
++// that lands clears whatever notice the row carried.
++#[test]
++fn open_at_task_no_entry_notice_is_not_drawn_as_an_error() {
++    assert_eq!(super::notice_color(NO_ENTRY_NOTICE), ui::Color::Muted);
++    assert_eq!(
++        super::notice_color("Thread no longer exists"),
++        ui::Color::Error
++    );
++}
++
++#[gpui::test]
++async fn open_at_task_a_landed_jump_clears_an_earlier_notice(cx: &mut TestAppContext) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let thread = thread_with_calls(
++        &mut a,
++        "Thread of A",
++        &["toolu_clear"],
++        vec![wire_task_with_call(
++            "task-clear",
++            "running",
++            1_000,
++            Some("toolu_clear"),
++            0,
++        )],
++    );
++    let session = session_of(&thread, &a.cx);
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let tasks_panel_b = b.tasks_panel().clone();
++    let task_key = key(&session.to_string(), "task-clear");
++    tasks_panel_b.update(&mut b.cx, |panel, cx| {
++        panel.set_notice(&task_key, NO_ENTRY_NOTICE, cx)
++    });
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "task-clear", &mut b.cx).as_deref(),
++        Some(NO_ENTRY_NOTICE),
++        "precondition: the row carries a notice"
++    );
++
++    open_from(&tasks_panel_b, &task_key, &mut b.cx);
++    a.cx.run_until_parked();
++
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "task-clear", &mut b.cx),
++        None,
++        "the jump landed, so the row's notice is gone"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/open_routing_tests.rs b/crates/agent_tasks_panel/src/panel/open_routing_tests.rs
+index 565ec7b..013fd8f 100644
+--- a/crates/agent_tasks_panel/src/panel/open_routing_tests.rs
++++ b/crates/agent_tasks_panel/src/panel/open_routing_tests.rs
+@@ -94,7 +94,11 @@ async fn panel_actions_open_from_another_window_lands_in_its_project(cx: &mut Te
+         Some(vec![PathBuf::from("/work/zed")]),
+         "the metadata row keeps A's folder"
+     );
+-    assert_eq!(notice_of(&tasks_panel_b, &session, "t", &mut b.cx), None);
++    // Story 023 R3.3: a record with no tool call id opens with nothing to jump to, and says so.
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "t", &mut b.cx).as_deref(),
++        Some(NO_ENTRY_NOTICE)
++    );
+ }
+ 
+ // R1.2 — no window holds the thread's folders: one is opened over them, as `zeo <folder>`
+diff --git a/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs b/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs
+index 83ba40c..5182a88 100644
+--- a/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs
++++ b/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs
+@@ -66,6 +66,7 @@ async fn route_agreement_router_and_panel_row_open_a_session_in_its_project_wind
+                 cwd: None,
+                 fallback_window: Some(b_window),
+                 tool_call_id: None,
++                task_id: None,
+             },
+             app_state,
+             cx,
+@@ -140,5 +141,9 @@ async fn route_agreement_router_and_panel_row_open_a_session_in_its_project_wind
+         a_folders,
+         "after the panel row"
+     );
+-    assert_eq!(notice_of(&tasks_panel_b, &session, "t", &mut b.cx), None);
++    // Story 023 R3.3: a record with no tool call id opens with nothing to jump to, and says so.
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "t", &mut b.cx).as_deref(),
++        Some(NO_ENTRY_NOTICE)
++    );
+ }
+diff --git a/crates/agent_tasks_panel/src/panel/tool_call_id_contract_tests.rs b/crates/agent_tasks_panel/src/panel/tool_call_id_contract_tests.rs
+new file mode 100644
+index 0000000..6f9548f
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/tool_call_id_contract_tests.rs
+@@ -0,0 +1,168 @@
++// Story 023, task 5.1 — one tool call id, end to end: the feed's `toolCallId` (acp) becomes
++// the record's `SharedString`, the database's TEXT, the reloaded record, and the router's
++// `acp::ToolCallId` — and the scroll lands on the entry with that exact spelling (R2.1, R3.2,
++// R3.3). Module path: `panel::tool_call_id_contract`. Wired in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/tool_call_id_contract_tests.rs"]
++//     mod tool_call_id_contract;
++//
++// Validation filter: `tool_call_id_contract_`.
++//
++// The id is a value this story DERIVES at three type boundaries, so its hostile half is a
++// THIRD element: decoy ids that differ from it only by case, by an ASCII-folded letter, or by
++// a trailing space. Any normalisation on the way (lowercasing, folding, trimming) makes the
++// target collide with a decoy; the decoys sit BEFORE the target in the thread so that a
++// "first match" lands on them.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{AppContext as _, TestAppContext};
++
++use crate::TaskHistoryStore;
++use crate::test_helpers::*;
++
++const EXACT: &str = "toolu_01Ab:Cd/é-9";
++const LOWER: &str = "toolu_01ab:cd/é-9";
++const FOLDED: &str = "toolu_01Ab:Cd/e-9";
++const SPACED: &str = "toolu_01Ab:Cd/é-9 ";
++
++fn call_of(rows: &[crate::HistoryEntry], session: &str, task: &str) -> Option<String> {
++    find(rows, session, task)
++        .unwrap_or_else(|| panic!("{session}/{task} is recorded"))
++        .record
++        .tool_call_id
++        .as_ref()
++        .map(|id| id.to_string())
++}
++
++// R2.1 — feed → memory → disk → reload: each task keeps its own id byte for byte, decoys
++// included, through a restart of the store over the same database.
++#[gpui::test]
++async fn tool_call_id_contract_feed_to_disk_keeps_the_exact_spelling(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Contract thread");
++    let ids = [
++        ("lower", LOWER),
++        ("folded", FOLDED),
++        ("spaced", SPACED),
++        ("exact", EXACT),
++    ];
++    send_tasks(
++        &thread,
++        ids.iter()
++            .enumerate()
++            .map(|(n, (task, id))| {
++                wire_task_with_call(task, "running", 1_000 + n as u64, Some(id), 0)
++            })
++            .collect(),
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++
++    let memory = panels
++        .cx
++        .update(|_, cx| TaskHistoryStore::global(cx).read(cx).records().to_vec());
++    let stored = load(&db).await;
++    let reloaded_store = panels
++        .cx
++        .update(|_, cx| cx.new(|cx| TaskHistoryStore::new(db.clone(), cx)));
++    panels.cx.run_until_parked();
++    let reloaded = reloaded_store.read_with(&panels.cx, |store, _| store.records().to_vec());
++
++    for (rows, stage) in [(memory, "memory"), (stored, "disk"), (reloaded, "reload")] {
++        for (task, id) in ids {
++            assert_eq!(
++                call_of(&rows, &session, task).as_deref(),
++                Some(id),
++                "{stage}: task {task} keeps its own id"
++            );
++        }
++    }
++}
++
++// R3.2, R3.3 — disk → scroll: a record whose id reaches the panel ONLY through the database
++// (the live feed lists no task) scrolls the root thread, from another window, to the entry
++// with exactly that spelling — past three lookalikes placed before it. A nested record of the
++// same thread falls back to the no-entry notice.
++#[gpui::test]
++async fn tool_call_id_contract_disk_to_scroll_lands_on_the_exact_entry(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    // Window A first, without the Agent Tasks panel: the history is not loaded yet.
++    let mut a = project_window(&fs, &["/work/zed"], true, false, cx).await;
++    let thread = thread_with_calls(
++        &mut a,
++        "Thread of A",
++        &[LOWER, FOLDED, SPACED, EXACT],
++        vec![],
++    );
++    let session = session_of(&thread, &a.cx);
++    let exact = tool_call_index(&thread, EXACT, &a.cx);
++    for decoy in [LOWER, FOLDED, SPACED] {
++        assert!(
++            tool_call_index(&thread, decoy, &a.cx) < exact,
++            "precondition: {decoy:?} first"
++        );
++    }
++    let session_text = session.to_string();
++    db.insert_started(&record_with_call(
++        &session_text,
++        "contract-task",
++        AgentTaskStatus::Completed,
++        1_000,
++        Some(EXACT),
++    ))
++    .await
++    .unwrap();
++    db.insert_started(&record_with_call(
++        &session_text,
++        "contract-nested",
++        AgentTaskStatus::Completed,
++        2_000,
++        Some("toolu_contract_nested"),
++    ))
++    .await
++    .unwrap();
++    // Now the history loads, from disk.
++    cx.update(|cx| crate::init(cx));
++    let _later = thread_with_task(&mut a, "Later thread of A", "u");
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let tasks_panel_b = b.tasks_panel().clone();
++
++    open_from(
++        &tasks_panel_b,
++        &key(&session_text, "contract-task"),
++        &mut b.cx,
++    );
++    a.cx.run_until_parked();
++
++    let agent_panel_a = a.agent_panel().clone();
++    assert_eq!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    assert_eq!(
++        scroll_top(&agent_panel_a, &mut a.cx),
++        exact,
++        "the exact spelling's entry, not a lookalike"
++    );
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "contract-task", &mut b.cx),
++        None
++    );
++
++    let _later_again = thread_with_task(&mut a, "Another thread of A", "v");
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    open_from(
++        &tasks_panel_b,
++        &key(&session_text, "contract-nested"),
++        &mut b.cx,
++    );
++    a.cx.run_until_parked();
++    assert_eq!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    assert_eq!(
++        notice_of(&tasks_panel_b, &session, "contract-nested", &mut b.cx).as_deref(),
++        Some(NO_ENTRY_NOTICE)
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/store.rs b/crates/agent_tasks_panel/src/store.rs
+index fc31082..0a84837 100644
+--- a/crates/agent_tasks_panel/src/store.rs
++++ b/crates/agent_tasks_panel/src/store.rs
+@@ -87,6 +87,11 @@ enum HistoryWrite {
+         key: TaskKey,
+         label: Option<SharedString>,
+     },
++    /// A tool call id reported for a task recorded without one (story 023, R2.3).
++    ToolCallFilled {
++        key: TaskKey,
++        tool_call_id: SharedString,
++    },
+ }
+ 
+ impl HistoryWrite {
+@@ -100,6 +105,13 @@ impl HistoryWrite {
+                     .await
+             }
+             Self::Labeled { key, label } => db.set_label(key, label.as_deref()).await,
++            Self::ToolCallFilled {
++                key: (session_id, task_id),
++                tool_call_id,
++            } => {
++                db.fill_tool_call_id(session_id, task_id, tool_call_id)
++                    .await
++            }
+         };
+         if let Err(error) = result {
+             log::error!(
+@@ -138,6 +150,12 @@ impl HistoryWrite {
+                 key: (session_id, task_id),
+                 ..
+             } => format!("the label of task {task_id} in session {session_id}"),
++            Self::ToolCallFilled {
++                key: (session_id, task_id),
++                tool_call_id,
++            } => format!(
++                "the tool call {tool_call_id} that started task {task_id} in session {session_id}"
++            ),
+         }
+     }
+ }
+@@ -386,7 +404,8 @@ impl TaskHistoryStore {
+     /// snapshot (R1.3), or a re-opened session replaying `Started`, never rewrites a record nor
+     /// brings an ended or interrupted task back to running.
+     fn record_started(&mut self, mut record: TaskRecord) {
+-        if self.position(&record.session_id, &record.task_id).is_some() {
++        if let Some(index) = self.position(&record.session_id, &record.task_id) {
++            self.fill_tool_call_id(index, &record);
+             return;
+         }
+         if record.status.is_running() {
+@@ -413,6 +432,7 @@ impl TaskHistoryStore {
+             self.record_started(record);
+             return;
+         };
++        self.fill_tool_call_id(index, &record);
+         let stored = &mut self.records[index].record;
+         stored.status = record.status;
+         stored.ended_at_ms = record.ended_at_ms;
+@@ -421,6 +441,22 @@ impl TaskHistoryStore {
+         self.queue_write(HistoryWrite::Ended(record));
+     }
+ 
++    /// Gives a record kept without a tool call id the one a later report carries — a replayed
++    /// start after a restart, or the ending (R2.3). A stored id is never replaced: where a task
++    /// started does not move. Memory keeps the id even when the write fails.
++    fn fill_tool_call_id(&mut self, index: usize, report: &TaskRecord) {
++        let stored = &mut self.records[index].record;
++        let (None, Some(tool_call_id)) = (&stored.tool_call_id, &report.tool_call_id) else {
++            return;
++        };
++        stored.tool_call_id = Some(tool_call_id.clone());
++        let write = HistoryWrite::ToolCallFilled {
++            key: (stored.session_id.clone(), stored.task_id.clone()),
++            tool_call_id: tool_call_id.clone(),
++        };
++        self.queue_write(write);
++    }
++
+     /// Moves every record of the session to its thread's newest title. Nothing is written when
+     /// every record already carries it: cards announce a title again whenever they hold its
+     /// thread again, and a session with no record yet has nothing to rename — its first
+@@ -522,3 +558,7 @@ mod title;
+ #[cfg(test)]
+ #[path = "store/rename_tests.rs"]
+ mod rename;
++
++#[cfg(test)]
++#[path = "store/tool_call_id_tests.rs"]
++mod tool_call_id;
+diff --git a/crates/agent_tasks_panel/src/store/tool_call_id_tests.rs b/crates/agent_tasks_panel/src/store/tool_call_id_tests.rs
+new file mode 100644
+index 0000000..42632a6
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/store/tool_call_id_tests.rs
+@@ -0,0 +1,266 @@
++// Story 023, task 3.2 — the tool call id travels from the feed to the record, and a later
++// report fills a missing one in, in memory and on disk (R2.1, R2.3, Q4). Module path:
++// `store::tool_call_id`. Wired in `src/store.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "store/tool_call_id_tests.rs"]
++//     mod tool_call_id;
++//
++// Validation filter: `store_tool_call_id_`.
++//
++// Hostile halves first: a later report carrying a DIFFERENT id must not overwrite the stored
++// one (wrong overwrite), and a fill must not land on another task of the session, nor on the
++// same task id of another session (wrong collapse). Only then the benign fill.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, HistoryEntry, TaskHistoryStore};
++
++fn registered_store(db: &AgentTaskHistoryDb, rig: &mut CardRig) -> Entity<TaskHistoryStore> {
++    let store = rig.cx.new(|cx| TaskHistoryStore::new(db.clone(), cx));
++    rig.cx.run_until_parked();
++    let card = rig.card.clone();
++    store.update(&mut rig.cx, |store, cx| store.register_card(&card, cx));
++    rig.cx.run_until_parked();
++    store
++}
++
++fn entries(store: &Entity<TaskHistoryStore>, cx: &VisualTestContext) -> Vec<HistoryEntry> {
++    store.read_with(cx, |store, _| store.records().to_vec())
++}
++
++fn call_of(rows: &[HistoryEntry], session: &str, task: &str) -> Option<String> {
++    find(rows, session, task)
++        .unwrap_or_else(|| panic!("{session}/{task} is recorded"))
++        .record
++        .tool_call_id
++        .as_ref()
++        .map(|id| id.to_string())
++}
++
++// Hostile (wrong overwrite): a replayed start and an ending that carry a different id leave
++// the first id in memory and on disk.
++#[gpui::test]
++async fn store_tool_call_id_never_overwrites_a_different_id(cx: &mut TestAppContext) {
++    let mut rig = card_rig(cx).await;
++    let db = AgentTaskHistoryDb::open_test_db("store_tool_call_id_no_overwrite").await;
++    let store = registered_store(&db, &mut rig);
++    let card = rig.card.clone();
++    let first = record_with_call(
++        "s1",
++        "t1",
++        AgentTaskStatus::Running,
++        1_000,
++        Some("toolu_first"),
++    );
++    emit(&card, started(&first), &mut rig.cx);
++    let replay = record_with_call(
++        "s1",
++        "t1",
++        AgentTaskStatus::Running,
++        1_000,
++        Some("toolu_second"),
++    );
++    emit(&card, started(&replay), &mut rig.cx);
++    let end = record_with_call(
++        "s1",
++        "t1",
++        AgentTaskStatus::Completed,
++        1_000,
++        Some("toolu_third"),
++    );
++    emit(&card, ended(&end), &mut rig.cx);
++
++    assert_eq!(
++        call_of(&entries(&store, &rig.cx), "s1", "t1").as_deref(),
++        Some("toolu_first"),
++        "memory keeps the first id"
++    );
++    assert_eq!(
++        call_of(&load(&db).await, "s1", "t1").as_deref(),
++        Some("toolu_first"),
++        "the database keeps the first id"
++    );
++}
++
++// Hostile (wrong collapse): a report of (s1, t1) with an id fills that record only.
++#[gpui::test]
++async fn store_tool_call_id_fill_touches_only_its_own_task(cx: &mut TestAppContext) {
++    let mut rig = card_rig(cx).await;
++    let db = AgentTaskHistoryDb::open_test_db("store_tool_call_id_own_task").await;
++    let store = registered_store(&db, &mut rig);
++    let card = rig.card.clone();
++    for (session, task) in [("s1", "t1"), ("s1", "t2"), ("s2", "t1")] {
++        emit(
++            &card,
++            started(&record(session, task, AgentTaskStatus::Running, 1_000)),
++            &mut rig.cx,
++        );
++    }
++    emit(
++        &card,
++        started(&record_with_call(
++            "s1",
++            "t1",
++            AgentTaskStatus::Running,
++            1_000,
++            Some("toolu_s1_t1"),
++        )),
++        &mut rig.cx,
++    );
++
++    for rows in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(call_of(&rows, "s1", "t1").as_deref(), Some("toolu_s1_t1"));
++        assert_eq!(
++            call_of(&rows, "s1", "t2"),
++            None,
++            "another task of the session"
++        );
++        assert_eq!(
++            call_of(&rows, "s2", "t1"),
++            None,
++            "the same task id in another session"
++        );
++    }
++}
++
++// R2.3 — benign: a task recorded without an id (as a pre-story row, or a feed that had none
++// yet) gets it from a later start replay, or from its ending; memory and disk agree.
++#[gpui::test]
++async fn store_tool_call_id_fills_a_missing_id_from_a_later_report(cx: &mut TestAppContext) {
++    let mut rig = card_rig(cx).await;
++    let db = AgentTaskHistoryDb::open_test_db("store_tool_call_id_fill").await;
++    // A pre-story row: recorded before this story, so with no id.
++    db.insert_started(&record("s0", "legacy", AgentTaskStatus::Completed, 500))
++        .await
++        .unwrap();
++    let store = registered_store(&db, &mut rig);
++    let card = rig.card.clone();
++    emit(
++        &card,
++        started(&record_with_call(
++            "s0",
++            "legacy",
++            AgentTaskStatus::Completed,
++            500,
++            Some("toolu_legacy"),
++        )),
++        &mut rig.cx,
++    );
++    emit(
++        &card,
++        started(&record("s1", "ends", AgentTaskStatus::Running, 1_000)),
++        &mut rig.cx,
++    );
++    emit(
++        &card,
++        ended(&record_with_call(
++            "s1",
++            "ends",
++            AgentTaskStatus::Completed,
++            1_000,
++            Some("toolu_ends"),
++        )),
++        &mut rig.cx,
++    );
++
++    for rows in [entries(&store, &rig.cx), load(&db).await] {
++        assert_eq!(
++            call_of(&rows, "s0", "legacy").as_deref(),
++            Some("toolu_legacy")
++        );
++        assert_eq!(call_of(&rows, "s1", "ends").as_deref(), Some("toolu_ends"));
++    }
++}
++
++// R2.1 — through the real feed: `TaskRecord::new` keeps the snapshot's `toolCallId`, and a
++// task the feed gives none to is recorded with none (never an empty string).
++#[gpui::test]
++async fn store_tool_call_id_records_the_id_the_feed_provides(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Feed thread");
++    send_tasks(
++        &thread,
++        vec![
++            wire_task_with_call("with", "running", 1_000, Some("toolu_feed_01"), 0),
++            wire_task_with_call("without", "running", 2_000, None, 0),
++        ],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++
++    let memory = panels
++        .cx
++        .update(|_, cx| TaskHistoryStore::global(cx).read(cx).records().to_vec());
++    assert_eq!(
++        call_of(&memory, &session, "with").as_deref(),
++        Some("toolu_feed_01")
++    );
++    assert_eq!(call_of(&memory, &session, "without"), None);
++    let stored = load(&db).await;
++    assert_eq!(
++        call_of(&stored, &session, "with").as_deref(),
++        Some("toolu_feed_01")
++    );
++    assert_eq!(call_of(&stored, &session, "without"), None);
++}
++
++// Q4 — a fill the database refuses is logged at error level with the session and task ids,
++// like the other history writes, and memory keeps the id.
++#[gpui::test]
++async fn store_tool_call_id_failed_fill_is_logged_and_kept_in_memory(cx: &mut TestAppContext) {
++    let mut rig = card_rig(cx).await;
++    let db = AgentTaskHistoryDb::open_test_db("store_tool_call_id_failed_fill").await;
++    let store = registered_store(&db, &mut rig);
++    let card = rig.card.clone();
++    emit(
++        &card,
++        started(&record(
++            "session-fill",
++            "task-fill",
++            AgentTaskStatus::Running,
++            1_000,
++        )),
++        &mut rig.cx,
++    );
++    run_sql(
++        &db,
++        "CREATE TRIGGER refuse_fill BEFORE UPDATE OF tool_call_id ON agent_task_history \
++         BEGIN SELECT RAISE(ABORT, 'fill refused'); END",
++    )
++    .await;
++
++    capture_logs();
++    emit(
++        &card,
++        started(&record_with_call(
++            "session-fill",
++            "task-fill",
++            AgentTaskStatus::Running,
++            1_000,
++            Some("toolu_refused"),
++        )),
++        &mut rig.cx,
++    );
++
++    let errors = error_lines();
++    assert!(
++        errors
++            .iter()
++            .any(|line| line.contains("session-fill") && line.contains("task-fill")),
++        "the failed fill is logged at error level with its ids: {errors:?}"
++    );
++    assert_eq!(
++        call_of(&entries(&store, &rig.cx), "session-fill", "task-fill").as_deref(),
++        Some("toolu_refused"),
++        "memory keeps the id"
++    );
++    assert_eq!(
++        call_of(&load(&db).await, "session-fill", "task-fill"),
++        None,
++        "the refused write left the row as it was"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/test_helpers.rs b/crates/agent_tasks_panel/src/test_helpers.rs
+index 559eb6a..2b944c3 100644
+--- a/crates/agent_tasks_panel/src/test_helpers.rs
++++ b/crates/agent_tasks_panel/src/test_helpers.rs
+@@ -131,6 +131,8 @@ pub(crate) fn record(
+         status,
+         tokens: ended.then_some(100),
+         tool_uses: ended.then_some(3),
++        // Story 023: no tool call id unless a test gives one.
++        tool_call_id: None,
+     }
+ }
+ 
+@@ -283,7 +285,9 @@ impl AgentConnection for StopConnection {
+                 project,
+                 action_log,
+                 session_id,
+-                watch::Receiver::constant(agent_client_protocol::schema::v2::PromptCapabilities::new()),
++                watch::Receiver::constant(
++                    agent_client_protocol::schema::v2::PromptCapabilities::new(),
++                ),
+                 cx,
+             )
+         });
+@@ -743,3 +747,130 @@ pub(crate) fn notice_of(
+         .expect("the task is listed")
+         .notice
+ }
++
++// ── Story 023 — tool call ids, root entries, the scroll position, log lines ──
++//
++// Contract assumed: `TaskRecord::tool_call_id: Option<SharedString>`; the panel's open action
++// is still `AgentTasksPanel::open_task(&key, window, cx)` (now "Open at Task"); the thread
++// view the agent panel shows is `AgentPanel::active_thread_view(cx)` with its `list_state`.
++
++/// The notice a row shows when its thread opened but there is no entry to jump to (R3.3).
++pub(crate) const NO_ENTRY_NOTICE: &str = "Opened the thread; this task has no entry to jump to";
++
++/// `record`, carrying the tool call that started the task.
++pub(crate) fn record_with_call(
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    started_ms: i64,
++    tool_call_id: Option<&str>,
++) -> TaskRecord {
++    let mut record = record(session, task, status, started_ms);
++    record.tool_call_id = tool_call_id.map(|id| SharedString::from(id.to_string()));
++    record
++}
++
++/// `wire_task`, with an explicit `toolCallId` (`None` sends `null`), depth and type.
++pub(crate) fn wire_task_with_call(
++    id: &str,
++    status: &str,
++    started_at_ms: u64,
++    tool_call_id: Option<&str>,
++    depth: u32,
++) -> serde_json::Value {
++    let mut task = wire_task(id, status, started_at_ms, None);
++    task["toolCallId"] = json!(tool_call_id);
++    task["depth"] = json!(depth);
++    if depth > 0 {
++        task["type"] = json!("subagent");
++    }
++    task
++}
++
++/// Pushes into `thread`'s ROOT entries twenty question/answer pairs, then each tool call of
++/// `calls` followed by twenty more pairs — so scrolling to any of them moves the list.
++pub(crate) fn push_tool_calls(
++    thread: &Entity<AcpThread>,
++    calls: &[&str],
++    cx: &mut VisualTestContext,
++) {
++    thread.update(cx, |thread, cx| {
++        let mut push = |update: acp::SessionUpdate| {
++            thread
++                .handle_session_update(update, cx)
++                .expect("entry applies");
++        };
++        let pairs = |push: &mut dyn FnMut(acp::SessionUpdate), from: usize| {
++            for i in from..from + 20 {
++                push(acp::SessionUpdate::UserMessageChunk(
++                    acp::ContentChunk::new(format!("question {i}").into()),
++                ));
++                push(acp::SessionUpdate::AgentMessageChunk(
++                    acp::ContentChunk::new(format!("answer {i}").into()),
++                ));
++            }
++        };
++        pairs(&mut push, 0);
++        for (n, call) in calls.iter().enumerate() {
++            push(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
++                call.to_string(),
++                format!("Tool call {n}"),
++            )));
++            pairs(&mut push, (n + 1) * 20);
++        }
++    });
++    cx.run_until_parked();
++}
++
++/// The index of the root entry that is the tool call `id`, compared byte for byte.
++pub(crate) fn tool_call_index(
++    thread: &Entity<AcpThread>,
++    id: &str,
++    cx: &VisualTestContext,
++) -> usize {
++    thread.read_with(cx, |thread, _| {
++        thread
++            .entries()
++            .iter()
++            .position(|entry| {
++                matches!(entry, acp_thread::AgentThreadEntry::ToolCall(call) if call.id.to_string() == id)
++            })
++            .unwrap_or_else(|| panic!("{id:?} is a root entry"))
++    })
++}
++
++/// The first entry `agent_panel`'s shown thread is scrolled to.
++pub(crate) fn scroll_top(agent_panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) -> usize {
++    let view = agent_panel.read_with(cx, |panel, cx| {
++        panel
++            .active_thread_view(cx)
++            .expect("the agent panel shows a thread")
++    });
++    view.read_with(cx, |view, _| view.list_state.logical_scroll_top().item_ix)
++}
++
++/// Every captured line, any level.
++pub(crate) fn log_lines() -> Vec<String> {
++    CAPTURED.with(|captured| {
++        captured
++            .borrow()
++            .iter()
++            .map(|(_, line)| line.clone())
++            .collect()
++    })
++}
++
++/// A live thread of `window`'s project whose root entries hold `calls`, listing `tasks`;
++/// returns the thread.
++pub(crate) fn thread_with_calls(
++    window: &mut ProjectWindow,
++    title: &str,
++    calls: &[&str],
++    tasks: Vec<serde_json::Value>,
++) -> Entity<AcpThread> {
++    let agent_panel = window.agent_panel().clone();
++    let thread = open_thread_on(&agent_panel, StopConnection::new(), title, &mut window.cx);
++    push_tool_calls(&thread, calls, &mut window.cx);
++    send_tasks(&thread, tasks, &mut window.cx);
++    thread
++}
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index ed0b003..9573118 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -1861,35 +1861,25 @@ impl AgentPanel {
+             ));
+         }
+         self.open_thread_by_session(session_id.clone(), window, cx);
+-        let thread = self
+-            .active_agent_thread(cx)
++        self.active_agent_thread(cx)
+             .filter(|thread| thread.read(cx).session_id() == session_id)
+             .with_context(|| format!("the thread of session {session_id} did not come forward"))?;
+ 
+         let Some(tool_call_id) = tool_call_id else {
+             return Ok(());
+         };
+-        // A nested subagent's tool call lives in its own thread, not among the
+-        // root's entries: that task opens the thread only.
+-        let Some(item_ix) = thread.read(cx).entries().iter().position(|entry| {
+-            matches!(entry, acp_thread::AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id)
+-        }) else {
++        let conversation = self
++            .active_conversation_view()
++            .cloned()
++            .with_context(|| format!("the thread of session {session_id} has no view"))?;
++        // A nested subagent's tool call is not a root entry: that task opens the
++        // thread only.
++        if scroll_to_root_tool_call(&conversation, tool_call_id, cx).is_none() {
+             log::debug!(
+                 "agent panel: tool call {tool_call_id} is not an entry of the root thread of \
+                  session {session_id}; opened without scrolling"
+             );
+-            return Ok(());
+-        };
+-        let thread_view = self
+-            .active_thread_view(cx)
+-            .with_context(|| format!("the thread of session {session_id} has no view"))?;
+-        thread_view.update(cx, |thread_view, cx| {
+-            thread_view.list_state.scroll_to(gpui::ListOffset {
+-                item_ix,
+-                offset_in_item: px(0.),
+-            });
+-            cx.notify();
+-        });
++        }
+         Ok(())
+     }
+ 
+@@ -7377,6 +7367,38 @@ impl AgentPanel {
+     }
+ }
+ 
++/// Scrolls `conversation`'s root thread to the entry of `tool_call_id` and
++/// returns its index, or `None` when the root thread has no such entry: a nested
++/// subagent's tool call lives in its own thread, not among the root's entries.
++/// The id is matched whole, so `toolu_t1` never lands on `toolu_t10`.
++pub(crate) fn scroll_to_root_tool_call(
++    conversation: &Entity<ConversationView>,
++    tool_call_id: &acp::ToolCallId,
++    cx: &mut App,
++) -> Option<usize> {
++    let thread_view = conversation.read(cx).root_thread_view()?;
++    let item_ix = thread_view
++        .read(cx)
++        .thread
++        .read(cx)
++        .entries()
++        .iter()
++        .position(|entry| {
++            matches!(entry, acp_thread::AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id)
++        })?;
++    // A subagent shown full screen would hide the root list: the scroll would be reported
++    // but never seen.
++    conversation.update(cx, |conversation, cx| conversation.show_root_thread(cx));
++    thread_view.update(cx, |thread_view, cx| {
++        thread_view.list_state.scroll_to(gpui::ListOffset {
++            item_ix,
++            offset_in_item: px(0.),
++        });
++        cx.notify();
++    });
++    Some(item_ix)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/agent_ui/src/agent_session_router.rs b/crates/agent_ui/src/agent_session_router.rs
+index 2aabbfd..496023f 100644
+--- a/crates/agent_ui/src/agent_session_router.rs
++++ b/crates/agent_ui/src/agent_session_router.rs
+@@ -15,6 +15,7 @@ use std::pin::pin;
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
++use acp_thread::AgentTaskId;
+ use agent_client_protocol::schema::v1 as acp;
+ use anyhow::{Context as _, Result, anyhow};
+ use fs::Fs;
+@@ -27,6 +28,7 @@ use util::ResultExt as _;
+ use workspace::{AppState, MultiWorkspace, OpenMode, OpenOptions, Workspace, WorkspaceMatching};
+ 
+ use crate::AgentPanel;
++use crate::agent_panel::scroll_to_root_tool_call;
+ use crate::conversation_view::ConversationView;
+ use crate::thread_metadata_store::ThreadMetadataStore;
+ 
+@@ -48,8 +50,12 @@ pub struct OpenAgentSessionOptions {
+     /// The window used when the thread has no local folders: a remote thread, or
+     /// a session with neither a row nor a `cwd`. `None` uses the active window.
+     pub fallback_window: Option<AnyWindowHandle>,
+-    /// Reserved for scrolling to a tool call (story 023); ignored here.
++    /// The tool call to scroll the opened thread to, once it has loaded. Only an
++    /// entry of the root thread is scrolled to; any other id opens the thread
++    /// without scrolling.
+     pub tool_call_id: Option<acp::ToolCallId>,
++    /// The task the open is for, named in the log line a scroll writes.
++    pub task_id: Option<AgentTaskId>,
+ }
+ 
+ /// Where the session was opened.
+@@ -57,11 +63,15 @@ pub struct OpenAgentSessionOptions {
+ pub struct OpenedAgentSession {
+     pub window: AnyWindowHandle,
+     pub workspace: Entity<Workspace>,
++    /// Whether the thread was scrolled to the requested tool call: `false` when
++    /// none was requested or the root thread has no entry for it.
++    pub scrolled_to_tool_call: bool,
+ }
+ 
+ /// Opens `session_id`'s thread in the window that holds its project, raises that
+ /// window, and resolves once that window's agent panel holds a loaded
+-/// conversation for the session.
++/// conversation for the session, scrolled to `options.tool_call_id` when that is
++/// one of its root thread's entries.
+ ///
+ /// Every failure is an `Err` naming the session and the step that failed; the
+ /// thread is never opened in another window as a silent fallback.
+@@ -75,7 +85,8 @@ pub fn open_agent_session(
+         let OpenAgentSessionOptions {
+             cwd,
+             fallback_window,
+-            tool_call_id: _,
++            tool_call_id,
++            task_id,
+         } = options;
+ 
+         // No window has an agent panel while AI is disabled, so refuse before
+@@ -136,18 +147,33 @@ pub fn open_agent_session(
+             .with_context(|| format!("open agent session {session_id}: the window is gone"))??;
+ 
+         let deadline = cx.background_executor().timer(THREAD_LOAD_TIMEOUT);
+-        before(deadline, wait_until_loaded(&session_id, conversation, cx))
+-            .await
+-            .with_context(|| {
+-                format!(
+-                    "open agent session {session_id}: the thread did not load within \
++        before(
++            deadline,
++            wait_until_loaded(&session_id, conversation.clone(), cx),
++        )
++        .await
++        .with_context(|| {
++            format!(
++                "open agent session {session_id}: the thread did not load within \
+                      {THREAD_LOAD_TIMEOUT:?}"
+-                )
+-            })??;
++            )
++        })??;
++
++        let scrolled_to_tool_call = match tool_call_id {
++            Some(tool_call_id) => scroll_to_tool_call(
++                &session_id,
++                task_id.as_ref(),
++                &tool_call_id,
++                &conversation,
++                cx,
++            )?,
++            None => false,
++        };
+ 
+         Ok(OpenedAgentSession {
+             window: window.into(),
+             workspace,
++            scrolled_to_tool_call,
+         })
+     })
+ }
+@@ -463,6 +489,47 @@ async fn wait_until_loaded(
+     }
+ }
+ 
++/// Scrolls the loaded `conversation` to `tool_call_id` and says whether it did.
++/// A tool call that is not an entry of the root thread — a nested subagent's, or
++/// an id the thread never had — is not an error: the thread is open, with nothing
++/// to jump to.
++fn scroll_to_tool_call(
++    session_id: &acp::SessionId,
++    task_id: Option<&AgentTaskId>,
++    tool_call_id: &acp::ToolCallId,
++    conversation: &WeakEntity<ConversationView>,
++    cx: &mut AsyncApp,
++) -> Result<bool> {
++    let task = task_id.map_or_else(|| "none".to_string(), ToString::to_string);
++    let item_ix = cx
++        .update(|cx| {
++            let conversation = conversation.upgrade()?;
++            Some(scroll_to_root_tool_call(&conversation, tool_call_id, cx))
++        })
++        .with_context(|| {
++            format!(
++                "open agent session {session_id}: the conversation closed before it could be \
++                 scrolled to tool call {tool_call_id} of task {task}"
++            )
++        })?;
++    match item_ix {
++        Some(item_ix) => {
++            log::info!(
++                "open agent session {session_id}: scrolled to tool call {tool_call_id} of task \
++                 {task} (entry {item_ix})"
++            );
++            Ok(true)
++        }
++        None => {
++            log::debug!(
++                "open agent session {session_id}: tool call {tool_call_id} of task {task} is not \
++                 an entry of the root thread; opened without scrolling"
++            );
++            Ok(false)
++        }
++    }
++}
++
+ #[cfg(test)]
+ #[path = "agent_session_router/routing_tests.rs"]
+ mod routing;
+@@ -470,3 +537,7 @@ mod routing;
+ #[cfg(test)]
+ #[path = "agent_session_router/review_tests.rs"]
+ mod review;
++
++#[cfg(test)]
++#[path = "agent_session_router/scroll_tests.rs"]
++mod scroll;
+diff --git a/crates/agent_ui/src/agent_session_router/review_tests.rs b/crates/agent_ui/src/agent_session_router/review_tests.rs
+index db7fb9f..42166d4 100644
+--- a/crates/agent_ui/src/agent_session_router/review_tests.rs
++++ b/crates/agent_ui/src/agent_session_router/review_tests.rs
+@@ -140,6 +140,7 @@ fn route(
+                 cwd: None,
+                 fallback_window: Some(fallback_window),
+                 tool_call_id: None,
++                task_id: None,
+             },
+             app_state,
+             cx,
+diff --git a/crates/agent_ui/src/agent_session_router/routing_tests.rs b/crates/agent_ui/src/agent_session_router/routing_tests.rs
+index 65b86f6..d103654 100644
+--- a/crates/agent_ui/src/agent_session_router/routing_tests.rs
++++ b/crates/agent_ui/src/agent_session_router/routing_tests.rs
+@@ -197,6 +197,7 @@ fn route(
+                 cwd,
+                 fallback_window: Some(fallback_window),
+                 tool_call_id: None,
++                task_id: None,
+             },
+             app_state,
+             cx,
+diff --git a/crates/agent_ui/src/agent_session_router/scroll_tests.rs b/crates/agent_ui/src/agent_session_router/scroll_tests.rs
+new file mode 100644
+index 0000000..55dfbde
+--- /dev/null
++++ b/crates/agent_ui/src/agent_session_router/scroll_tests.rs
+@@ -0,0 +1,288 @@
++// Story 023, task 4.1 — `open_agent_session` with a tool call id scrolls the opened ROOT
++// thread to that tool call once the thread is held, and reports whether it did (R3.2, R3.3).
++// Wired in `src/agent_session_router.rs` (story 024's module) as
++//
++//     #[cfg(test)]
++//     #[path = "agent_session_router/scroll_tests.rs"]
++//     mod scroll;
++//
++// Validation filter: `agent_session_router_scroll_`.
++//
++// Contract: story 024's `crate::{open_agent_session, OpenAgentSessionOptions,
++// OpenedAgentSession}` with `OpenAgentSessionOptions::tool_call_id: Option<acp::ToolCallId>`,
++// plus this story's `OpenedAgentSession::scrolled_to_tool_call: bool`. The window rig is a
++// trimmed copy of story 024's `routing_tests.rs` fixtures (private to that module).
++//
++// Hostile halves first, for "the entry that IS this tool call":
++//   - wrongly COLLAPSE: a nested subagent's id that extends a root call's id
++//     (`toolu_parent_child` vs `toolu_parent`), and a prefix of it (`toolu_paren`), must not
++//     scroll to `toolu_parent`; a root call `toolu_t10` placed BEFORE `toolu_t1` must not be
++//     taken for `toolu_t1`.
++//   - the benign case: the exact id, from another window, lands on its entry.
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++
++use acp_thread::{AcpThread, AgentThreadEntry, StubAgentConnection};
++use agent_client_protocol::schema::v1 as acp;
++use fs::FakeFs;
++use gpui::{
++    AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle,
++};
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, Workspace};
++
++use crate::{AgentPanel, OpenAgentSessionOptions, OpenedAgentSession, open_agent_session};
++
++fn init(cx: &mut TestAppContext) {
++    crate::conversation_view::tests::init_test(cx);
++    cx.update(|cx| {
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++}
++
++async fn shared_fs(cx: &mut TestAppContext, roots: &[&str]) -> Arc<FakeFs> {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    for root in roots {
++        fs.insert_tree(root, json!({ "file.txt": "" })).await;
++    }
++    fs
++}
++
++struct Win {
++    window: WindowHandle<MultiWorkspace>,
++    workspace: Entity<Workspace>,
++    panel: Entity<AgentPanel>,
++    cx: VisualTestContext,
++}
++
++impl Win {
++    fn any(&self) -> AnyWindowHandle {
++        self.window.into()
++    }
++}
++
++async fn window(fs: &Arc<FakeFs>, roots: &[&str], cx: &mut TestAppContext) -> Win {
++    let paths: Vec<&Path> = roots.iter().map(|root| Path::new(*root)).collect();
++    let project = Project::test(fs.clone(), paths, cx).await;
++    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = window
++        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++        .unwrap();
++    workspace.update(cx, |workspace, _| workspace.set_random_database_id());
++    let mut vcx = VisualTestContext::from_window(window.into(), cx);
++    vcx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(900.)));
++    let panel = workspace.update_in(&mut vcx, |workspace, window, cx| {
++        let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++        workspace.add_panel(panel.clone(), window, cx);
++        workspace.focus_panel::<AgentPanel>(window, cx);
++        panel
++    });
++    vcx.run_until_parked();
++    Win {
++        window,
++        workspace,
++        panel,
++        cx: vcx,
++    }
++}
++
++/// A live, persisted thread in `win` whose root entries are twenty message pairs, then each
++/// of `calls` followed by twenty more pairs. Returns the thread and its session.
++fn thread_with_calls(win: &mut Win, calls: &[&str]) -> (Entity<AcpThread>, acp::SessionId) {
++    crate::test_support::open_thread_with_connection(
++        &win.panel,
++        StubAgentConnection::new(),
++        &mut win.cx,
++    );
++    crate::test_support::send_message(&win.panel, &mut win.cx);
++    win.cx.run_until_parked();
++    let thread = win
++        .panel
++        .read_with(&win.cx, |panel, cx| panel.active_agent_thread(cx).unwrap());
++    thread.update(&mut win.cx, |thread, cx| {
++        let mut push = |update: acp::SessionUpdate| {
++            thread
++                .handle_session_update(update, cx)
++                .expect("entry applies");
++        };
++        let mut block = 0;
++        let mut pairs = |push: &mut dyn FnMut(acp::SessionUpdate)| {
++            for i in 0..20 {
++                push(acp::SessionUpdate::UserMessageChunk(
++                    acp::ContentChunk::new(format!("question {block}.{i}").into()),
++                ));
++                push(acp::SessionUpdate::AgentMessageChunk(
++                    acp::ContentChunk::new(format!("answer {block}.{i}").into()),
++                ));
++            }
++            block += 1;
++        };
++        pairs(&mut push);
++        for call in calls {
++            push(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
++                call.to_string(),
++                format!("Run {call}"),
++            )));
++            pairs(&mut push);
++        }
++    });
++    win.cx.run_until_parked();
++    let session = crate::test_support::active_session_id(&win.panel, &win.cx);
++    (thread, session)
++}
++
++/// A second thread brought to the front, so the first is held but not shown.
++fn later_thread(win: &mut Win) {
++    crate::test_support::open_thread_with_connection(
++        &win.panel,
++        StubAgentConnection::new(),
++        &mut win.cx,
++    );
++    crate::test_support::send_message(&win.panel, &mut win.cx);
++    win.cx.run_until_parked();
++}
++
++fn index_of(thread: &Entity<AcpThread>, id: &str, cx: &VisualTestContext) -> usize {
++    thread.read_with(cx, |thread, _| {
++        thread
++            .entries()
++            .iter()
++            .position(|entry| {
++                matches!(entry, AgentThreadEntry::ToolCall(call) if call.id.to_string() == id)
++            })
++            .unwrap_or_else(|| panic!("{id} is a root entry"))
++    })
++}
++
++fn scroll_top(panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) -> usize {
++    let view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
++    view.read_with(cx, |view, _| view.list_state.logical_scroll_top().item_ix)
++}
++
++fn shown_session(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Option<acp::SessionId> {
++    panel.read_with(cx, |panel, cx| {
++        panel
++            .active_agent_thread(cx)
++            .map(|thread| thread.read(cx).session_id().clone())
++    })
++}
++
++fn activate(win: &mut Win) {
++    win.cx.update(|window, _| window.activate_window());
++    win.cx.run_until_parked();
++}
++
++async fn route(
++    session: &acp::SessionId,
++    tool_call_id: Option<&str>,
++    caller: &Win,
++    cx: &mut TestAppContext,
++) -> OpenedAgentSession {
++    let app_state = caller
++        .workspace
++        .read_with(cx, |workspace, _| workspace.app_state().clone());
++    let fallback_window = caller.any();
++    let session = session.clone();
++    let tool_call_id = tool_call_id.map(|id| acp::ToolCallId::new(id.to_string()));
++    let routing = cx.update(|cx| {
++        open_agent_session(
++            session,
++            OpenAgentSessionOptions {
++                cwd: None::<PathBuf>,
++                fallback_window: Some(fallback_window),
++                tool_call_id,
++                task_id: None,
++            },
++            app_state,
++            cx,
++        )
++    });
++    cx.run_until_parked();
++    routing.await.expect("the session opens")
++}
++
++// R3.3 — hostile (wrong collapse): a nested subagent's call is not a root entry. Neither its
++// id (which extends the root call `toolu_parent` that spawned the subagent) nor a prefix of
++// that root id scrolls anywhere; no id at all scrolls nowhere either. Never an error.
++#[gpui::test]
++async fn agent_session_router_scroll_ignores_a_call_that_is_not_a_root_entry(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = window(&fs, &["/work/zed"], cx).await;
++    let (thread, session) = thread_with_calls(&mut a, &["toolu_parent"]);
++    let parent = index_of(&thread, "toolu_parent", &a.cx);
++    let mut b = window(&fs, &["/work/zed-patches"], cx).await;
++
++    for asked in [None, Some("toolu_parent_child"), Some("toolu_paren")] {
++        later_thread(&mut a);
++        activate(&mut b);
++        let opened = route(&session, asked, &b, cx).await;
++        a.cx.run_until_parked();
++
++        assert_eq!(opened.window, a.any(), "{asked:?}: the thread's own window");
++        assert_eq!(shown_session(&a.panel, &a.cx), Some(session.clone()));
++        assert!(
++            !opened.scrolled_to_tool_call,
++            "{asked:?} is not a root entry: no scroll is reported"
++        );
++        assert_ne!(
++            scroll_top(&a.panel, &mut a.cx),
++            parent,
++            "{asked:?} must not land on the subagent's parent call"
++        );
++    }
++}
++
++// R3.2 — hostile (wrong collapse): `toolu_t10` comes first in the thread and starts with
++// `toolu_t1`; asking for `toolu_t1` lands on `toolu_t1`.
++#[gpui::test]
++async fn agent_session_router_scroll_lands_on_the_exact_entry_not_a_lookalike(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = window(&fs, &["/work/zed"], cx).await;
++    let (thread, session) = thread_with_calls(&mut a, &["toolu_t10", "toolu_t1", "toolu_t100"]);
++    let lookalike = index_of(&thread, "toolu_t10", &a.cx);
++    let exact = index_of(&thread, "toolu_t1", &a.cx);
++    assert!(lookalike < exact, "precondition: the lookalike comes first");
++    later_thread(&mut a);
++    let mut b = window(&fs, &["/work/zed-patches"], cx).await;
++    activate(&mut b);
++
++    let opened = route(&session, Some("toolu_t1"), &b, cx).await;
++    a.cx.run_until_parked();
++
++    assert!(opened.scrolled_to_tool_call);
++    assert_eq!(scroll_top(&a.panel, &mut a.cx), exact);
++}
++
++// R3.2 — benign: from another window, the held thread comes forward in its own window and,
++// once it is shown, is scrolled to the tool call — not left where showing it put it.
++#[gpui::test]
++async fn agent_session_router_scroll_to_the_tool_call_from_another_window(cx: &mut TestAppContext) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut a = window(&fs, &["/work/zed"], cx).await;
++    let (thread, session) = thread_with_calls(&mut a, &["toolu_start"]);
++    let start = index_of(&thread, "toolu_start", &a.cx);
++    assert!(start > 0);
++    later_thread(&mut a);
++    let mut b = window(&fs, &["/work/zed-patches"], cx).await;
++    activate(&mut b);
++
++    let opened = route(&session, Some("toolu_start"), &b, cx).await;
++    a.cx.run_until_parked();
++
++    assert_eq!(opened.window, a.any());
++    assert_eq!(opened.workspace, a.workspace);
++    assert_eq!(shown_session(&a.panel, &a.cx), Some(session));
++    assert!(opened.scrolled_to_tool_call, "the scroll is reported");
++    assert_eq!(scroll_top(&a.panel, &mut a.cx), start);
++}
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index e8555a8..429e4b4 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -940,6 +940,23 @@ impl ConversationView {
+         cx.notify();
+     }
+ 
++    /// Shows the root thread when a subagent's thread is the one on screen; does nothing
++    /// otherwise. Focus is left where it is.
++    pub(crate) fn show_root_thread(&mut self, cx: &mut Context<Self>) {
++        let Some(root_session_id) = self.root_session_id.clone() else {
++            return;
++        };
++        let Some(connected) = self.as_connected_mut() else {
++            return;
++        };
++        if connected.active_id.as_ref() == Some(&root_session_id) {
++            return;
++        }
++        connected.navigate_to_thread(root_session_id);
++        cx.emit(AcpServerViewEvent::ActiveThreadChanged);
++        cx.notify();
++    }
++
+     pub fn set_work_dirs(&mut self, work_dirs: PathList, cx: &mut Context<Self>) {
+         if let Some(connected) = self.as_connected() {
+             connected.conversation.update(cx, |conversation, cx| {
+@@ -5508,6 +5525,65 @@ pub(crate) mod tests {
+         });
+     }
+ 
++    // Story 023: a subagent shown full screen hides the root list, so jumping to a root tool
++    // call brings the root thread back instead of scrolling a list nobody sees.
++    #[gpui::test]
++    async fn test_scroll_to_root_tool_call_shows_the_root_thread(cx: &mut TestAppContext) {
++        init_test(cx);
++
++        let connection = StubAgentConnection::new().with_supports_load_session(true);
++        let (conversation_view, cx) =
++            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
++        add_to_workspace_with_size(conversation_view.clone(), true, cx);
++        let root_session_id = active_thread(&conversation_view, cx)
++            .read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
++        cx.update(|_, cx| {
++            connection.send_update(
++                root_session_id.clone(),
++                acp_v1::SessionUpdate::ToolCall(acp_v1::ToolCall::new(
++                    "toolu_root",
++                    "Run toolu_root",
++                )),
++                cx,
++            );
++        });
++        let child_session_id = acp_v1::SessionId::new("child-session");
++        conversation_view.update_in(cx, |view, window, cx| {
++            view.load_subagent_session(
++                child_session_id.clone(),
++                root_session_id.clone(),
++                window,
++                cx,
++            );
++        });
++        cx.run_until_parked();
++        conversation_view.update_in(cx, |view, window, cx| {
++            view.navigate_to_thread(child_session_id.clone(), window, cx);
++        });
++        cx.run_until_parked();
++        active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
++            assert_eq!(view.thread.read(cx).session_id(), &child_session_id);
++        });
++
++        let item_ix = cx.update(|_, cx| {
++            crate::agent_panel::scroll_to_root_tool_call(
++                &conversation_view,
++                &acp_v1::ToolCallId::new("toolu_root"),
++                cx,
++            )
++        });
++        cx.run_until_parked();
++
++        assert_eq!(item_ix, Some(0));
++        active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
++            assert_eq!(
++                view.thread.read(cx).session_id(),
++                &root_session_id,
++                "the root thread is the one on screen"
++            );
++        });
++    }
++
+     #[gpui::test]
+     async fn test_session_notices_stay_with_background_session_without_metadata_updates(
+         cx: &mut TestAppContext,
+diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
+index f3a3b11..687c9f3 100644
+--- a/crates/agent_ui/src/tasks_card.rs
++++ b/crates/agent_ui/src/tasks_card.rs
+@@ -93,6 +93,14 @@ mod title;
+ #[path = "tasks_card/label_tests.rs"]
+ mod label;
+ 
++#[cfg(test)]
++#[path = "tasks_card/progress_tests.rs"]
++mod progress;
++
++#[cfg(test)]
++#[path = "tasks_card/progress_line_tests.rs"]
++mod progress_line;
++
+ // GPUI's test windows never activate their accessibility tree (the test platform's
+ // `a11y_init` drops the activation callback), so `debug_a11y_tree_json` has nothing to
+ // show; tests read the row controls' screen-reader labels of the last render from here.
+@@ -179,6 +187,8 @@ pub struct TaskRecord {
+     pub status: AgentTaskStatus,
+     pub tokens: Option<u64>,
+     pub tool_uses: Option<u64>,
++    /// The tool call that started the task, when the feed names one (story 023).
++    pub tool_call_id: Option<SharedString>,
+ }
+ 
+ impl TaskRecord {
+@@ -196,6 +206,12 @@ impl TaskRecord {
+             status: task.status,
+             tokens: task.usage.as_ref().map(|usage| usage.tokens),
+             tool_uses: task.usage.as_ref().map(|usage| usage.tool_uses),
++            // An empty id names no entry, and stored it would block the later fill (R2.3).
++            tool_call_id: task
++                .tool_call_id
++                .as_ref()
++                .filter(|id| !id.0.is_empty())
++                .map(|id| SharedString::from(id.0.to_string())),
+         }
+     }
+ 
+@@ -1478,36 +1494,73 @@ impl TasksCard {
+             ("Foreground", "Running in the Foreground")
+         };
+ 
+-        let timing = if task.status.is_running() {
++        // Every running row, watched or not, says what it is doing (story 023), on a line of its
++        // own under the description, so the description keeps the whole of line 1 (R1.6).
++        let progress_line = task.status.is_running().then(|| {
+             let elapsed = now.duration_since(task.started_at).unwrap_or_default();
+-            div()
+-                .debug_selector({
+-                    let task_id = task_id.clone();
+-                    move || format!("tasks-card-elapsed-{task_id}")
+-                })
+-                .flex_none()
++            h_flex()
++                .gap_1()
++                .min_w_0()
++                // An invisible copy of the kind indents the line under the description.
+                 .child(
+-                    Label::new(format_duration(elapsed))
+-                        .size(LabelSize::XSmall)
+-                        .color(Color::Muted),
++                    div().flex_none().invisible().child(
++                        Label::new(task.kind.clone())
++                            .size(LabelSize::XSmall)
++                            .color(Color::Muted),
++                    ),
++                )
++                .child(
++                    h_flex()
++                        .debug_selector({
++                            let task_id = task_id.clone();
++                            move || format!("tasks-card-progress-{task_id}")
++                        })
++                        .min_w_0()
++                        .gap_1()
++                        .child(
++                            Label::new(format!("{} ·", progress_activity(&task)))
++                                .size(LabelSize::XSmall)
++                                .color(Color::Muted)
++                                .single_line()
++                                .truncate(),
++                        )
++                        .child(
++                            div()
++                                .debug_selector({
++                                    let task_id = task_id.clone();
++                                    move || format!("tasks-card-elapsed-{task_id}")
++                                })
++                                .flex_none()
++                                .child(
++                                    Label::new(format_duration(elapsed))
++                                        .size(LabelSize::XSmall)
++                                        .color(Color::Muted),
++                                ),
++                        ),
+                 )
++        });
++
++        let timing = if task.status.is_running() {
++            None
+         } else {
+             let status = status_label(task.status);
+             let text = match ended_duration(&task) {
+                 Some(duration) => format!("{status} · {}", format_duration(duration)),
+                 None => status.to_string(),
+             };
+-            div()
+-                .debug_selector({
+-                    let task_id = task_id.clone();
+-                    move || format!("tasks-card-ended-{task_id}")
+-                })
+-                .flex_none()
+-                .child(
+-                    Label::new(text)
+-                        .size(LabelSize::XSmall)
+-                        .color(status_color(task.status)),
+-                )
++            Some(
++                div()
++                    .debug_selector({
++                        let task_id = task_id.clone();
++                        move || format!("tasks-card-ended-{task_id}")
++                    })
++                    .flex_none()
++                    .child(
++                        Label::new(text)
++                            .size(LabelSize::XSmall)
++                            .color(status_color(task.status)),
++                    ),
++            )
+         };
+ 
+         let watch_focus_handle = self.row_focus_handle(&key, RowControl::Watch, cx);
+@@ -1677,7 +1730,7 @@ impl TasksCard {
+                     ))
+                     .child(Chip::new(chip_label).label_size(LabelSize::XSmall)),
+             )
+-            .child(timing)
++            .children(timing)
+             .child(open_button)
+             .child(watch_button)
+             .children(background_button)
+@@ -1692,6 +1745,7 @@ impl TasksCard {
+             .pl_2()
+             .py_0p5()
+             .child(line)
++            .children(progress_line)
+             .when(watched, |this| this.child(render_details(&task, &task_id)))
+             .when_some(error, |this, error| {
+                 this.child(
+@@ -1939,6 +1993,31 @@ fn render_details(task: &AgentTask, task_id: &AgentTaskId) -> AnyElement {
+         .into_any_element()
+ }
+ 
++/// What a running row paints beside its controls: `<last tool> · <N> tools · <elapsed>`,
++/// or `starting · <elapsed>` before the first tool; `None` once the task ended (R1.1–R1.4).
++/// The row paints the same two parts as separate labels, on its second line; GPUI test windows report painted
++/// bounds, not text, so the tests read the text through this.
++#[cfg(test)]
++pub(crate) fn progress_label(task: &AgentTask, now: SystemTime) -> Option<SharedString> {
++    if !task.status.is_running() {
++        return None;
++    }
++    let elapsed = now.duration_since(task.started_at).unwrap_or_default();
++    Some(format!("{} · {}", progress_activity(task), format_duration(elapsed)).into())
++}
++
++/// The last tool and the tool count, or `starting` while the feed reports no tool use.
++fn progress_activity(task: &AgentTask) -> String {
++    let tool_uses = task.usage.as_ref().map_or(0, |usage| usage.tool_uses);
++    match &task.last_tool {
++        Some(last_tool) if tool_uses > 0 => {
++            let noun = if tool_uses == 1 { "tool" } else { "tools" };
++            format!("{last_tool} · {tool_uses} {noun}")
++        }
++        _ => "starting".to_string(),
++    }
++}
++
+ /// How long an ended task ran: its own end time, else the adapter's measured
+ /// duration; `None` when the adapter reported neither.
+ fn ended_duration(task: &AgentTask) -> Option<Duration> {
+diff --git a/crates/agent_ui/src/tasks_card/progress_line_tests.rs b/crates/agent_ui/src/tasks_card/progress_line_tests.rs
+new file mode 100644
+index 0000000..e809712
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/progress_line_tests.rs
+@@ -0,0 +1,211 @@
++// Story 023, task 8.1 — a running row's progress reads on a second line below its
++// description, so the description keeps the row's width; an ended row keeps its status and
++// duration on line 1 and gains no second line (R1.1, R1.4, R1.6). Wired in
++// `src/tasks_card.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "tasks_card/progress_line_tests.rs"]
++//     mod progress_line;
++//
++// Validation filter: `tasks_card_progress_line_`.
++//
++// Contract: the selectors of story 013/023 stay as they are — `tasks-card-row-{id}`,
++// `tasks-card-label-{id}` (the description), `tasks-card-mode-{id}` (the chip),
++// `tasks-card-open-{id}` / `tasks-card-stop-{id}` (controls), `tasks-card-progress-{id}`
++// holding `tasks-card-elapsed-{id}` (running), `tasks-card-ended-{id}` (ended). GPUI's test
++// window records painted bounds per debug selector; every assertion here is on those bounds.
++//
++// Hostile halves first: the progress must NOT share the description's line (which is what
++// squeezes the description to "Run…"), and the converse — an ended row must NOT be split
++// onto a second line it has nothing to put on.
++
++use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, px};
++use serde_json::json;
++
++use super::test_helpers::*;
++
++const LONG_DESCRIPTION: &str = "Run the whole workspace test suite and collect every failing \
++     test into a report grouped by crate";
++const LONG_TOOL: &str = "mcp__playwright__browser_take_screenshot_of_the_full_page";
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// A running wire task with a long description that has reported progress through a tool
++/// with a long name: today's one-line layout gives that progress up to half the line.
++fn busy_described(id: &str) -> serde_json::Value {
++    let mut task = wire_task(id, "running", true, 1_000);
++    task["description"] = json!(LONG_DESCRIPTION);
++    task["lastTool"] = json!(LONG_TOOL);
++    task["usage"] = json!({ "tokens": 4_321, "toolUses": 17, "durationMs": 9_000 });
++    task
++}
++
++/// An ended wire task with the same long description.
++fn ended_described(id: &str, status: &str) -> serde_json::Value {
++    let mut task = wire_task(id, status, true, 1_000);
++    task["description"] = json!(LONG_DESCRIPTION);
++    task["lastTool"] = json!(LONG_TOOL);
++    task["usage"] = json!({ "tokens": 4_321, "toolUses": 17, "durationMs": 9_000 });
++    task
++}
++
++fn bounds(selector: &'static str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
++    cx.debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"))
++}
++
++fn same_line(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
++    a.top() < b.bottom() && b.top() < a.bottom()
++}
++
++fn inside(inner: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
++    inner.left() >= outer.left()
++        && inner.right() <= outer.right()
++        && inner.top() >= outer.top()
++        && inner.bottom() <= outer.bottom()
++}
++
++// R1.6 (hostile half: the progress must not share the description's line) — on a running
++// row the progress is painted below the description, under it, inside the row; the kind,
++// chip and controls stay on the description's line, and the elapsed time stays inside the
++// progress (R1.1).
++#[gpui::test]
++async fn tasks_card_progress_line_is_painted_below_the_description(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![busy_described("t1")], &mut cx);
++    draw(&mut cx);
++    let sa = session_of(&a, &cx);
++    assert!(
++        find_row(&card(&panel, &cx), &sa, "t1", &mut cx).is_some(),
++        "precondition: t1 is on the card"
++    );
++
++    let row = bounds("tasks-card-row-t1", &mut cx);
++    let label = bounds("tasks-card-label-t1", &mut cx);
++    let progress = bounds("tasks-card-progress-t1", &mut cx);
++    let elapsed = bounds("tasks-card-elapsed-t1", &mut cx);
++
++    assert!(
++        progress.top() >= label.bottom(),
++        "the progress sits on a line below the description: \
++         progress {progress:?}, description {label:?}"
++    );
++    assert!(
++        inside(progress, row),
++        "the progress line is inside its row: {progress:?} in {row:?}"
++    );
++    assert!(
++        progress.left() >= label.left(),
++        "the progress line is indented under the description, not under the kind: \
++         progress {progress:?}, description {label:?}"
++    );
++    assert!(
++        inside(elapsed, progress) && same_line(progress, elapsed),
++        "the elapsed time is part of the progress line: {elapsed:?} in {progress:?}"
++    );
++    for control in [
++        "tasks-card-mode-t1",
++        "tasks-card-open-t1",
++        "tasks-card-stop-t1",
++    ] {
++        let control_bounds = bounds(control, &mut cx);
++        assert!(
++            same_line(control_bounds, label),
++            "{control} stays on the description's line: {control_bounds:?} vs {label:?}"
++        );
++        assert!(
++            !same_line(control_bounds, progress),
++            "{control} is not on the progress line: {control_bounds:?} vs {progress:?}"
++        );
++    }
++}
++
++// R1.6 — with the progress moved off line 1, a long description on a running row keeps
++// the whole of line 1 that the kind, the chip and the controls leave: it reaches the chip,
++// and nothing but the row's gap stands between the chip and the first control, however long
++// the last tool's name is.
++//
++// Not "wider than half the row": measured on 2026-10-06, the test card's row is 292px and
++// kind (~26px), chip (~61px) and three controls (~68px) leave the description ~118px even
++// with no progress on line 1, so a half-the-row bound would fail a correct layout. Today the
++// progress takes ~118px of line 1 and the description is painted 0px wide.
++#[gpui::test]
++async fn tasks_card_progress_line_leaves_the_description_the_whole_line(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![busy_described("t1")], &mut cx);
++    draw(&mut cx);
++
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t1").is_some(),
++        "precondition: the running row paints its progress"
++    );
++    let label = bounds("tasks-card-label-t1", &mut cx);
++    let chip = bounds("tasks-card-mode-t1", &mut cx);
++    let open = bounds("tasks-card-open-t1", &mut cx);
++    // `gap_1` is 4px; one gap plus rounding, never a whole element.
++    let one_gap = px(8.);
++    assert!(
++        open.left() - chip.right() <= one_gap,
++        "nothing but a gap between the chip and the first control on line 1: \
++         chip {chip:?}, open {open:?}"
++    );
++    assert!(
++        chip.left() - label.right() <= one_gap,
++        "the description reaches the chip: description {label:?}, chip {chip:?}"
++    );
++    assert!(
++        label.size.width > px(0.),
++        "the description is not squeezed away: {label:?}"
++    );
++}
++
++// R1.4 (converse hostile half: an ended row must not be split onto a second line) — an
++// ended row paints no progress, keeps its status and duration on the description's line,
++// and stays one line tall: as tall as another ended row, shorter than a running row whose
++// progress takes a second line.
++#[gpui::test]
++async fn tasks_card_progress_line_is_absent_from_an_ended_row(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(
++        &a,
++        vec![
++            ended_described("t1", "completed"),
++            ended_described("t2", "failed"),
++            busy_described("t3"),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t1").is_none(),
++        "no progress on an ended row"
++    );
++    let label = bounds("tasks-card-label-t1", &mut cx);
++    let ended = bounds("tasks-card-ended-t1", &mut cx);
++    assert!(
++        same_line(ended, label),
++        "status and duration stay on the description's line: {ended:?} vs {label:?}"
++    );
++
++    let ended_row = bounds("tasks-card-row-t1", &mut cx);
++    let other_ended_row = bounds("tasks-card-row-t2", &mut cx);
++    let running_row = bounds("tasks-card-row-t3", &mut cx);
++    assert_eq!(
++        ended_row.size.height, other_ended_row.size.height,
++        "every ended row is one line tall"
++    );
++    assert!(
++        ended_row.size.height < running_row.size.height,
++        "only a running row gains the progress line: ended {ended_row:?}, running {running_row:?}"
++    );
++}
+diff --git a/crates/agent_ui/src/tasks_card/progress_tests.rs b/crates/agent_ui/src/tasks_card/progress_tests.rs
+new file mode 100644
+index 0000000..6cd5f7b
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/progress_tests.rs
+@@ -0,0 +1,234 @@
++// Story 023, task 2.1 — a running row shows its last tool and tool count beside the
++// elapsed time, watched or not (R1.1, R1.2, R1.3, R1.4, R1.5). Wired in
++// `src/tasks_card.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "tasks_card/progress_tests.rs"]
++//     mod progress;
++//
++// Validation filter: `tasks_card_progress_`.
++//
++// Contract beyond the planned selector `tasks-card-progress-{task_id}`: GPUI's test window
++// records painted BOUNDS (debug selectors), not painted TEXT, so the text a running row
++// paints is read through `super::progress_label(&AgentTask, SystemTime) -> Option<_>`
++// (`Some("<last tool> · <N> tools · <elapsed>")` or `Some("starting · <elapsed>")` for a
++// running task, `None` once it ended), with `<elapsed>` in the card's existing duration
++// format. If the implementation names it differently, adjust `progress_text` below only.
++//
++// Hostile halves first: progress must NOT drag the watched-only details (tokens, summary)
++// into an unwatched row, and must NOT outlive the task's end.
++
++use std::time::{Duration, SystemTime};
++
++use acp_thread::AgentTask;
++use gpui::{TestAppContext, VisualTestContext};
++use serde_json::json;
++
++use super::test_helpers::*;
++
++fn progress_text(task: &AgentTask, now: SystemTime) -> Option<String> {
++    super::progress_label(task, now).map(|text| text.to_string())
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// A running wire task that has reported progress: its last tool, a tool count, a token
++/// count and a summary.
++fn busy_task(id: &str, last_tool: &str, tool_uses: u64) -> serde_json::Value {
++    let mut task = wire_task(id, "running", true, 1_000);
++    task["lastTool"] = json!(last_tool);
++    task["usage"] = json!({ "tokens": 4_321, "toolUses": tool_uses, "durationMs": 9_000 });
++    task["summary"] = json!(format!("Summary of {id}"));
++    task
++}
++
++fn task_of(
++    panel: &gpui::Entity<crate::AgentPanel>,
++    session: &agent_client_protocol::schema::v1::SessionId,
++    id: &str,
++    cx: &mut VisualTestContext,
++) -> AgentTask {
++    let card = card(panel, cx);
++    find_row(&card, session, id, cx)
++        .unwrap_or_else(|| panic!("task {id} is on the card"))
++        .task
++}
++
++// R1.1, R1.5 (hostile half) — an unwatched running row paints its progress, on the same line
++// as its elapsed time; tokens and summary stay watched-only.
++#[gpui::test]
++async fn tasks_card_progress_is_painted_on_an_unwatched_running_row(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    send_tasks(&a, vec![busy_task("t1", "Bash", 3)], &mut cx);
++    draw(&mut cx);
++    let sa = session_of(&a, &cx);
++
++    let row = find_row(&card(&panel, &cx), &sa, "t1", &mut cx).unwrap();
++    assert!(!row.watched, "precondition: nobody watches the row");
++    let progress = cx
++        .debug_bounds("tasks-card-progress-t1")
++        .expect("an unwatched running row paints its progress");
++    assert!(
++        cx.debug_bounds("tasks-card-details-t1").is_none(),
++        "tokens and summary stay watched-only"
++    );
++    let row_bounds = cx.debug_bounds("tasks-card-row-t1").expect("the row");
++    assert!(
++        progress.top() >= row_bounds.top() && progress.bottom() <= row_bounds.bottom(),
++        "the progress is painted on its own row: {progress:?} in {row_bounds:?}"
++    );
++    if let Some(elapsed) = cx.debug_bounds("tasks-card-elapsed-t1") {
++        assert!(
++            progress.top() < elapsed.bottom() && elapsed.top() < progress.bottom(),
++            "beside the elapsed time, on the same line: {progress:?} vs {elapsed:?}"
++        );
++    }
++
++    let task = row.task;
++    let now = task.started_at + Duration::from_secs(65);
++    assert_eq!(
++        progress_text(&task, now).as_deref(),
++        Some("Bash · 3 tools · 1m 05s")
++    );
++}
++
++// R1.3 — before the first tool the row says "starting", whether the feed sent no usage at all
++// or a usage with zero tool uses; a tool count of 0 is never shown as a last tool.
++#[gpui::test]
++async fn tasks_card_progress_says_starting_before_the_first_tool(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let mut zero = wire_task("t2", "running", true, 1_000);
++    zero["usage"] = json!({ "tokens": 12, "toolUses": 0, "durationMs": 500 });
++    send_tasks(
++        &a,
++        vec![wire_task("t1", "running", true, 1_000), zero],
++        &mut cx,
++    );
++    draw(&mut cx);
++    let sa = session_of(&a, &cx);
++
++    for id in ["t1", "t2"] {
++        let task = task_of(&panel, &sa, id, &mut cx);
++        let now = task.started_at + Duration::from_secs(7);
++        assert_eq!(
++            progress_text(&task, now).as_deref(),
++            Some("starting · 7s"),
++            "task {id} has used no tool yet"
++        );
++    }
++    assert!(cx.debug_bounds("tasks-card-progress-t1").is_some());
++    assert!(cx.debug_bounds("tasks-card-progress-t2").is_some());
++}
++
++// R1.2 — a new snapshot moves the row's last tool and tool count with nobody watching or
++// expanding it.
++#[gpui::test]
++async fn tasks_card_progress_follows_the_feed_without_watching(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let sa = session_of(&a, &cx);
++    send_tasks(&a, vec![busy_task("t1", "Read", 2)], &mut cx);
++    draw(&mut cx);
++    let first = task_of(&panel, &sa, "t1", &mut cx);
++    let now = first.started_at + Duration::from_secs(3);
++    assert_eq!(
++        progress_text(&first, now).as_deref(),
++        Some("Read · 2 tools · 3s")
++    );
++
++    send_tasks(&a, vec![busy_task("t1", "WebFetch", 12)], &mut cx);
++    draw(&mut cx);
++    let row = find_row(&card(&panel, &cx), &sa, "t1", &mut cx).unwrap();
++    assert!(!row.watched, "still unwatched");
++    assert_eq!(
++        progress_text(&row.task, now).as_deref(),
++        Some("WebFetch · 12 tools · 3s"),
++        "the row follows the newest snapshot"
++    );
++    assert!(cx.debug_bounds("tasks-card-progress-t1").is_some());
++    assert!(cx.debug_bounds("tasks-card-details-t1").is_none());
++}
++
++// R1.4 (hostile half) — once the task ends, its row shows its status and duration as today,
++// and no progress line survives the end.
++#[gpui::test]
++async fn tasks_card_progress_is_gone_once_the_task_ends(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let sa = session_of(&a, &cx);
++    send_tasks(&a, vec![busy_task("t1", "Bash", 4)], &mut cx);
++    draw(&mut cx);
++    assert!(cx.debug_bounds("tasks-card-progress-t1").is_some());
++
++    let mut done = busy_task("t1", "Bash", 4);
++    done["status"] = json!("completed");
++    done["endedAt"] = json!(4_000);
++    send_tasks(&a, vec![done], &mut cx);
++    draw(&mut cx);
++
++    assert!(
++        cx.debug_bounds("tasks-card-ended-t1").is_some(),
++        "the final status and duration are painted, as today"
++    );
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t1").is_none(),
++        "no progress line on an ended row"
++    );
++    let task = task_of(&panel, &sa, "t1", &mut cx);
++    assert_eq!(
++        progress_text(&task, task.started_at + Duration::from_secs(60)),
++        None,
++        "an ended task has no progress text"
++    );
++}
++
++// R1.5 — a watched row keeps its details (tokens, last tool, summary) and gains the progress
++// line; the unwatched neighbour gets the progress line only.
++#[gpui::test]
++async fn tasks_card_progress_keeps_the_watched_details(cx: &mut TestAppContext) {
++    let (panel, mut cx) = setup_card_panel(cx).await;
++    let connection = TaskActionsConnection::new();
++    let a = open_titled_thread(&panel, &connection, "A", &mut cx);
++    let sa = session_of(&a, &cx);
++    send_tasks(
++        &a,
++        vec![busy_task("t1", "Bash", 3), busy_task("t2", "Edit", 5)],
++        &mut cx,
++    );
++    let card = card(&panel, &cx);
++    let id = find_row(&card, &sa, "t1", &mut cx).unwrap().task.id;
++    card.update(&mut cx, |card, cx| card.toggle_watch(sa.clone(), id, cx));
++    draw(&mut cx);
++
++    assert!(
++        cx.debug_bounds("tasks-card-details-t1").is_some(),
++        "watched: details"
++    );
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t1").is_some(),
++        "watched: progress"
++    );
++    assert!(
++        cx.debug_bounds("tasks-card-details-t2").is_none(),
++        "unwatched: no details"
++    );
++    assert!(
++        cx.debug_bounds("tasks-card-progress-t2").is_some(),
++        "unwatched: progress"
++    );
++    let watched = cx.debug_bounds("tasks-card-row-t1").unwrap();
++    let plain = cx.debug_bounds("tasks-card-row-t2").unwrap();
++    assert!(
++        watched.size.height > plain.size.height,
++        "the watched row is still the expanded one"
++    );
++}
+diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
+index 7397d97..5c8247f 100644
+--- a/crates/zed/src/main.rs
++++ b/crates/zed/src/main.rs
+@@ -1052,6 +1052,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
+                         cwd,
+                         fallback_window: None,
+                         tool_call_id: None,
++                        task_id: None,
+                     },
+                     app_state,
+                     cx,
