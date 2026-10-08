@@ -14,8 +14,10 @@
 #   {"type": "<text>"} | {"key": ["<keysym>", ...]} | {"chord": ["<mod>", ..., "<key>"]} |
 #   {"click": [x, y]} | {"move": [x, y]} | {"sleep": <seconds, at most 60>} |
 #   {"shot": "<path.png>"}
-# A one-character key name that is not a letter or digit ("/") is sent as its
-# keysym, as live-proof.py does. What still differs from live-proof.py: focus and
+# A one-character key name that is not an ASCII letter or digit ("/", "é") is
+# sent as its keysym, as live-proof.py does, and so is each such part of an
+# xdotool combination ("ctrl+/"); a key name xdotool does not know fails the
+# step instead of being dropped. What still differs from live-proof.py: focus and
 # drag are rejected, coordinates must be whole pixels, a chord needs two or more
 # names, and a "key" name may also be an xdotool combination ("ctrl+shift+p"),
 # which live-proof.py rejects -- use "chord" in a script meant for both. A "window" field
@@ -29,7 +31,9 @@
 #            the same threads; without it a temporary directory is removed on exit
 #
 # X11 only, software rendering (llvmpipe): what this proves is behaviour, not
-# Wayland, not GPU rendering.
+# Wayland, not GPU rendering. Zeo gets a private D-Bus session and its own
+# XDG_RUNTIME_DIR, so it reaches nothing of the operator's session -- not the
+# keyring, not zeo-systray's socket.
 #
 # Test hooks: XVFB_PROOF_X11_ROOT (default /tmp, where .X11-unix and .X<N>-lock
 # live), XVFB_PROOF_TMP_ROOT (default /tmp, where the zp-XXXX directory is made),
@@ -67,6 +71,11 @@ ZEO_PID=""
 ZEO_PGID=""
 SLEEP_PID=""
 WINDOW_ID=""
+
+# Exported to Zeo and inherited by everything it spawns. After a crash, a process
+# is stopped only if it carries this exact value: a group number the kernel has
+# handed to someone else never does.
+RUN_MARK="xvfb-proof.$$.${SRANDOM}"
 
 # One entry per step, filled by validate_steps; values are read back from the file.
 STEP_KINDS=()
@@ -201,11 +210,12 @@ mine() {
 
 # stop <pid> [group] — SIGTERM, up to 5 s of grace, then SIGKILL. With "group",
 # the whole process group the PID leads: Zeo's own children (agent servers, the
-# CLI it spawns) go with it.
+# CLI it spawns) go with it. Only while the leader is alive: once it is gone the
+# group is stop_group's, which signals nothing without the run's mark.
 stop() {
 	local pid="$1" target="$1" tries
 	mine "${pid}" || return 0
-	[[ "${2-}" != group ]] || target="-${pid}"
+	[[ "${2-}" != group ]] || ! alive "${pid}" || target="-${pid}"
 	kill -TERM -- "${target}" 2>/dev/null || true
 	for ((tries = 50; tries > 0; tries--)); do
 		alive "${pid}" || break
@@ -218,21 +228,55 @@ stop() {
 	wait "${pid}" 2>/dev/null || true
 }
 
+# mark_of <pid> — "marked" when the process carries this run's RUN_MARK,
+# "unmarked" when it does not, nothing when it is gone or unreadable: a member
+# can exit between pgrep and this read, and must not be reported as a stranger.
+mark_of() {
+	local env
+	env="$({ tr '\0' '\n' <"/proc/$1/environ"; } 2>/dev/null)" || return 0
+	[[ -n "${env}" ]] || return 0
+	if grep -qxF "XVFB_PROOF_RUN=${RUN_MARK}" <<<"${env}"; then
+		printf 'marked'
+	else
+		printf 'unmarked'
+	fi
+}
+
+# group_members <pgid> <marked|unmarked> — PIDs of the session-led group <pgid>
+# with that mark.
+group_members() {
+	local p
+	for p in $(pgrep -g "$1" -s "$1" 2>/dev/null); do
+		[[ "$(mark_of "${p}")" != "$2" ]] || printf '%s\n' "${p}"
+	done
+	return 0
+}
+
 # stop_group <pgid> — the rest of a process group this run created, once its
-# leader is gone: a Zeo that crashed leaves its agent servers in it. The group
-# is only signalled while its session is still the one setsid made at launch,
-# so a recycled number is never touched.
+# leader is gone: a Zeo that crashed leaves its agent servers in it. Once the
+# leader is reaped the number can be handed to another session, so each member
+# is signalled on its own and only if it carries RUN_MARK; anything else in the
+# group is named and left alone.
 stop_group() {
-	local pgid="$1" tries
+	local pgid="$1" tries pids spared
 	[[ -n "${pgid}" ]] || return 0
-	pgrep -g "${pgid}" -s "${pgid}" >/dev/null 2>&1 || return 0
-	kill -TERM -- "-${pgid}" 2>/dev/null || true
+	spared="$(group_members "${pgid}" unmarked)"
+	[[ -z "${spared}" ]] ||
+		printf 'warning: process group %s holds pid(s) %s without this run'"'"'s mark; not signalled\n' \
+			"${pgid}" "$(printf '%s' "${spared}" | tr '\n' ' ')" >&2
+	pids="$(group_members "${pgid}" marked)"
+	[[ -n "${pids}" ]] || return 0
+	# shellcheck disable=SC2086  # one PID per word
+	kill -TERM -- ${pids} 2>/dev/null || true
 	for ((tries = 50; tries > 0; tries--)); do
-		pgrep -g "${pgid}" -s "${pgid}" >/dev/null 2>&1 || return 0
+		pids="$(group_members "${pgid}" marked)"
+		[[ -n "${pids}" ]] || return 0
 		sleep 0.1
 	done
-	printf 'warning: process group %s ignored SIGTERM for 5 s; killing it\n' "${pgid}" >&2
-	kill -KILL -- "-${pgid}" 2>/dev/null || true
+	printf 'warning: pid(s) %s of process group %s ignored SIGTERM for 5 s; killing them\n' \
+		"$(printf '%s' "${pids}" | tr '\n' ' ')" "${pgid}" >&2
+	# shellcheck disable=SC2086  # one PID per word
+	kill -KILL -- ${pids} 2>/dev/null || true
 }
 
 # cleanup — on every exit: stop what this run started, newest first, then drop
@@ -243,9 +287,24 @@ cleanup() {
 	stop "${ZEO_PID}" group
 	stop_group "${ZEO_PGID}"
 	stop "${XVFB_PID}"
+	unmount_leftovers
 	if [[ -n "${WORKDIR}" && -z "${KEEP}" ]]; then
 		rm -rf -- "${WORKDIR}"
 	fi
+}
+
+# unmount_leftovers — the private bus can activate xdg-document-portal, which
+# mounts a FUSE filesystem at run/doc. Stopped cleanly it unmounts itself; one
+# that had to be killed leaves the mount, and rm -rf cannot cross it.
+unmount_leftovers() {
+	local target fusermount
+	[[ -n "${WORKDIR}" ]] && command -v findmnt >/dev/null || return 0
+	fusermount="$(command -v fusermount3 || command -v fusermount)" || return 0
+	while read -r target; do
+		[[ "${target}" == "${WORKDIR}/"* ]] || continue
+		"${fusermount}" -u -z -- "${target}" 2>/dev/null ||
+			printf 'warning: could not unmount %s\n' "${target}" >&2
+	done < <(findmnt -rn -o TARGET 2>/dev/null)
 }
 
 # display_number <display> — the N of [host]:N[.screen], empty when there is none.
@@ -305,11 +364,14 @@ guard_display() {
 # --user-data-dir alone makes it a separate instance: on Linux the socket a second
 # launch would hand its arguments to lives under the data dir. ZED_STATELESS is
 # stripped rather than set, so a --keep directory keeps its threads.
+# dbus-run-session gives it a bus of its own, and run/ replaces the operator's
+# XDG_RUNTIME_DIR: zeo-systray listens there, and a proof must not notify it.
 launch_zeo() {
 	local log="${WORKDIR}/zeo.log"
 	[[ -x "${BINARY}" ]] || die 2 "the editor is not executable: ${BINARY}"
-	mkdir -p "${WORKDIR}/config" "${WORKDIR}/cache" "${WORKDIR}/state" ||
-		die 2 "cannot create config/, cache/ and state/ under ${WORKDIR}"
+	mkdir -p "${WORKDIR}/config" "${WORKDIR}/cache" "${WORKDIR}/state" "${WORKDIR}/run" ||
+		die 2 "cannot create config/, cache/, state/ and run/ under ${WORKDIR}"
+	chmod 700 "${WORKDIR}/run" || die 2 "cannot restrict ${WORKDIR}/run to its owner"
 	if [[ -n "${SETTINGS}" ]]; then
 		cp -- "${SETTINGS}" "${WORKDIR}/config/settings.json" || die 2 "cannot copy the settings: ${SETTINGS}"
 	fi
@@ -317,15 +379,18 @@ launch_zeo() {
 		cp -- "${KEYMAP}" "${WORKDIR}/config/keymap.json" || die 2 "cannot copy the keymap: ${KEYMAP}"
 	fi
 	guard_display "${XVFB_DISPLAY}"
-	# setsid makes Zeo lead its own process group, so stop() can take its
-	# children with it; in a non-interactive shell it execs without forking.
+	# setsid makes the session lead its own process group, so stop() can take
+	# Zeo, the bus and their children with it; in a non-interactive shell it
+	# execs without forking. dbus-run-session exits when Zeo does.
 	env -u ZED_STATELESS \
 		WAYLAND_DISPLAY= \
 		DISPLAY="${XVFB_DISPLAY}" \
 		ZED_ALLOW_EMULATED_GPU=1 \
 		XDG_CACHE_HOME="${WORKDIR}/cache" \
 		XDG_STATE_HOME="${WORKDIR}/state" \
-		setsid "${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
+		XDG_RUNTIME_DIR="${WORKDIR}/run" \
+		XVFB_PROOF_RUN="${RUN_MARK}" \
+		setsid dbus-run-session -- "${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
 	ZEO_PID=$!
 	ZEO_PGID="${ZEO_PID}"
 	printf 'zeo: pid %s, log %s\n' "${ZEO_PID}" "${log}"
@@ -353,21 +418,57 @@ wait_for_window() {
 # among committed proofs looking exactly like one.
 readonly MIN_CAPTURE_PX=200
 
-# keysym <name> — <name> as xdotool understands it. One character that is not a
-# letter or digit goes as its hex keysym, as live-proof.py sends it by codepoint:
-# xdotool knows "/" by no name, warns, exits 0 and types nothing.
+# keysym <name> — <name> as xdotool understands it. One character that is not an
+# ASCII letter or digit goes as its keysym, as live-proof.py sends it by
+# codepoint: xdotool knows "/" and "é" by no name, warns, exits 0 and types
+# nothing. Latin-1 keysyms are the codepoint itself; beyond it X11 uses
+# 0x1000000 + codepoint. Each part of a combination ("ctrl+/") is mapped alone,
+# so a combination whose key is "+" itself must name it "plus".
+# The locale is fixed so the mapping reads UTF-8 whatever the caller's LC_ALL.
 keysym() {
-	if [[ "${#1}" -eq 1 && "$1" != [[:alnum:]] ]]; then
-		printf '0x%x' "'$1"
+	local LC_ALL=C.UTF-8 name="$1" parts part cp out=""
+	if [[ "${#name}" -gt 1 && "${name}" == *+* ]]; then
+		IFS=+ read -ra parts <<<"${name}"
 	else
-		printf '%s' "$1"
+		parts=("${name}")
 	fi
+	for part in "${parts[@]}"; do
+		if [[ "${#part}" -eq 1 && "${part}" != [A-Za-z0-9] ]]; then
+			cp="$(printf '%d' "'${part}")"
+			((cp <= 0xff)) || cp=$((0x1000000 + cp))
+			part="$(printf '0x%x' "${cp}")"
+		fi
+		out+="${out:++}${part}"
+	done
+	printf '%s' "${out}"
 }
 
 # xdo <args...> — xdotool on the private display, after the guard.
 xdo() {
 	guard_display "${XVFB_DISPLAY}"
 	DISPLAY="${XVFB_DISPLAY}" xdotool "$@"
+}
+
+# xdo_key <n> <kind> <keysym...> — xdotool key, failing the step on a name it
+# does not know: xdotool only warns about one, and exits 0.
+xdo_key() {
+	local n="$1" kind="$2" err unknown
+	shift 2
+	guard_display "${XVFB_DISPLAY}"
+	err="$(DISPLAY="${XVFB_DISPLAY}" xdotool key -- "$@" 2>&1 >/dev/null)" ||
+		die 1 "step ${n} (${kind}): xdotool failed on $*${err:+: ${err}}"
+	if [[ "${err}" == *"No such key name"* ]]; then
+		unknown="$(sed -n "s/.*No such key name '\([^']*\)'.*/\1/p" <<<"${err}" | head -n 1)"
+		die 1 "step ${n} (${kind}): xdotool knows no key named '${unknown}'; nothing was typed"
+	fi
+	[[ -z "${err}" ]] || printf '%s\n' "${err}" >&2
+}
+
+# editor_alive <n> <kind> — exit 1 unless Zeo is still running: a capture of
+# the screen it left behind would pass every check and prove nothing.
+editor_alive() {
+	alive "${ZEO_PID}" ||
+		die 1 "step $1 ($2): Zeo is no longer running (log: ${WORKDIR}/zeo.log)"
 }
 
 # take_shot <n> <path> — capture the virtual screen and keep it only if sane.
@@ -395,6 +496,7 @@ run_steps() {
 	for i in "${!STEP_KINDS[@]}"; do
 		n=$((i + 1))
 		kind="${STEP_KINDS[i]}"
+		editor_alive "${n}" "${kind}"
 		[[ "${kind}" == shot ]] || printf 'step %d: %s\n' "${n}" "${kind}"
 		case "${kind}" in
 		type)
@@ -404,7 +506,7 @@ run_steps() {
 		key)
 			mapfile -t keys < <(jq -r --argjson i "${i}" '.[$i].key[]' "${STEPS_FILE}")
 			for k in "${!keys[@]}"; do keys[k]="$(keysym "${keys[k]}")"; done
-			xdo key -- "${keys[@]}" || die 1 "step ${n} (key): xdotool failed on ${keys[*]}"
+			xdo_key "${n}" key "${keys[@]}"
 			;;
 		chord)
 			# live-proof.py's chord: modifiers held, the last name pressed.
@@ -414,7 +516,7 @@ run_steps() {
 				IFS=+
 				printf '%s' "${keys[*]}"
 			)"
-			xdo key -- "${value}" || die 1 "step ${n} (chord): xdotool failed on ${value}"
+			xdo_key "${n}" chord "${value}"
 			;;
 		click | move)
 			read -r x y <<<"$(step_value "${i}" "${kind}")"
@@ -437,6 +539,7 @@ run_steps() {
 			;;
 		esac
 	done
+	editor_alive "${#STEP_KINDS[@]}" "${STEP_KINDS[-1]}"
 	printf 'done: %d steps on %s\n' "${#STEP_KINDS[@]}" "${XVFB_DISPLAY}"
 }
 
@@ -453,6 +556,7 @@ main() {
 	command -v import >/dev/null || die 2 "import (ImageMagick) is not on PATH"
 	command -v identify >/dev/null || die 2 "identify (ImageMagick) is not on PATH"
 	command -v setsid >/dev/null || die 2 "setsid (util-linux) is not on PATH"
+	command -v dbus-run-session >/dev/null || die 2 "dbus-run-session (dbus) is not on PATH"
 	command -v pgrep >/dev/null || die 2 "pgrep (procps) is not on PATH"
 	setup_workdir
 	start_xvfb

@@ -1471,11 +1471,24 @@ test_protocol_still_reports_drift_on_an_answering_lock() {
 #   ZEO_STUB_IGNORE_TERM=1 the editor ignores SIGTERM and must be killed
 #   ZEO_STUB_CRASH_CHILD=<file> the editor forks a child, records its PID in
 #                          <file> and exits at once, as a crash would
+#   ZEO_STUB_FOREIGN_CHILD=<file> with ZEO_STUB_CRASH_CHILD, also forks a child
+#                          stripped of the run marker, as a process that merely
+#                          inherited a recycled group number would be
+#   ZEO_STUB_EXIT_AFTER=<s> the editor shows its window, then exits after <s>
 #   XDOTOOL_STUB_FAIL=<sub> xdotool exits 1 when its first argument is <sub>
+#   XDOTOOL_STUB_UNKNOWN=<name> xdotool key warns that <name> is no key and
+#                          exits 0, as the real one does
 #   IDENTIFY_STUB_GEOM     what identify reports ("1920 1080" when unset)
 make_xvfb_stubs() {
 	local bindir="$1"
 	mkdir -p "${bindir}"
+	cat >"${bindir}/dbus-run-session" <<'STUB'
+#!/usr/bin/env bash
+printf 'DISPLAY=%s dbus-run-session %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
+while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+shift
+exec "$@"
+STUB
 	cat >"${bindir}/Xvfb" <<'STUB'
 #!/usr/bin/env bash
 printf 'DISPLAY=%s Xvfb %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
@@ -1493,6 +1506,7 @@ printf 'DISPLAY=%s zeo %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
 printf 'env WAYLAND_DISPLAY=[%s] XDG_CACHE_HOME=%s XDG_STATE_HOME=%s ZED_ALLOW_EMULATED_GPU=%s ZED_STATELESS=%s\n' \
 	"${WAYLAND_DISPLAY-unset}" "${XDG_CACHE_HOME-unset}" "${XDG_STATE_HOME-unset}" \
 	"${ZED_ALLOW_EMULATED_GPU-unset}" "${ZED_STATELESS-unset}" >>"${STUB_LOG}"
+printf 'env XDG_RUNTIME_DIR=%s XVFB_PROOF_RUN=%s\n' "${XDG_RUNTIME_DIR-unset}" "${XVFB_PROOF_RUN-unset}" >>"${STUB_LOG}"
 udd=""
 for ((i = 1; i < $#; i++)); do
 	[[ "${!i}" == --user-data-dir ]] && j=$((i + 1)) && udd="${!j}"
@@ -1503,9 +1517,17 @@ echo "zeo stub started"
 if [[ -n "${ZEO_STUB_CRASH_CHILD-}" ]]; then
 	sleep 300 &
 	printf '%s\n' "$!" >"${ZEO_STUB_CRASH_CHILD}"
+	if [[ -n "${ZEO_STUB_FOREIGN_CHILD-}" ]]; then
+		env -u XVFB_PROOF_RUN sleep 300 &
+		printf '%s\n' "$!" >"${ZEO_STUB_FOREIGN_CHILD}"
+	fi
 	exit 3
 fi
 printf '%s\n' "$$" >>"${STUB_PIDS}"
+if [[ -n "${ZEO_STUB_EXIT_AFTER-}" ]]; then
+	sleep "${ZEO_STUB_EXIT_AFTER}"
+	exit 3
+fi
 # An ignored signal stays ignored across exec: the sleep below then shrugs off
 # SIGTERM the way a hung editor would.
 [[ -z "${ZEO_STUB_IGNORE_TERM-}" ]] || trap '' TERM
@@ -1515,6 +1537,10 @@ STUB
 #!/usr/bin/env bash
 printf 'DISPLAY=%s xdotool %s\n' "${DISPLAY-}" "$*" >>"${STUB_LOG}"
 [[ "${1-}" != "${XDOTOOL_STUB_FAIL-}" ]] || exit 1
+if [[ "${1-}" == key && -n "${XDOTOOL_STUB_UNKNOWN-}" && " ${*//+/ } " == *" ${XDOTOOL_STUB_UNKNOWN} "* ]]; then
+	printf "(symbol) No such key name '%s'. Ignoring it.\n" "${XDOTOOL_STUB_UNKNOWN}" >&2
+	exit 0
+fi
 if [[ "${1-}" == search ]]; then
 	[[ -e "${STUB_WINDOW}" ]] || exit 1
 	echo 4194307
@@ -1970,6 +1996,82 @@ test_xvfb_proof_lifecycle_stops_the_group_of_a_crashed_editor() {
 	else
 		ok
 	fi
+	rm -rf "${tmp}"
+}
+
+# --- story 021 audit advisories, closed 2026-10-07 ---------------------------
+
+test_xvfb_proof_drive_unknown_key_name_fails_the_step() {
+	case_start "xvfb-proof: a key name xdotool does not know exits 1 naming step and name; later steps never run"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(XDOTOOL_STUB_UNKNOWN=Retrun run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" "[
+		{\"key\": [\"Retrun\"]}, {\"shot\": \"${tmp}/never.png\"}]")")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "step 1 (key)" &&
+		assert_contains "${out}" "Retrun" &&
+		assert_not_contains "$(stub_log "${tmp}")" "import" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drive_maps_combination_parts_and_non_ascii() {
+	case_start "xvfb-proof: punctuation inside a combination and non-ASCII characters reach xdotool as keysyms"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(LC_ALL=C run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"key": ["ctrl+/", "é", "€", "+"]}]')")"
+	status=$?
+	# LC_ALL=C on purpose: the mapping must not depend on the caller's locale.
+	assert_status 0 "${status}" &&
+		assert_contains "$(stub_log "${tmp}")" "xdotool key -- ctrl+0x2f 0xe9 0x10020ac 0x2b" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drive_detects_an_editor_that_died_mid_run() {
+	case_start "xvfb-proof: a Zeo that exits mid-run fails the next step with exit 1; no capture of an empty screen"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(ZEO_STUB_EXIT_AFTER=1.2 run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" "[
+		{\"sleep\": 2}, {\"shot\": \"${tmp}/empty.png\"}]")")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "step 2 (shot)" &&
+		assert_contains "${out}" "Zeo is no longer running" &&
+		assert_not_contains "$(stub_log "${tmp}")" "import" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_launch_isolates_bus_and_runtime_dir() {
+	case_start "xvfb-proof: Zeo runs on a private session bus with its own XDG_RUNTIME_DIR, mode 700"
+	local tmp out wd log
+	tmp="$(mktemp -d)"
+	out="$(XDG_RUNTIME_DIR=/run/user/operator run_xvfb_proof "${tmp}" --keep "${tmp}/k" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
+	wd="$(workdir_of "${out}")"
+	log="$(stub_log "${tmp}")"
+	assert_contains "${log}" "DISPLAY=:90 dbus-run-session -- " &&
+		assert_contains "${log}" "XDG_RUNTIME_DIR=${wd}/run " &&
+		assert_equal 700 "$(stat -c %a "${wd}/run" 2>/dev/null)" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_lifecycle_spares_a_process_without_the_run_marker() {
+	case_start "xvfb-proof: after a crash only processes carrying this run's marker are stopped, never a stranger in a reused group"
+	local tmp ours foreign
+	tmp="$(mktemp -d)"
+	(ZEO_STUB_CRASH_CHILD="${tmp}/ours" ZEO_STUB_FOREIGN_CHILD="${tmp}/foreign" \
+		run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.5}]')" >/dev/null)
+	ours="$(cat "${tmp}/ours" 2>/dev/null)"
+	foreign="$(cat "${tmp}/foreign" 2>/dev/null)"
+	if [[ -z "${ours}" || -z "${foreign}" ]]; then
+		no "the crashing stub did not record both children"
+	elif kill -0 "${ours}" 2>/dev/null; then
+		no "the marked child ${ours} outlived the run"
+	elif ! kill -0 "${foreign}" 2>/dev/null; then
+		no "the unmarked process ${foreign} was signalled"
+	else
+		ok
+	fi
+	kill -KILL "${ours}" "${foreign}" 2>/dev/null
 	rm -rf "${tmp}"
 }
 
@@ -2557,6 +2659,12 @@ main() {
 
 		test_xvfb_proof_drive_sends_punctuation_as_keysyms
 		test_xvfb_proof_lifecycle_stops_the_group_of_a_crashed_editor
+
+		test_xvfb_proof_drive_unknown_key_name_fails_the_step
+		test_xvfb_proof_drive_maps_combination_parts_and_non_ascii
+		test_xvfb_proof_drive_detects_an_editor_that_died_mid_run
+		test_xvfb_proof_launch_isolates_bus_and_runtime_dir
+		test_xvfb_proof_lifecycle_spares_a_process_without_the_run_marker
 	)
 
 	for t in "${tests[@]}"; do
