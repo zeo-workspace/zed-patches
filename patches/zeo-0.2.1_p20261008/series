@@ -42,6 +42,11 @@
 # flatpak-spawn) was keyed on Zed's app id and binary names, so it never fired
 # for dev.zeo.Zeo. Rebrand, so ungrouped; inert outside a Flatpak.
 0032-cli-let-the-Flatpak-escape-recognise-Zeo-s-app-id-an.patch
+# 0047: the About window names Zeo's version -- the package's RELEASE_VERSION,
+# which only `zeo --version` read until now -- and keeps Zed's AppVersion on a
+# row of its own, since extensions check compatibility against it. Rebrand, so
+# ungrouped.
+0047-zed-the-About-window-names-Zeo-s-version.patch
 
 # 0033: Claude Agent (Plus) and Claude Agent TUI ship as default agents -- npx
 # entries added to the ACP registry list and enabled in default.json, always
