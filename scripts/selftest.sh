@@ -2514,6 +2514,28 @@ test_release_refuses_unreadable_changelog_as_environment() {
 	rm -rf "${tmp}"
 }
 
+test_release_portable_jobs_caps_the_container() {
+	case_start "release-portable: ZP_PORTABLE_JOBS caps the container's CPUs and cargo's jobs; unset leaves both alone"
+	local tmp capped free
+	tmp="$(mktemp -d)"
+	release_env "${tmp}"
+	cl_header "${tmp}/CHANGELOG.md"
+	printf '## [0.9.9] — 2026-01-01\n\n### Added\n\n- A fixture.\n' >>"${tmp}/CHANGELOG.md"
+	# The docker stub builds nothing, so each run stops at the missing staged
+	# tree; only the arguments of its "run" calls matter here.
+	ZP_PORTABLE_JOBS=8 run_release "${tmp}" "${tmp}/CHANGELOG.md" --no-flatpak >/dev/null
+	capped="$(grep '^run ' "${tmp}/docker.log" | head -n 1)"
+	: >"${tmp}/docker.log"
+	run_release "${tmp}" "${tmp}/CHANGELOG.md" --no-flatpak >/dev/null
+	free="$(grep '^run ' "${tmp}/docker.log" | head -n 1)"
+	assert_contains "${capped}" "--cpus 8" &&
+		assert_contains "${capped}" "CARGO_BUILD_JOBS=8" &&
+		assert_contains "${free}" "run --rm" &&
+		assert_not_contains "${free}" "--cpus" &&
+		assert_not_contains "${free}" "CARGO_BUILD_JOBS" && ok
+	rm -rf "${tmp}"
+}
+
 # The release scripts print their own header comment as their help, so a
 # header that grows must not lose its last lines (story 028).
 test_release_help_prints_whole_header() {
@@ -2608,6 +2630,7 @@ main() {
 
 		test_release_refuses_version_without_changelog
 		test_release_refuses_unreadable_changelog_as_environment
+		test_release_portable_jobs_caps_the_container
 		test_release_help_prints_whole_header
 
 		test_refresh_preserves_source_set

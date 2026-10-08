@@ -26,6 +26,10 @@
 # A changelog that cannot be read ends it with exit 2, as the environment
 # problem it is.
 #
+# ZP_PORTABLE_JOBS=<n> caps the build at n CPUs: the container gets --cpus n and
+# cargo CARGO_BUILD_JOBS=n, so it runs n jobs rather than one per host core
+# squeezed into n. Unset, the container uses every core, as before.
+#
 # It never publishes. The artefacts land in ${ZP_PORTABLE_DIR}/<PF>/out/dist,
 # ready for `gh release upload` once a human authorises it.
 #
@@ -69,6 +73,12 @@ main() {
 	[[ -n "${webrtc}" && -f "${ZP_DISTDIR}/${webrtc}" ]] || die 2 "prebuilt WebRTC missing from ${ZP_DISTDIR}"
 	[[ -f "${files}/app-icon-zeo.png" ]] || die 2 "icons missing from ${files}"
 	command -v docker >/dev/null || die 2 "docker is required"
+	local jobs="${ZP_PORTABLE_JOBS:-}" limits=()
+	if [[ -n "${jobs}" ]]; then
+		[[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || die 2 "ZP_PORTABLE_JOBS must be a positive integer, got: ${jobs}"
+		limits=(--cpus "${jobs}" -e "CARGO_BUILD_JOBS=${jobs}")
+		printf 'jobs: %s CPUs\n' "${jobs}"
+	fi
 
 	local source_sha256
 	source_sha256="$(sha256sum "${ZP_DISTFILE}" | cut -d' ' -f1)"
@@ -83,7 +93,7 @@ main() {
 			die 1 "the build image failed to build"
 	fi
 
-	local run=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/work
+	local run=(docker run --rm "${limits[@]}" --user "$(id -u):$(id -g)" -e HOME=/work
 		-e "ZEO_PV=${pv}" -e "ZEO_PVR=${pvr}" -e "ZEO_COMMIT=${ZP_COMMIT}"
 		-e "ZEO_SOURCE_SHA256=${source_sha256}"
 		-v "${ZP_DISTFILE}:/in/zed.tar.gz:ro"
