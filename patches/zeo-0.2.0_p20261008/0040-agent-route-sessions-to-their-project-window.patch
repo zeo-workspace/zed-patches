@@ -1,0 +1,2768 @@
+From 256fefc160e27c5adea839f44e8b4e016ce97335 Mon Sep 17 00:00:00 2001
+From: zed-patches <zed-patches@localhost>
+Date: Mon, 5 Oct 2026 19:45:44 -0300
+Subject: [PATCH] agent: open an agent session in its own project's window
+
+Opening a task from the Agent Tasks panel loaded its thread into the
+window the panel lives in, whatever project the thread belongs to: a
+thread of project A opened from window B showed up in B's agent panel,
+under B, and nothing in the UI moved it back. 0035's open_task called
+focus_panel::<AgentPanel> and open_thread_by_session on its own
+workspace. The window resolution that made the tray link correct --
+folders from the metadata row, workspace::open_paths, raise -- lived only
+in crate zed (0024's handle_open_request and its private
+agent_session_folders), out of reach of agent_tasks_panel. 0035's test
+used one window whose project matched the thread, so it asserted the
+defect as correct behaviour; 0024's routing had no test at all. Story 024.
+
+Same function, second defect: open_task ran inside the row's click
+listener, while AgentTasksPanel was being updated. With both panels in one
+dock, focus_panel made the dock call set_active on the tasks panel and
+GPUI panicked with "cannot update AgentTasksPanel while it is already
+being updated". 0039 moved the panel's default to the bottom dock, which
+hides it in the default layout but not in one the user chooses.
+
+One router, in agent_ui. agent_ui::open_agent_session(session_id,
+OpenAgentSessionOptions { cwd, fallback_window, tool_call_id },
+app_state, cx) -> Task<Result<OpenedAgentSession { window, workspace }>>.
+It lives in agent_ui because agent_ui already owns AgentPanel,
+ThreadMetadataStore and open_thread_by_session and depends on workspace;
+agent_tasks_panel and zed both depend on agent_ui, so the tray link and
+the panel now share it. What it does:
+
+  * folders: waits on ThreadMetadataStore::reload_task, reads the row
+    (agent_session_folders, moved here from main.rs unchanged); a
+    remote_connection row gives none, a missing row falls back to cwd;
+  * window: the one whose visible folders equal the thread's exactly, as a
+    set in any order (open_paths' MatchExact takes the best partial match
+    and would add the missing folder to the user's window); otherwise a
+    NEW window over exactly those folders (WorkspaceMatching::None,
+    OpenMode::NewWindow); without folders, fallback_window or the active
+    window;
+  * a folder that no longer exists -- a removed git worktree, say -- is an
+    Err naming it, never a silent open in the focused window;
+  * AI disabled is an Err at once, before any window is opened;
+  * awaits the window's panels task, raises the window before focusing
+    the agent panel (focus_panel alone does not raise it on KDE), and
+    waits for a late AgentPanel through Workspace's PanelAdded event, or
+    for the window to close; a window whose panels loaded without one is
+    an Err at once, never a fall back to another window;
+  * returns only once the panel shows a loaded conversation for that
+    session; a load error is an Err; both waits are bounded at 60 s.
+
+Every Err names the session and the step that failed. tool_call_id is
+reserved for story 023 (open at the task) and ignored here.
+
+The tray link (zeo://agent?session=) calls it and logs an Err at WARN;
+the session-less link is untouched. AgentTasksPanel::open_task keeps its
+"Thread no longer exists" check, then spawns the router with its own
+window as the fallback, so nothing touches the workspace from inside the
+click listener. A failure sets the row's notice to the reason and logs
+one WARN line with the session and task ids; success clears the notice.
+
+Tests: agent_ui agent_session_router 11 (exact match in any order,
+prefix-named and sub-folder windows never taking a thread, remote and
+cwd fallbacks, new window instead of a partial match, missing folders,
+AI disabled, a late or absent agent panel, a window closed mid-wait);
+zed agent_session_route 1 (tray link from window B lands in A); the
+agent_tasks_panel suite 103, with open_routing (from B the thread lands
+in A, no window opens one, remote stays, a failure shows its reason, a
+real click in a shared left dock does not panic) and route_agreement
+(router and panel row agree on window, workspace and folders).
+---
+
+diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
+index cd8d4dd..7226dc5 100644
+--- a/crates/agent_tasks_panel/src/panel.rs
++++ b/crates/agent_tasks_panel/src/panel.rs
+@@ -14,7 +14,8 @@ use std::{cmp::Reverse, ops::Range, sync::Arc};
+ use acp_thread::{AgentTask, AgentTaskId, AgentTaskStatus};
+ use agent_client_protocol::schema::v1 as acp;
+ use agent_ui::{
+-    AgentPanel, DEFAULT_THREAD_TITLE, TaskRecord, TasksCard, collapse_label, display_label,
++    AgentPanel, DEFAULT_THREAD_TITLE, OpenAgentSessionOptions, OpenedAgentSession, TaskRecord,
++    TasksCard, collapse_label, display_label, open_agent_session,
+     thread_metadata_store::ThreadMetadataStore,
+ };
+ use anyhow::{Result, anyhow};
+@@ -431,10 +432,15 @@ impl AgentTasksPanel {
+         cx.notify();
+     }
+ 
+-    /// Opens the thread of `key`'s task in this workspace's agent panel (R2.5) — which brings
+-    /// forward a conversation it already holds rather than loading a second one. A thread
+-    /// that no longer exists opens nothing: the row says so instead (R2.7), since the agent
+-    /// panel would otherwise start an empty thread under the stale session id.
++    /// Opens the thread of `key`'s task in the window that holds its project (R2.5; story
++    /// 024 R1.1), through the same router as the tray link — which brings forward a
++    /// conversation the target agent panel already holds rather than loading a second one. A
++    /// thread that no longer exists opens nothing: the row says so instead (R2.7), since the
++    /// agent panel would otherwise start an empty thread under the stale session id.
++    ///
++    /// The routing runs in a spawned task, never inside the caller's update: the row's click
++    /// listener is updating this panel, and focusing the agent panel in a dock this panel
++    /// shares would update it again (story 024 R1.7).
+     pub fn open_task(&mut self, key: &TaskKey, window: &mut Window, cx: &mut Context<Self>) {
+         let (session_id, task_id) = key;
+         let thread_exists = ThreadMetadataStore::try_global(cx)
+@@ -447,27 +453,57 @@ impl AgentTasksPanel {
+             self.set_notice(key, "Thread no longer exists", cx);
+             return;
+         }
+-        let opened = self
+-            .workspace
+-            .update(cx, |workspace, cx| {
+-                let agent_panel = workspace.focus_panel::<AgentPanel>(window, cx)?;
+-                agent_panel.update(cx, |agent_panel, cx| {
+-                    agent_panel.open_thread_by_session(session_id.clone(), window, cx)
+-                });
+-                Some(())
+-            })
+-            .ok()
+-            .flatten();
+-        if opened.is_none() {
+-            log::error!(
+-                "agent tasks panel: cannot open task {task_id} of session {session_id}: \
+-                 this workspace has no agent panel"
+-            );
+-            self.set_notice(key, "The agent panel is not available", cx);
+-            return;
+-        }
+-        if self.notices.remove(key).is_some() {
+-            cx.notify();
++        let key = key.clone();
++        let workspace = self.workspace.clone();
++        let fallback_window = window.window_handle();
++        cx.spawn(async move |this, cx| {
++            let routing = cx.update(|cx| {
++                let app_state =
++                    workspace.read_with(cx, |workspace, _| workspace.app_state().clone())?;
++                anyhow::Ok(open_agent_session(
++                    key.0.clone(),
++                    OpenAgentSessionOptions {
++                        cwd: None,
++                        fallback_window: Some(fallback_window),
++                        tool_call_id: None,
++                    },
++                    app_state,
++                    cx,
++                ))
++            });
++            let opened = match routing {
++                Ok(routing) => routing.await,
++                Err(error) => Err(error.context("this panel's workspace is gone")),
++            };
++            // A panel closed meanwhile has no row left to show the outcome on.
++            this.update(cx, |panel, cx| panel.finish_open(&key, opened, cx))
++                .ok();
++        })
++        .detach();
++    }
++
++    /// Shows how opening `key`'s thread ended: a failure on the task's row, with a WARN line
++    /// naming the session and the task (story 024 R1.6); a success clears an earlier notice.
++    fn finish_open(
++        &mut self,
++        key: &TaskKey,
++        opened: Result<OpenedAgentSession>,
++        cx: &mut Context<Self>,
++    ) {
++        let (session_id, task_id) = key;
++        match opened {
++            Ok(_) => {
++                if self.notices.remove(key).is_some() {
++                    cx.notify();
++                }
++            }
++            Err(error) => {
++                log::warn!(
++                    "agent tasks panel: cannot open task {task_id} of session {session_id}: \
++                     {error:#}"
++                );
++                self.set_notice(key, format!("{error:#}"), cx);
++            }
+         }
+     }
+ 
+@@ -692,9 +728,13 @@ impl AgentTasksPanel {
+         })
+     }
+ 
+-    fn set_notice(&mut self, key: &TaskKey, notice: &'static str, cx: &mut Context<Self>) {
+-        self.notices
+-            .insert(key.clone(), SharedString::new_static(notice));
++    fn set_notice(
++        &mut self,
++        key: &TaskKey,
++        notice: impl Into<SharedString>,
++        cx: &mut Context<Self>,
++    ) {
++        self.notices.insert(key.clone(), notice.into());
+         cx.notify();
+     }
+ 
+@@ -1427,3 +1467,11 @@ mod rename_vanish;
+ #[cfg(test)]
+ #[path = "panel/dock_default_tests.rs"]
+ mod dock_default;
++
++#[cfg(test)]
++#[path = "panel/open_routing_tests.rs"]
++mod open_routing;
++
++#[cfg(test)]
++#[path = "panel/route_agreement_tests.rs"]
++mod route_agreement;
+diff --git a/crates/agent_tasks_panel/src/panel/actions_tests.rs b/crates/agent_tasks_panel/src/panel/actions_tests.rs
+index 6a955ef..a3cbfe2 100644
+--- a/crates/agent_tasks_panel/src/panel/actions_tests.rs
++++ b/crates/agent_tasks_panel/src/panel/actions_tests.rs
+@@ -51,7 +51,9 @@ async fn seed_finished(
+         .unwrap();
+ }
+ 
+-// R2.5 — a click opens the task's own thread. Hostile: both threads hold the same task id.
++// R2.5, story 024 R2.1 — a click opens the task's own thread; a thread of the panel's own
++// project opens in the same window, which stays active, and no window is opened.
++// Hostile: both threads hold the same task id.
+ #[gpui::test]
+ async fn panel_actions_click_opens_the_thread_of_the_task(cx: &mut TestAppContext) {
+     init_base(cx);
+@@ -71,6 +73,8 @@ async fn panel_actions_click_opens_the_thread_of_the_task(cx: &mut TestAppContex
+     let a = session_of(&thread_a, &panels.cx);
+     let b = session_of(&thread_b, &panels.cx);
+     assert_eq!(active_session(&panels), Some(b.clone()));
++    let own_window = panels.cx.update(|window, _| window.window_handle());
++    assert_eq!(window_count(&mut panels.cx), 1);
+ 
+     open(&mut panels, &a.to_string(), "t");
+     assert_eq!(
+@@ -83,8 +87,20 @@ async fn panel_actions_click_opens_the_thread_of_the_task(cx: &mut TestAppContex
+         None
+     );
+ 
++    assert_eq!(
++        window_count(&mut panels.cx),
++        1,
++        "a thread of this window's project opens no window"
++    );
++    assert_eq!(
++        active_window(&mut panels.cx),
++        Some(own_window),
++        "the panel's own window stays active"
++    );
++
+     open(&mut panels, &b.to_string(), "t");
+     assert_eq!(active_session(&panels), Some(b));
++    assert_eq!(window_count(&mut panels.cx), 1);
+ }
+ 
+ // R2.7 — a recorded task whose thread is gone says so on its row and opens nothing.
+diff --git a/crates/agent_tasks_panel/src/panel/open_routing_tests.rs b/crates/agent_tasks_panel/src/panel/open_routing_tests.rs
+new file mode 100644
+index 0000000..565ec7b
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/open_routing_tests.rs
+@@ -0,0 +1,427 @@
++// Story 024, task 3.1 — a task opens in its own project's window (R1.1, R1.2, R1.4, R1.6,
++// R1.7, Q4). Module path: `panel::open_routing`. Wired in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/open_routing_tests.rs"]
++//     mod open_routing;
++//
++// Validation filters: `panel_actions_open_` and `panel_actions_click_`.
++//
++// Fixtures shared with the route-agreement tests live in `test_helpers.rs` (story-024 block):
++// every window is built over ONE `FakeFs`, so the router's `workspace::open_paths` sees all of
++// them. Hostile fixtures come first, per requirement: window B's folder `/work/zed-patches`
++// carries A's `/work/zed` as a prefix, so a match by name prefix would wrongly collapse the
++// two projects into one.
++
++use std::path::{Path, PathBuf};
++
++use acp_thread::AgentTaskStatus;
++use agent_ui::AgentPanel;
++use agent_ui::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore};
++use gpui::{AppContext as _, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext};
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use crate::AgentTasksPanel;
++use crate::test_helpers::*;
++
++fn conversation_count(
++    agent_panel: &gpui::Entity<AgentPanel>,
++    cx: &gpui::VisualTestContext,
++) -> usize {
++    agent_panel.read_with(cx, |panel, _| panel.conversation_views().len())
++}
++
++// R1.1, R1.3 — THE BUG: a task of project A, opened from the Agent Tasks panel of window B,
++// opens in A (raised, holding the thread) and never in B; the row's folders stay A's.
++// Fails today: `open_task` opens the thread in the panel's own window.
++#[gpui::test]
++async fn panel_actions_open_from_another_window_lands_in_its_project(cx: &mut TestAppContext) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let session = thread_with_task(&mut a, "Thread of A", "t");
++    // A shows a later thread, so "held by A" below means brought forward, not left open.
++    let _later = thread_with_task(&mut a, "Later thread of A", "u");
++    let agent_panel_a = a.agent_panel().clone();
++    assert_ne!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    assert_eq!(
++        row_folders(&session, &mut a.cx),
++        Some(vec![PathBuf::from("/work/zed")]),
++        "precondition: the thread's metadata row records A's folder"
++    );
++    let thread_id = row_thread_id(&session, &mut a.cx);
++
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(b.any_window()),
++        "precondition: B is the active window"
++    );
++    let agent_panel_b = b.agent_panel().clone();
++    let tasks_panel_b = b.tasks_panel().clone();
++    let windows = window_count(&mut b.cx);
++    let conversations_in_b = conversation_count(&agent_panel_b, &b.cx);
++
++    open_from(&tasks_panel_b, &key(&session.to_string(), "t"), &mut b.cx);
++    a.cx.run_until_parked();
++
++    assert_eq!(
++        shown_session(&agent_panel_a, &a.cx),
++        Some(session.clone()),
++        "the thread opens in its project's window (A), not in the panel's window (B)"
++    );
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(a.any_window()),
++        "A is raised"
++    );
++    assert!(
++        !shows_thread(&agent_panel_b, thread_id, &b.cx),
++        "B's agent panel does not show A's thread"
++    );
++    assert_eq!(
++        conversation_count(&agent_panel_b, &b.cx),
++        conversations_in_b,
++        "B's agent panel holds no new conversation"
++    );
++    assert_eq!(window_count(&mut b.cx), windows, "no window is opened");
++    assert_eq!(
++        row_folders(&session, &mut b.cx),
++        Some(vec![PathBuf::from("/work/zed")]),
++        "the metadata row keeps A's folder"
++    );
++    assert_eq!(notice_of(&tasks_panel_b, &session, "t", &mut b.cx), None);
++}
++
++// R1.2 — no window holds the thread's folders: one is opened over them, as `zeo <folder>`
++// would, and raised; B is left alone. Every new workspace gets an agent panel, as Zeo's
++// `initialize_workspace` gives it one.
++#[gpui::test]
++async fn panel_actions_open_with_no_window_for_the_project_opens_one(cx: &mut TestAppContext) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let session = thread_with_task(&mut a, "Thread of A", "t");
++    let thread_id = row_thread_id(&session, &mut a.cx);
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    let b_window = b.window;
++
++    // Close A: the thread's metadata row and its task record outlive the window.
++    let ProjectWindow {
++        window: a_window,
++        workspace: a_workspace,
++        agent_panel: a_agent_panel,
++        cx: mut a_cx,
++        ..
++    } = a;
++    drop((a_workspace, a_agent_panel));
++    a_cx.update(|window, _| window.remove_window());
++    a_cx.run_until_parked();
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    assert_eq!(window_count(&mut b.cx), 1, "precondition: only B is open");
++    assert_eq!(
++        row_folders(&session, &mut b.cx),
++        Some(vec![PathBuf::from("/work/zed")]),
++        "precondition: the row outlived its window"
++    );
++
++    cx.update(|cx| {
++        cx.observe_new(|workspace: &mut Workspace, window, cx| {
++            let Some(window) = window else { return };
++            if workspace.panel::<AgentPanel>(cx).is_none() {
++                let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++                workspace.add_panel(panel, window, cx);
++            }
++        })
++        .detach();
++    });
++    let agent_panel_b = b.agent_panel().clone();
++    let tasks_panel_b = b.tasks_panel().clone();
++
++    open_from(&tasks_panel_b, &key(&session.to_string(), "t"), &mut b.cx);
++
++    let opened = b.cx.update(|_, cx| {
++        cx.windows()
++            .into_iter()
++            .filter_map(|window| window.downcast::<MultiWorkspace>())
++            .filter(|window| *window != b_window && *window != a_window)
++            .find(|window| {
++                window.read(cx).is_ok_and(|multi_workspace| {
++                    multi_workspace
++                        .workspace()
++                        .read(cx)
++                        .project()
++                        .read(cx)
++                        .visible_worktrees(cx)
++                        .any(|worktree| {
++                            worktree.read(cx).abs_path().as_ref() == Path::new("/work/zed")
++                        })
++                })
++            })
++    });
++    let opened = opened.expect("a window is opened over the thread's folder");
++    assert_eq!(window_count(&mut b.cx), 2, "exactly one window is opened");
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(opened.into()),
++        "the new window is raised"
++    );
++    assert!(
++        !shows_thread(&agent_panel_b, thread_id, &b.cx),
++        "B's agent panel does not take the thread"
++    );
++    assert_eq!(
++        row_folders(&session, &mut b.cx),
++        Some(vec![PathBuf::from("/work/zed")]),
++        "the metadata row keeps its folder"
++    );
++}
++
++// R1.4 — a thread whose row names a remote host opens in the panel's own window and never
++// through `open_paths`. Hostile: a LOCAL window holds the very path the remote row names, so
++// resolving remote folders as local ones would wrongly send the thread there.
++#[gpui::test]
++async fn panel_actions_open_remote_thread_stays_in_this_window(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    db.insert_started(&record(
++        "remote-session",
++        "t",
++        AgentTaskStatus::Running,
++        1_000,
++    ))
++    .await
++    .unwrap();
++    db.update_ended(&record(
++        "remote-session",
++        "t",
++        AgentTaskStatus::Completed,
++        1_000,
++    ))
++    .await
++    .unwrap();
++    let thread_id = ThreadId::new();
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
++            store.save(
++                ThreadMetadata {
++                    thread_id,
++                    session_id: Some(sid("remote-session")),
++                    agent_id: "stub".into(),
++                    title: Some("Remote thread".into()),
++                    title_override: None,
++                    updated_at: Default::default(),
++                    created_at: None,
++                    interacted_at: None,
++                    worktree_paths: project::WorktreePaths::from_folder_paths(&PathList::new(&[
++                        Path::new("/work/zed"),
++                    ])),
++                    remote_connection: Some(remote::RemoteConnectionOptions::Ssh(
++                        remote::SshConnectionOptions::default(),
++                    )),
++                    archived: false,
++                },
++                cx,
++            )
++        })
++    });
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let a = project_window(&fs, &["/work/zed"], true, false, cx).await;
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let agent_panel_a = a.agent_panel().clone();
++    let agent_panel_b = b.agent_panel().clone();
++    let tasks_panel_b = b.tasks_panel().clone();
++    let windows = window_count(&mut b.cx);
++
++    open_from(&tasks_panel_b, &key("remote-session", "t"), &mut b.cx);
++
++    assert_eq!(window_count(&mut b.cx), windows, "no window is opened");
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(b.any_window()),
++        "the panel's window keeps focus"
++    );
++    assert!(
++        !shows_thread(&agent_panel_a, thread_id, &a.cx),
++        "the local window over the same path name does not take a remote thread"
++    );
++    // Whether B then SHOWS the thread depends on the stub agent loading a remote row, which
++    // this rig does not provide; the routing decision is what is asserted here.
++    let _ = agent_panel_b;
++}
++
++// R1.6, Q4 — the routing fails (the thread's window has no agent panel to load it in): the
++// row says why, one WARN line names the session and the task, and nothing falls back to
++// opening the thread in the panel's window. Fails today: it opens in B, with no notice.
++#[gpui::test]
++async fn panel_actions_open_failure_shows_the_reason(cx: &mut TestAppContext) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    // The task ends first: a running task leaves the list with the card that holds it.
++    let agent_panel_a = a.agent_panel().clone();
++    let thread = open_thread_on(
++        &agent_panel_a,
++        StopConnection::new(),
++        "Thread of A",
++        &mut a.cx,
++    );
++    send_tasks(
++        &thread,
++        vec![wire_task("task-r16", "running", 1_000, None)],
++        &mut a.cx,
++    );
++    send_tasks(
++        &thread,
++        vec![wire_task("task-r16", "completed", 1_000, Some((10, 1)))],
++        &mut a.cx,
++    );
++    let session = session_of(&thread, &a.cx);
++    drop(thread);
++    let thread_id = row_thread_id(&session, &mut a.cx);
++    // A keeps its folder but loses its agent panel (as with AI turned off there).
++    a.workspace.update_in(&mut a.cx, |workspace, window, cx| {
++        workspace.remove_panel(&agent_panel_a, window, cx);
++    });
++    drop(agent_panel_a);
++    a.agent_panel = None;
++    a.cx.run_until_parked();
++
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let agent_panel_b = b.agent_panel().clone();
++    let tasks_panel_b = b.tasks_panel().clone();
++    let conversations_in_b = conversation_count(&agent_panel_b, &b.cx);
++
++    capture_logs();
++    open_from(
++        &tasks_panel_b,
++        &key(&session.to_string(), "task-r16"),
++        &mut b.cx,
++    );
++    // Story 024 run: A has no panels task left to await, so the router waits for an agent
++    // panel up to its 60 s safety net before it reports; move the clock past it.
++    b.cx.executor()
++        .advance_clock(std::time::Duration::from_secs(61));
++    b.cx.run_until_parked();
++
++    let notice = notice_of(&tasks_panel_b, &session, "task-r16", &mut b.cx)
++        .expect("the row says why the thread did not open");
++    assert!(
++        !notice.contains("Thread no longer exists"),
++        "the thread exists; the routing failed: {notice:?}"
++    );
++    let session_text = session.to_string();
++    let warns = warn_lines();
++    assert!(
++        warns
++            .iter()
++            .any(|line| line.contains(&session_text) && line.contains("task-r16")),
++        "one WARN line names the session and the task: {warns:?}"
++    );
++    assert!(
++        !shows_thread(&agent_panel_b, thread_id, &b.cx),
++        "a failed route does not fall back to the panel's window"
++    );
++    assert_eq!(
++        conversation_count(&agent_panel_b, &b.cx),
++        conversations_in_b,
++        "B's agent panel holds no new conversation"
++    );
++}
++
++// R1.7 — a row clicked through its REAL click listener, with the Agent Tasks panel and the
++// agent panel in the same (left) dock, opens the thread without GPUI panicking with
++// "cannot update AgentTasksPanel while it is already being updated". The click is the
++// keyboard activation of the row's Open control (Enter down + up on its focus handle), which
++// runs the same `on_click` listener a mouse click does. Fails today with that panic.
++#[gpui::test]
++async fn panel_actions_click_in_a_shared_dock_opens_without_panicking(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Clicked thread");
++    send_tasks(
++        &thread,
++        vec![wire_task("clicked", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let _later = open_live_thread(&mut panels, "Later thread");
++    let session = session_of(&thread, &panels.cx);
++    assert_ne!(active_session(&panels), Some(session.clone()));
++
++    // Story 024 run: story 022 docks the Agent Tasks panel at the bottom by default, so put
++    // it in the agent panel's (left) dock, as an operator can.
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            workspace::dock::Panel::set_position(
++                panel,
++                workspace::dock::DockPosition::Left,
++                window,
++                cx,
++            );
++            cx.notify();
++        });
++    panels.cx.run_until_parked();
++
++    let (tasks_in_left, agent_in_left) = panels.workspace.read_with(&panels.cx, |workspace, cx| {
++        let dock = workspace.left_dock().read(cx);
++        (
++            dock.panel::<AgentTasksPanel>().is_some(),
++            dock.panel::<AgentPanel>().is_some(),
++        )
++    });
++    assert!(
++        tasks_in_left && agent_in_left,
++        "precondition: both panels share the left dock (tasks: {tasks_in_left}, agent: {agent_in_left})"
++    );
++
++    // Show the Agent Tasks panel in that dock, so its rows are painted.
++    panels
++        .workspace
++        .update_in(&mut panels.cx, |workspace, window, cx| {
++            workspace.focus_panel::<AgentTasksPanel>(window, cx);
++        });
++    panels.cx.run_until_parked();
++    let target = key(&session.to_string(), "clicked");
++    let open_control = panels
++        .tasks_panel
++        .read_with(&panels.cx, |panel, _| {
++            panel
++                .row_focus_handles
++                .get(&target)
++                .map(|focus| focus.open.clone())
++        })
++        .expect("the row is painted");
++    panels
++        .cx
++        .update(|window, cx| window.focus(&open_control, cx));
++    panels.cx.run_until_parked();
++
++    let enter = Keystroke::parse("enter").unwrap();
++    panels.cx.simulate_event(KeyDownEvent {
++        keystroke: enter.clone(),
++        is_held: false,
++        prefer_character_input: false,
++    });
++    panels.cx.simulate_event(KeyUpEvent { keystroke: enter });
++    panels.cx.run_until_parked();
++
++    assert_eq!(
++        active_session(&panels),
++        Some(session),
++        "the clicked row's thread is open"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs b/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs
+new file mode 100644
+index 0000000..83ba40c
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/route_agreement_tests.rs
+@@ -0,0 +1,144 @@
++// Story 024, task 4.1 — the entry points agree on where a session opens (R1.3, R1.5, Q11).
++// Module path: `panel::route_agreement`. Wired in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/route_agreement_tests.rs"]
++//     mod route_agreement;
++//
++// Validation filter: `route_agreement_`. The tray half of the agreement is crate `zed`'s
++// `agent_session_route_*` test (this crate cannot depend on `zed`); the card half is
++// agent_ui's unchanged `test_open_task_scrolls_to_the_tool_call_that_started_it`.
++//
++// Contract assumed (design.md "Interface"): `agent_ui::{open_agent_session,
++// OpenAgentSessionOptions, OpenedAgentSession}` at agent_ui's root. If the router lands under
++// another path, adjust the `use` below only.
++//
++// Hostile fixtures, collapse first: B's `/work/zed-patches` carries A's `/work/zed` as a
++// prefix, and a third window C holds `/work/zed/crates`, a folder INSIDE A's — neither may be
++// taken for A. Then the split: the second entry point must bring forward the conversation the
++// first one left in A, never open a second one for the same session.
++
++use std::path::PathBuf;
++
++use agent_ui::{AgentPanel, OpenAgentSessionOptions, open_agent_session};
++use gpui::{Entity, TestAppContext, VisualTestContext};
++
++use crate::test_helpers::*;
++
++fn conversation_count(agent_panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> usize {
++    agent_panel.read_with(cx, |panel, _| panel.conversation_views().len())
++}
++
++#[gpui::test]
++async fn route_agreement_router_and_panel_row_open_a_session_in_its_project_window(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    cx.update(|cx| crate::init(cx));
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed/crates", "/work/zed-patches"]).await;
++
++    let mut a = project_window(&fs, &["/work/zed"], true, true, cx).await;
++    let session = thread_with_task(&mut a, "Thread of A", "t");
++    let _later = thread_with_task(&mut a, "Later thread of A", "u");
++    let thread_id = row_thread_id(&session, &mut a.cx);
++    let agent_panel_a = a.agent_panel().clone();
++    let c = project_window(&fs, &["/work/zed/crates"], true, false, cx).await;
++    let agent_panel_c = c.agent_panel().clone();
++    let mut b = project_window(&fs, &["/work/zed-patches"], true, true, cx).await;
++    let agent_panel_b = b.agent_panel().clone();
++    let tasks_panel_b = b.tasks_panel().clone();
++    let windows = window_count(&mut b.cx);
++    let a_folders = Some(vec![PathBuf::from("/work/zed")]);
++    assert_eq!(row_folders(&session, &mut a.cx), a_folders, "precondition");
++
++    // 1. The router, called as the panel calls it: B as the fallback window.
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let conversations_in_a = conversation_count(&agent_panel_a, &a.cx);
++    let app_state = b
++        .workspace
++        .read_with(&b.cx, |workspace, _| workspace.app_state().clone());
++    let b_window = b.any_window();
++    let routing = b.cx.update(|_, cx| {
++        open_agent_session(
++            session.clone(),
++            OpenAgentSessionOptions {
++                cwd: None,
++                fallback_window: Some(b_window),
++                tool_call_id: None,
++            },
++            app_state,
++            cx,
++        )
++    });
++    b.cx.run_until_parked();
++    let opened = routing.await.expect("the router opens A's session");
++    assert_eq!(
++        opened.window,
++        a.any_window(),
++        "the router returns A's window"
++    );
++    assert_eq!(
++        opened.workspace, a.workspace,
++        "the router returns A's workspace"
++    );
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(a.any_window()),
++        "A is raised"
++    );
++    assert_eq!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    assert!(
++        !shows_thread(&agent_panel_b, thread_id, &b.cx),
++        "not in B (name prefix)"
++    );
++    assert!(
++        !shows_thread(&agent_panel_c, thread_id, &c.cx),
++        "not in C (sub-folder)"
++    );
++    assert_eq!(
++        conversation_count(&agent_panel_a, &a.cx),
++        conversations_in_a,
++        "A's held conversation is brought forward, not duplicated"
++    );
++    assert_eq!(window_count(&mut b.cx), windows, "no window is opened");
++    assert_eq!(
++        row_folders(&session, &mut b.cx),
++        a_folders,
++        "after the router"
++    );
++
++    // 2. The panel's row, from B, after A moved on to another thread.
++    let _another = thread_with_task(&mut a, "Another thread of A", "v");
++    assert_ne!(shown_session(&agent_panel_a, &a.cx), Some(session.clone()));
++    b.cx.update(|window, _| window.activate_window());
++    b.cx.run_until_parked();
++    let conversations_in_a = conversation_count(&agent_panel_a, &a.cx);
++
++    open_from(&tasks_panel_b, &key(&session.to_string(), "t"), &mut b.cx);
++
++    assert_eq!(
++        active_window(&mut b.cx),
++        Some(a.any_window()),
++        "A is raised again"
++    );
++    assert_eq!(
++        shown_session(&agent_panel_a, &a.cx),
++        Some(session.clone()),
++        "the panel row lands where the router did"
++    );
++    assert!(!shows_thread(&agent_panel_b, thread_id, &b.cx));
++    assert!(!shows_thread(&agent_panel_c, thread_id, &c.cx));
++    assert_eq!(
++        conversation_count(&agent_panel_a, &a.cx),
++        conversations_in_a,
++        "one conversation per session, whichever entry point opened it"
++    );
++    assert_eq!(window_count(&mut b.cx), windows);
++    assert_eq!(
++        row_folders(&session, &mut b.cx),
++        a_folders,
++        "after the panel row"
++    );
++    assert_eq!(notice_of(&tasks_panel_b, &session, "t", &mut b.cx), None);
++}
+diff --git a/crates/agent_tasks_panel/src/test_helpers.rs b/crates/agent_tasks_panel/src/test_helpers.rs
+index 2c43abf..559eb6a 100644
+--- a/crates/agent_tasks_panel/src/test_helpers.rs
++++ b/crates/agent_tasks_panel/src/test_helpers.rs
+@@ -543,3 +543,203 @@ pub(crate) fn visible_keys(panels: &mut Panels) -> Vec<(String, String)> {
+         .map(|row| key_of(&row.entry))
+         .collect()
+ }
++
++// ── Story 024 — windows per project, and where a session is held ───────────
++//
++// Each window is a `MultiWorkspace` over ONE shared `FakeFs`, so a router that resolves a
++// thread's folders through `workspace::open_paths` sees every window's folders on the same
++// file system, and can open a new window over folders no window holds yet.
++
++pub(crate) fn warn_lines() -> Vec<String> {
++    CAPTURED.with(|captured| {
++        captured
++            .borrow()
++            .iter()
++            .filter(|(level, _)| *level == log::Level::Warn)
++            .map(|(_, line)| line.clone())
++            .collect()
++    })
++}
++
++/// The shared file system every story-024 window is built on, holding each of `roots`.
++pub(crate) async fn shared_fs(cx: &mut TestAppContext, roots: &[&str]) -> Arc<FakeFs> {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    for root in roots {
++        fs.insert_tree(root, json!({ "file.txt": "" })).await;
++    }
++    fs
++}
++
++pub(crate) struct ProjectWindow {
++    pub window: gpui::WindowHandle<MultiWorkspace>,
++    pub workspace: Entity<Workspace>,
++    pub agent_panel: Option<Entity<AgentPanel>>,
++    pub tasks_panel: Option<Entity<AgentTasksPanel>>,
++    pub cx: VisualTestContext,
++}
++
++impl ProjectWindow {
++    pub(crate) fn any_window(&self) -> gpui::AnyWindowHandle {
++        self.window.into()
++    }
++
++    pub(crate) fn agent_panel(&self) -> &Entity<AgentPanel> {
++        self.agent_panel
++            .as_ref()
++            .expect("this window has an agent panel")
++    }
++
++    pub(crate) fn tasks_panel(&self) -> &Entity<AgentTasksPanel> {
++        self.tasks_panel
++            .as_ref()
++            .expect("this window has an Agent Tasks panel")
++    }
++}
++
++/// A window over `roots` (all on `fs`), with the agent panel and the Agent Tasks panel as
++/// asked. The crate's `init` must already have run when `with_tasks_panel` is set.
++pub(crate) async fn project_window(
++    fs: &Arc<FakeFs>,
++    roots: &[&str],
++    with_agent_panel: bool,
++    with_tasks_panel: bool,
++    cx: &mut TestAppContext,
++) -> ProjectWindow {
++    let paths: Vec<&Path> = roots.iter().map(|root| Path::new(*root)).collect();
++    let project = Project::test(fs.clone(), paths, cx).await;
++    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = window
++        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++        .unwrap();
++    workspace.update(cx, |workspace, _| workspace.set_random_database_id());
++    let mut vcx = VisualTestContext::from_window(window.into(), cx);
++    vcx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(900.)));
++    let agent_panel = with_agent_panel.then(|| {
++        let panel = workspace.update_in(&mut vcx, |workspace, window, cx| {
++            let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++            workspace.add_panel(panel.clone(), window, cx);
++            workspace.focus_panel::<AgentPanel>(window, cx);
++            panel
++        });
++        vcx.run_until_parked();
++        panel
++    });
++    let tasks_panel = if with_tasks_panel {
++        let weak = workspace.downgrade();
++        let loading = vcx.update(|window, cx| AgentTasksPanel::load(weak, window.to_async(cx)));
++        vcx.run_until_parked();
++        let tasks_panel = loading.await.expect("the Agent Tasks panel loads");
++        workspace.update_in(&mut vcx, |workspace, window, cx| {
++            workspace.add_panel(tasks_panel.clone(), window, cx);
++        });
++        vcx.run_until_parked();
++        Some(tasks_panel)
++    } else {
++        None
++    };
++    ProjectWindow {
++        window,
++        workspace,
++        agent_panel,
++        tasks_panel,
++        cx: vcx,
++    }
++}
++
++/// A live thread of `window`'s project, with one running task `task`; returns its session.
++pub(crate) fn thread_with_task(
++    window: &mut ProjectWindow,
++    title: &str,
++    task: &str,
++) -> acp::SessionId {
++    let agent_panel = window.agent_panel().clone();
++    let thread = open_thread_on(&agent_panel, StopConnection::new(), title, &mut window.cx);
++    send_tasks(
++        &thread,
++        vec![wire_task(task, "running", 1_000, None)],
++        &mut window.cx,
++    );
++    session_of(&thread, &window.cx)
++}
++
++/// The folders the session's metadata row records.
++pub(crate) fn row_folders(
++    session: &acp::SessionId,
++    cx: &mut VisualTestContext,
++) -> Option<Vec<std::path::PathBuf>> {
++    cx.update(|_, cx| {
++        agent_ui::thread_metadata_store::ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry_by_session(session)
++            .map(|metadata| metadata.folder_paths().paths().to_vec())
++    })
++}
++
++pub(crate) fn row_thread_id(
++    session: &acp::SessionId,
++    cx: &mut VisualTestContext,
++) -> agent_ui::thread_metadata_store::ThreadId {
++    cx.update(|_, cx| {
++        agent_ui::thread_metadata_store::ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry_by_session(session)
++            .map(|metadata| metadata.thread_id)
++            .expect("the session has a metadata row")
++    })
++}
++
++/// The session `agent_panel` shows, if any.
++pub(crate) fn shown_session(
++    agent_panel: &Entity<AgentPanel>,
++    cx: &VisualTestContext,
++) -> Option<acp::SessionId> {
++    agent_panel.read_with(cx, |panel, cx| {
++        panel
++            .active_agent_thread(cx)
++            .map(|thread| thread.read(cx).session_id().clone())
++    })
++}
++
++/// Whether `agent_panel` shows the thread `thread_id` (a loading or failed load included).
++pub(crate) fn shows_thread(
++    agent_panel: &Entity<AgentPanel>,
++    thread_id: agent_ui::thread_metadata_store::ThreadId,
++    cx: &VisualTestContext,
++) -> bool {
++    agent_panel.read_with(cx, |panel, cx| {
++        panel.active_thread_id(cx) == Some(thread_id)
++    })
++}
++
++pub(crate) fn active_window(cx: &mut VisualTestContext) -> Option<gpui::AnyWindowHandle> {
++    cx.update(|_, cx| cx.active_window())
++}
++
++pub(crate) fn window_count(cx: &mut VisualTestContext) -> usize {
++    cx.update(|_, cx| cx.windows().len())
++}
++
++/// Opens `key` from `panel` the way the panel's own code does it, and lets every spawned
++/// step (window resolution, `open_paths`, the load) run to the end.
++pub(crate) fn open_from(panel: &Entity<AgentTasksPanel>, key: &Key, cx: &mut VisualTestContext) {
++    panel.update_in(cx, |panel, window, cx| panel.open_task(key, window, cx));
++    cx.run_until_parked();
++}
++
++pub(crate) fn notice_of(
++    panel: &Entity<AgentTasksPanel>,
++    session: &acp::SessionId,
++    task: &str,
++    cx: &mut VisualTestContext,
++) -> Option<SharedString> {
++    panel
++        .update(cx, |panel, cx| panel.groups(cx))
++        .into_iter()
++        .flat_map(|group| group.rows)
++        .find(|row| {
++            &row.entry.record.session_id == session && row.entry.record.task_id.as_ref() == task
++        })
++        .expect("the task is listed")
++        .notice
++}
+diff --git a/crates/agent_ui/src/agent_session_router.rs b/crates/agent_ui/src/agent_session_router.rs
+new file mode 100644
+index 0000000..2aabbfd
+--- /dev/null
++++ b/crates/agent_ui/src/agent_session_router.rs
+@@ -0,0 +1,472 @@
++//! Opens an agent session in the window that holds its thread's project.
++//!
++//! One routine for every entry point that names a session — the tray link
++//! (`zeo://agent?session=`) and the Agent Tasks panel — so both resolve a
++//! thread's window the same way. A thread belongs to a project, so it is opened
++//! in the window holding exactly that project's folders, found across every
++//! window, and not in whichever window has focus. When no window holds them, a
++//! new window is opened over exactly those folders; they are never added to an
++//! existing window.
++
++use std::collections::BTreeSet;
++use std::future::Future;
++use std::path::{Path, PathBuf};
++use std::pin::pin;
++use std::sync::Arc;
++use std::time::Duration;
++
++use agent_client_protocol::schema::v1 as acp;
++use anyhow::{Context as _, Result, anyhow};
++use fs::Fs;
++use futures::StreamExt as _;
++use futures::future::{Either, select};
++use gpui::{AnyWindowHandle, App, AsyncApp, Entity, Task, WeakEntity, WindowHandle};
++use project::DisableAiSettings;
++use settings::Settings as _;
++use util::ResultExt as _;
++use workspace::{AppState, MultiWorkspace, OpenMode, OpenOptions, Workspace, WorkspaceMatching};
++
++use crate::AgentPanel;
++use crate::conversation_view::ConversationView;
++use crate::thread_metadata_store::ThreadMetadataStore;
++
++/// How long a window may take to gain an agent panel when another caller is
++/// already awaiting its panels: a safety net, since nothing else would end that
++/// wait if the panel never arrives.
++const AGENT_PANEL_TIMEOUT: Duration = Duration::from_secs(60);
++/// How long the thread may take to load once its window shows it: the agent's
++/// connection, then its `load_session`/`resume_session`. Without a bound, an
++/// agent that never answers would leave the caller waiting forever.
++const THREAD_LOAD_TIMEOUT: Duration = Duration::from_secs(60);
++
++/// What the caller knows besides the session id.
++#[derive(Clone, Debug, Default)]
++pub struct OpenAgentSessionOptions {
++    /// The folder the link's producer saw; only consulted for a session no
++    /// metadata row knows yet (the tray link's `cwd=`).
++    pub cwd: Option<PathBuf>,
++    /// The window used when the thread has no local folders: a remote thread, or
++    /// a session with neither a row nor a `cwd`. `None` uses the active window.
++    pub fallback_window: Option<AnyWindowHandle>,
++    /// Reserved for scrolling to a tool call (story 023); ignored here.
++    pub tool_call_id: Option<acp::ToolCallId>,
++}
++
++/// Where the session was opened.
++#[derive(Clone, Debug)]
++pub struct OpenedAgentSession {
++    pub window: AnyWindowHandle,
++    pub workspace: Entity<Workspace>,
++}
++
++/// Opens `session_id`'s thread in the window that holds its project, raises that
++/// window, and resolves once that window's agent panel holds a loaded
++/// conversation for the session.
++///
++/// Every failure is an `Err` naming the session and the step that failed; the
++/// thread is never opened in another window as a silent fallback.
++pub fn open_agent_session(
++    session_id: acp::SessionId,
++    options: OpenAgentSessionOptions,
++    app_state: Arc<AppState>,
++    cx: &mut App,
++) -> Task<Result<OpenedAgentSession>> {
++    cx.spawn(async move |cx| {
++        let OpenAgentSessionOptions {
++            cwd,
++            fallback_window,
++            tool_call_id: _,
++        } = options;
++
++        // No window has an agent panel while AI is disabled, so refuse before
++        // resolving one: opening a window for the thread's folders would be for
++        // nothing.
++        if cx.update(|cx| DisableAiSettings::get_global(cx).disable_ai) {
++            return Err(anyhow!(
++                "open agent session {session_id}: AI is disabled, so no window has an agent \
++                 panel to open it in"
++            ));
++        }
++
++        let (window, workspace) =
++            resolve_window(&session_id, cwd, fallback_window, app_state, cx).await?;
++
++        let deadline = cx.background_executor().timer(AGENT_PANEL_TIMEOUT);
++        before(
++            deadline,
++            wait_for_agent_panel(&session_id, window, &workspace, cx),
++        )
++        .await
++        .with_context(|| {
++            format!(
++                "open agent session {session_id}: the target window has no agent panel \
++                 (waited {AGENT_PANEL_TIMEOUT:?})"
++            )
++        })??;
++
++        let conversation = window
++            .update(cx, |_, window, cx| {
++                // Raise the window before touching the panel: focusing a panel
++                // only moves focus inside Zeo, and on a desktop with virtual
++                // workspaces the window would stay on whichever desktop it was
++                // left on.
++                window.activate_window();
++                workspace.update(cx, |workspace, cx| {
++                    let panel = workspace
++                        .focus_panel::<AgentPanel>(window, cx)
++                        .with_context(|| {
++                            format!(
++                                "open agent session {session_id}: the target window has no agent \
++                                 panel"
++                            )
++                        })?;
++                    panel.update(cx, |panel, cx| {
++                        panel.open_thread_by_session(session_id.clone(), window, cx);
++                        shown_conversation(panel, &session_id, cx)
++                            .map(|view| view.downgrade())
++                            .with_context(|| {
++                                format!(
++                                    "open agent session {session_id}: the agent panel did not \
++                                     bring the thread forward"
++                                )
++                            })
++                    })
++                })
++            })
++            .with_context(|| format!("open agent session {session_id}: the window is gone"))??;
++
++        let deadline = cx.background_executor().timer(THREAD_LOAD_TIMEOUT);
++        before(deadline, wait_until_loaded(&session_id, conversation, cx))
++            .await
++            .with_context(|| {
++                format!(
++                    "open agent session {session_id}: the thread did not load within \
++                     {THREAD_LOAD_TIMEOUT:?}"
++                )
++            })??;
++
++        Ok(OpenedAgentSession {
++            window: window.into(),
++            workspace,
++        })
++    })
++}
++
++/// The window and workspace the session is opened in.
++async fn resolve_window(
++    session_id: &acp::SessionId,
++    cwd: Option<PathBuf>,
++    fallback_window: Option<AnyWindowHandle>,
++    app_state: Arc<AppState>,
++    cx: &mut AsyncApp,
++) -> Result<(WindowHandle<MultiWorkspace>, Entity<Workspace>)> {
++    match agent_session_folders(session_id, cwd, cx).await {
++        Some(folders) => {
++            let exact = cx.update(|cx| window_holding_exactly(&folders, cx));
++            if let Some((window, workspace)) = exact {
++                window
++                    .update(cx, |multi_workspace, window, cx| {
++                        if multi_workspace.workspace() != &workspace {
++                            multi_workspace.activate(workspace.clone(), None, window, cx);
++                        }
++                    })
++                    .with_context(|| {
++                        format!("open agent session {session_id}: the window is gone")
++                    })?;
++                return Ok((window, workspace));
++            }
++            ensure_folders_exist(session_id, &folders, app_state.fs.as_ref()).await?;
++            // Always a new OS window over exactly these folders. The default
++            // options would instead reuse a window holding only some of them and
++            // add the rest to its project, or add them to the focused window.
++            let options = OpenOptions {
++                workspace_matching: WorkspaceMatching::None,
++                open_mode: OpenMode::NewWindow,
++                ..OpenOptions::default()
++            };
++            let opened = cx
++                .update(|cx| workspace::open_paths(&folders, app_state, options, cx))
++                .await
++                .with_context(|| {
++                    format!("open agent session {session_id}: opening a window for {folders:?}")
++                })?;
++            Ok((opened.window, opened.workspace))
++        }
++        None => {
++            let window = match fallback_window {
++                Some(window) => window.downcast::<MultiWorkspace>().with_context(|| {
++                    format!(
++                        "open agent session {session_id}: the fallback window is not a workspace \
++                         window"
++                    )
++                })?,
++                None => workspace::get_any_active_multi_workspace(app_state, cx.clone())
++                    .await
++                    .with_context(|| {
++                        format!("open agent session {session_id}: finding the active window")
++                    })?,
++            };
++            let workspace = window
++                .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++                .with_context(|| {
++                    format!("open agent session {session_id}: the fallback window is gone")
++                })?;
++            Ok((window, workspace))
++        }
++    }
++}
++
++/// A local workspace whose visible folders are exactly `folders`, in any order.
++///
++/// Matching the whole set — not a prefix, not a containing folder — keeps a
++/// window over `/work/zed-patches` or `/work/zed/crates` from taking a thread of
++/// `/work/zed`, and keeps a window holding only one of a thread's folders from
++/// taking it. The active window wins a tie.
++fn window_holding_exactly(
++    folders: &[PathBuf],
++    cx: &App,
++) -> Option<(WindowHandle<MultiWorkspace>, Entity<Workspace>)> {
++    let wanted: BTreeSet<&Path> = folders.iter().map(PathBuf::as_path).collect();
++    let active = cx.active_window();
++    let mut windows = cx.windows();
++    windows.sort_by_key(|window| Some(*window) != active);
++    windows.into_iter().find_map(|window| {
++        let window = window.downcast::<MultiWorkspace>()?;
++        let multi_workspace = window.read(cx).ok()?;
++        let workspace = multi_workspace.workspaces().find(|workspace| {
++            let project = workspace.read(cx).project().read(cx);
++            if !project.is_local() {
++                return false;
++            }
++            let roots: Vec<Arc<Path>> = project
++                .visible_worktrees(cx)
++                .map(|worktree| worktree.read(cx).abs_path())
++                .collect();
++            roots.iter().map(AsRef::as_ref).collect::<BTreeSet<&Path>>() == wanted
++        })?;
++        Some((window, workspace.clone()))
++    })
++}
++
++/// The folders the thread of an agent session belongs to.
++///
++/// The session's metadata row is the authority: it records the folders the
++/// thread was started in. `cwd` -- what the link's producer saw -- only answers
++/// for a session no row knows yet. `None` leaves the choice to the focused
++/// window, which is also what a thread on a remote host gets: its folders name
++/// paths on that host, not on this one.
++async fn agent_session_folders(
++    session_id: &acp::SessionId,
++    cwd: Option<PathBuf>,
++    cx: &mut AsyncApp,
++) -> Option<Vec<PathBuf>> {
++    let store = cx.update(|cx| ThreadMetadataStore::try_global(cx));
++    let Some(store) = store else {
++        return cwd.map(|cwd| vec![cwd]);
++    };
++    // The store loads its rows from disk at startup, and a link that launched
++    // Zed arrives before that finishes; without the wait it finds no row and
++    // falls through to `cwd` for a thread it does know.
++    let reload = store.read_with(cx, |store, _| store.reload_task());
++    reload.await;
++
++    store.read_with(cx, |store, _| match store.entry_by_session(session_id) {
++        Some(metadata) if metadata.remote_connection.is_some() => None,
++        Some(metadata) => Some(metadata.folder_paths().paths().to_vec())
++            .filter(|folders| !folders.is_empty())
++            .or_else(|| cwd.map(|cwd| vec![cwd])),
++        None => cwd.map(|cwd| vec![cwd]),
++    })
++}
++
++/// Fails unless every folder is still a directory on this machine.
++///
++/// `open_paths` drops a path that no longer exists, and with nothing left to
++/// open it reuses the focused window: the thread would land there silently. A
++/// thread whose folders only partly survive is refused too, because opening the
++/// survivors would give it a different project from the one it was started in.
++async fn ensure_folders_exist(
++    session_id: &acp::SessionId,
++    folders: &[PathBuf],
++    fs: &dyn Fs,
++) -> Result<()> {
++    let mut missing = Vec::new();
++    for folder in folders {
++        let metadata = fs.metadata(folder).await.with_context(|| {
++            format!("open agent session {session_id}: reading its folder {folder:?}")
++        })?;
++        if !metadata.is_some_and(|metadata| metadata.is_dir) {
++            missing.push(folder);
++        }
++    }
++    if missing.is_empty() {
++        Ok(())
++    } else if missing.len() == folders.len() {
++        Err(anyhow!(
++            "open agent session {session_id}: its folders {folders:?} no longer exist"
++        ))
++    } else {
++        Err(anyhow!(
++            "open agent session {session_id}: its folders {missing:?} no longer exist, and \
++             opening only the rest of {folders:?} would change its project"
++        ))
++    }
++}
++
++/// Resolves to `Some` with `future`'s output, or `None` once `deadline` fires.
++async fn before<T>(deadline: Task<()>, future: impl Future<Output = T>) -> Option<T> {
++    match select(pin!(future), deadline).await {
++        Either::Left((output, _)) => Some(output),
++        Either::Right(((), _)) => None,
++    }
++}
++
++/// Resolves once `workspace` has an agent panel, or fails when none will come.
++///
++/// The app adds the agent panel inside the window's panels task, so when this
++/// call takes and awaits that task itself, a panel still missing afterwards is
++/// never coming. Only when another caller took the task first — it may still be
++/// running — does it wait, for the workspace's `PanelAdded` or `window` closing;
++/// the caller bounds that wait. The window is watched rather than the workspace
++/// because the caller holds the workspace, so it is never released mid-wait. A
++/// failed panel load is logged, as the workspace itself does, and does not abort
++/// the open when the agent panel loaded anyway.
++async fn wait_for_agent_panel(
++    session_id: &acp::SessionId,
++    window: WindowHandle<MultiWorkspace>,
++    workspace: &Entity<Workspace>,
++    cx: &mut AsyncApp,
++) -> Result<()> {
++    let window_id = window.window_id();
++    let window_is_open = |cx: &mut AsyncApp| {
++        cx.update(|cx| {
++            cx.windows()
++                .iter()
++                .any(|open| open.window_id() == window_id)
++        })
++    };
++    let has_agent_panel = |cx: &mut AsyncApp| {
++        workspace.read_with(cx, |workspace, cx| {
++            workspace.panel::<AgentPanel>(cx).is_some()
++        })
++    };
++    let closed = || {
++        anyhow!(
++            "open agent session {session_id}: the target window closed before its agent panel \
++             loaded"
++        )
++    };
++
++    let panels_task = workspace.update(cx, |workspace, _| workspace.take_panels_task());
++    if let Some(panels_task) = panels_task {
++        panels_task.await.log_err();
++        if !window_is_open(cx) {
++            return Err(closed());
++        }
++        if has_agent_panel(cx) {
++            return Ok(());
++        }
++        return Err(anyhow!(
++            "open agent session {session_id}: the target window loaded its panels without an \
++             agent panel"
++        ));
++    }
++
++    let (wake_tx, mut wake_rx) = futures::channel::mpsc::unbounded::<()>();
++    let (_panel_added, _window_closed) = cx.update(|cx| {
++        let panel_added = cx.subscribe(workspace, {
++            let wake_tx = wake_tx.clone();
++            move |_, event: &workspace::Event, _| {
++                if matches!(event, workspace::Event::PanelAdded(_)) {
++                    wake_tx.unbounded_send(()).ok();
++                }
++            }
++        });
++        let window_closed = cx.on_window_closed(move |_, closed_id| {
++            if closed_id == window_id {
++                wake_tx.unbounded_send(()).ok();
++            }
++        });
++        (panel_added, window_closed)
++    });
++    loop {
++        if !window_is_open(cx) {
++            return Err(closed());
++        }
++        if has_agent_panel(cx) {
++            return Ok(());
++        }
++        if wake_rx.next().await.is_none() {
++            return Err(closed());
++        }
++    }
++}
++
++/// The conversation `panel` shows for `session_id` after
++/// `open_thread_by_session`, which always makes the session's conversation the
++/// active one. Anything else showing means the panel did not open the thread.
++fn shown_conversation(
++    panel: &AgentPanel,
++    session_id: &acp::SessionId,
++    cx: &App,
++) -> Option<Entity<ConversationView>> {
++    panel
++        .active_conversation_view()
++        .filter(|view| view.read(cx).root_session_id.as_ref() == Some(session_id))
++        .cloned()
++}
++
++/// Resolves once `conversation` has left its loading state: `Ok` when it holds
++/// the thread, `Err` naming the session when the load failed or the
++/// conversation was dropped first.
++///
++/// Only a weak handle is held across the wait, so a conversation dropped while
++/// loading — its window closed, or the panel moved on — is released, which
++/// drops the observer and ends the wait.
++async fn wait_until_loaded(
++    session_id: &acp::SessionId,
++    conversation: WeakEntity<ConversationView>,
++    cx: &mut AsyncApp,
++) -> Result<()> {
++    let (notified_tx, mut notified_rx) = futures::channel::mpsc::unbounded::<()>();
++    let _observation = cx.update(|cx| {
++        let conversation = conversation.upgrade()?;
++        Some(cx.observe(&conversation, move |_, _| {
++            notified_tx.unbounded_send(()).ok();
++        }))
++    });
++    let closed =
++        || anyhow!("open agent session {session_id}: the conversation closed before it loaded");
++    loop {
++        let state = conversation
++            .read_with(cx, |view, _| {
++                if view.is_loading() {
++                    None
++                } else {
++                    Some(view.load_error().map(ToString::to_string))
++                }
++            })
++            .map_err(|_| closed())?;
++        match state {
++            Some(None) => return Ok(()),
++            Some(Some(error)) => {
++                return Err(anyhow!(
++                    "open agent session {session_id}: the thread failed to load: {error}"
++                ));
++            }
++            None => {
++                if notified_rx.next().await.is_none() {
++                    return Err(closed());
++                }
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "agent_session_router/routing_tests.rs"]
++mod routing;
++
++#[cfg(test)]
++#[path = "agent_session_router/review_tests.rs"]
++mod review;
+diff --git a/crates/agent_ui/src/agent_session_router/review_tests.rs b/crates/agent_ui/src/agent_session_router/review_tests.rs
+new file mode 100644
+index 0000000..db7fb9f
+--- /dev/null
++++ b/crates/agent_ui/src/agent_session_router/review_tests.rs
+@@ -0,0 +1,447 @@
++// Story 024, task 2.1, tech-review fix cycle 1: the routing cases the review found
++// uncovered. The pre-authored cases live in `routing_tests.rs`, which is frozen; the few
++// fixture helpers below mirror the ones it defines privately.
++
++use std::collections::BTreeSet;
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++
++use agent_client_protocol::schema::v1 as acp;
++use fs::FakeFs;
++use gpui::{
++    AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle,
++};
++use project::Project;
++use serde_json::json;
++use settings::Settings as _;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore};
++use crate::{AgentPanel, OpenAgentSessionOptions, OpenedAgentSession, open_agent_session};
++
++fn init(cx: &mut TestAppContext) {
++    crate::conversation_view::tests::init_test(cx);
++    cx.update(|cx| {
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++}
++
++async fn shared_fs(cx: &mut TestAppContext, roots: &[&str]) -> Arc<FakeFs> {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    for root in roots {
++        fs.insert_tree(root, json!({ "file.txt": "" })).await;
++    }
++    fs
++}
++
++struct Win {
++    window: WindowHandle<MultiWorkspace>,
++    workspace: Entity<Workspace>,
++    cx: VisualTestContext,
++}
++
++impl Win {
++    fn any(&self) -> AnyWindowHandle {
++        self.window.into()
++    }
++}
++
++async fn window(fs: &Arc<FakeFs>, roots: &[&str], cx: &mut TestAppContext) -> Win {
++    let paths: Vec<&Path> = roots.iter().map(|root| Path::new(*root)).collect();
++    let project = Project::test(fs.clone(), paths, cx).await;
++    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = window
++        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++        .unwrap();
++    workspace.update(cx, |workspace, _| workspace.set_random_database_id());
++    let cx = VisualTestContext::from_window(window.into(), cx);
++    Win {
++        window,
++        workspace,
++        cx,
++    }
++}
++
++fn add_agent_panel(
++    workspace: &Entity<Workspace>,
++    cx: &mut VisualTestContext,
++) -> Entity<AgentPanel> {
++    let panel = workspace.update_in(cx, |workspace, window, cx| {
++        let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++        workspace.add_panel(panel.clone(), window, cx);
++        panel
++    });
++    cx.run_until_parked();
++    panel
++}
++
++fn save_row(session: &acp::SessionId, folders: &[&str], cx: &mut TestAppContext) -> ThreadId {
++    let thread_id = ThreadId::new();
++    let folders: Vec<&Path> = folders.iter().map(|folder| Path::new(*folder)).collect();
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
++            store.save(
++                ThreadMetadata {
++                    thread_id,
++                    session_id: Some(session.clone()),
++                    agent_id: crate::Agent::Stub.id(),
++                    title: Some("Saved thread".into()),
++                    title_override: None,
++                    updated_at: chrono::Utc::now(),
++                    created_at: None,
++                    interacted_at: None,
++                    worktree_paths: project::WorktreePaths::from_folder_paths(&PathList::new(
++                        &folders,
++                    )),
++                    remote_connection: None,
++                    archived: false,
++                },
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++fn shows(panel: &Entity<AgentPanel>, thread_id: ThreadId, cx: &mut TestAppContext) -> bool {
++    panel.read_with(cx, |panel, cx| {
++        panel.active_thread_id(cx) == Some(thread_id)
++    })
++}
++
++fn visible_roots(workspace: &Entity<Workspace>, cx: &mut TestAppContext) -> BTreeSet<PathBuf> {
++    workspace.read_with(cx, |workspace, cx| {
++        workspace
++            .project()
++            .read(cx)
++            .visible_worktrees(cx)
++            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
++            .collect()
++    })
++}
++
++fn route(
++    session: &acp::SessionId,
++    fallback: &Win,
++    cx: &mut TestAppContext,
++) -> gpui::Task<anyhow::Result<OpenedAgentSession>> {
++    let app_state = fallback
++        .workspace
++        .read_with(cx, |workspace, _| workspace.app_state().clone());
++    let fallback_window = fallback.any();
++    let session = session.clone();
++    cx.update(|cx| {
++        open_agent_session(
++            session,
++            OpenAgentSessionOptions {
++                cwd: None,
++                fallback_window: Some(fallback_window),
++                tool_call_id: None,
++            },
++            app_state,
++            cx,
++        )
++    })
++}
++
++/// `Agent::Stub` — the agent of every saved row here — cannot load a session, so a route
++/// that reached the thread ends in its load error; any other `Err` is a routing failure.
++fn assert_reached_the_thread(
++    result: anyhow::Result<OpenedAgentSession>,
++    window: AnyWindowHandle,
++    workspace: &Entity<Workspace>,
++) {
++    match result {
++        Ok(opened) => {
++            assert_eq!(opened.window, window);
++            assert_eq!(&opened.workspace, workspace);
++        }
++        Err(error) => assert!(
++            format!("{error:#}").contains("the thread failed to load"),
++            "routing failed before reaching the thread: {error:#}"
++        ),
++    }
++}
++
++fn activate(win: &mut Win) {
++    win.cx.update(|window, _| window.activate_window());
++    win.cx.run_until_parked();
++}
++
++// R1.2 — a window holding only part of a thread's folders is not extended with the rest:
++// the thread gets a new OS window over exactly its folders.
++#[gpui::test]
++async fn agent_session_router_opens_a_new_window_instead_of_extending_a_partial_match(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/multi/alpha", "/multi/beta"]).await;
++    let mut one = window(&fs, &["/multi/alpha"], cx).await;
++    let one_panel = add_agent_panel(&one.workspace, &mut one.cx);
++    let session = acp::SessionId::new("two-folder-session");
++    let thread_id = save_row(&session, &["/multi/alpha", "/multi/beta"], cx);
++    activate(&mut one);
++    let one_roots = visible_roots(&one.workspace, cx);
++    let windows_before = cx.update(|cx| cx.windows());
++
++    let routing = route(&session, &one, cx);
++    cx.run_until_parked();
++
++    let new_windows: Vec<AnyWindowHandle> = cx
++        .update(|cx| cx.windows())
++        .into_iter()
++        .filter(|window| !windows_before.contains(window))
++        .collect();
++    assert_eq!(new_windows.len(), 1, "one new window is opened");
++    let new_window = new_windows[0]
++        .downcast::<MultiWorkspace>()
++        .expect("the new window is a workspace window");
++    let new_workspace = new_window
++        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++        .unwrap();
++    // The router waits for the new window's agent panel, which the app's panel loading adds;
++    // this test app has none, so the test adds it.
++    let mut new_cx = VisualTestContext::from_window(new_windows[0], cx);
++    let new_panel = add_agent_panel(&new_workspace, &mut new_cx);
++    let opened = routing.await;
++
++    assert_eq!(
++        visible_roots(&new_workspace, cx),
++        BTreeSet::from([PathBuf::from("/multi/alpha"), PathBuf::from("/multi/beta")]),
++        "the new window holds exactly the thread's folders"
++    );
++    assert_eq!(
++        visible_roots(&one.workspace, cx),
++        one_roots,
++        "the one-folder window's project is unchanged"
++    );
++    assert!(
++        shows(&new_panel, thread_id, cx),
++        "the new window shows the thread"
++    );
++    assert!(
++        !shows(&one_panel, thread_id, cx),
++        "not the one-folder window"
++    );
++    assert_reached_the_thread(opened, new_windows[0], &new_workspace);
++}
++
++// R1.6 — a thread whose folders were deleted is an `Err` naming the session: `open_paths`
++// would drop the missing paths and reuse the focused window, opening the thread there.
++#[gpui::test]
++async fn agent_session_router_refuses_a_session_whose_folders_no_longer_exist(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed-patches"]).await;
++    let mut fallback = window(&fs, &["/work/zed-patches"], cx).await;
++    let fallback_panel = add_agent_panel(&fallback.workspace, &mut fallback.cx);
++    let session = acp::SessionId::new("session-of-a-deleted-folder");
++    let thread_id = save_row(&session, &["/work/deleted"], cx);
++    activate(&mut fallback);
++    let windows = cx.update(|cx| cx.windows().len());
++    let fallback_roots = visible_roots(&fallback.workspace, cx);
++
++    let routing = route(&session, &fallback, cx);
++    cx.run_until_parked();
++    let error = match routing.await {
++        Ok(_) => panic!("a session whose folders are gone cannot be opened"),
++        Err(error) => error,
++    };
++
++    let message = format!("{error:#}");
++    assert!(
++        message.contains("session-of-a-deleted-folder"),
++        "the error names the session: {message}"
++    );
++    assert!(
++        message.contains("no longer exist"),
++        "the error says why: {message}"
++    );
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no window is opened"
++    );
++    assert_eq!(
++        visible_roots(&fallback.workspace, cx),
++        fallback_roots,
++        "the fallback window's project is unchanged"
++    );
++    assert!(
++        !shows(&fallback_panel, thread_id, cx),
++        "no fallback to the caller's window"
++    );
++}
++
++// R1.1 — a target window whose agent panel is not there yet (its panels still loading, or
++// their task taken by an earlier routing call) is waited for, not reported as panel-less.
++#[gpui::test]
++async fn agent_session_router_waits_for_an_agent_panel_that_is_still_loading(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut target = window(&fs, &["/work/zed"], cx).await;
++    let mut fallback = window(&fs, &["/work/zed-patches"], cx).await;
++    let fallback_panel = add_agent_panel(&fallback.workspace, &mut fallback.cx);
++    let session = acp::SessionId::new("session-of-a-window-still-loading");
++    let thread_id = save_row(&session, &["/work/zed"], cx);
++    activate(&mut fallback);
++
++    let routing = route(&session, &fallback, cx);
++    cx.run_until_parked();
++    let target_panel = add_agent_panel(&target.workspace, &mut target.cx);
++    let opened = routing.await;
++
++    assert!(
++        shows(&target_panel, thread_id, cx),
++        "the panel that appeared shows the thread"
++    );
++    assert!(!shows(&fallback_panel, thread_id, cx));
++    assert_reached_the_thread(opened, target.any(), &target.workspace);
++}
++
++/// The routing result, which must already be there: polled once, never awaited, so no
++/// timer can have fired to produce it.
++fn resolved_without_waiting(
++    routing: gpui::Task<anyhow::Result<OpenedAgentSession>>,
++    clock_before: std::time::Instant,
++    cx: &mut TestAppContext,
++) -> anyhow::Error {
++    let result = futures::FutureExt::now_or_never(routing)
++        .expect("the routing resolves without waiting for a timer");
++    assert_eq!(
++        cx.executor().now(),
++        clock_before,
++        "the clock was not advanced"
++    );
++    match result {
++        Ok(_) => panic!("the session cannot be opened"),
++        Err(error) => error,
++    }
++}
++
++// R1.6 — the target window's panels finished loading without an agent panel (the app's
++// panels task, taken and awaited by the router): none is coming, so the `Err` is
++// immediate rather than after the safety-net timeout.
++#[gpui::test]
++async fn agent_session_router_fails_at_once_when_the_loaded_panels_have_no_agent_panel(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let target = window(&fs, &["/work/zed"], cx).await;
++    let mut fallback = window(&fs, &["/work/zed-patches"], cx).await;
++    let fallback_panel = add_agent_panel(&fallback.workspace, &mut fallback.cx);
++    let session = acp::SessionId::new("session-of-a-window-loaded-without-agent-panel");
++    let thread_id = save_row(&session, &["/work/zed"], cx);
++    target.workspace.update(cx, |workspace, _| {
++        workspace.set_panels_task(gpui::Task::ready(Ok(())))
++    });
++    activate(&mut fallback);
++    let clock_before = cx.executor().now();
++
++    let routing = route(&session, &fallback, cx);
++    cx.run_until_parked();
++    let error = resolved_without_waiting(routing, clock_before, cx);
++
++    let message = format!("{error:#}");
++    assert!(
++        message.contains("session-of-a-window-loaded-without-agent-panel"),
++        "the error names the session: {message}"
++    );
++    assert!(
++        message.contains("without an agent panel"),
++        "the error says why: {message}"
++    );
++    assert!(
++        !shows(&fallback_panel, thread_id, cx),
++        "no fallback to the caller's window"
++    );
++}
++
++// R1.6 — with AI disabled no window has an agent panel: an immediate `Err` saying so, and
++// no window is opened for the thread's folders.
++#[gpui::test]
++async fn agent_session_router_fails_at_once_when_ai_is_disabled(cx: &mut TestAppContext) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let mut fallback = window(&fs, &["/work/zed-patches"], cx).await;
++    let fallback_panel = add_agent_panel(&fallback.workspace, &mut fallback.cx);
++    let session = acp::SessionId::new("session-while-ai-is-disabled");
++    let thread_id = save_row(&session, &["/work/zed"], cx);
++    activate(&mut fallback);
++    cx.update(|cx| {
++        project::DisableAiSettings::override_global(
++            project::DisableAiSettings { disable_ai: true },
++            cx,
++        )
++    });
++    let windows = cx.update(|cx| cx.windows().len());
++    let clock_before = cx.executor().now();
++
++    let routing = route(&session, &fallback, cx);
++    cx.run_until_parked();
++    let error = resolved_without_waiting(routing, clock_before, cx);
++
++    let message = format!("{error:#}");
++    assert!(
++        message.contains("session-while-ai-is-disabled"),
++        "the error names the session: {message}"
++    );
++    assert!(
++        message.contains("AI is disabled"),
++        "the error says why: {message}"
++    );
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no window is opened"
++    );
++    assert!(
++        !shows(&fallback_panel, thread_id, cx),
++        "no fallback to the caller's window"
++    );
++}
++
++// R1.6 — the target window closes while the router waits for its agent panel: the wait
++// ends at once with an `Err` saying so, rather than running to the safety-net timeout.
++#[gpui::test]
++async fn agent_session_router_stops_waiting_when_the_target_window_closes(cx: &mut TestAppContext) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let target = window(&fs, &["/work/zed"], cx).await;
++    let mut fallback = window(&fs, &["/work/zed-patches"], cx).await;
++    let fallback_panel = add_agent_panel(&fallback.workspace, &mut fallback.cx);
++    let session = acp::SessionId::new("session-of-a-window-closed-mid-wait");
++    let thread_id = save_row(&session, &["/work/zed"], cx);
++    activate(&mut fallback);
++
++    let routing = route(&session, &fallback, cx);
++    cx.run_until_parked();
++    let clock_before = cx.executor().now();
++    target
++        .window
++        .update(cx, |_, window, _| window.remove_window())
++        .expect("the target window is open");
++    cx.run_until_parked();
++    let error = resolved_without_waiting(routing, clock_before, cx);
++
++    let message = format!("{error:#}");
++    assert!(
++        message.contains("session-of-a-window-closed-mid-wait"),
++        "the error names the session: {message}"
++    );
++    assert!(
++        message.contains("closed before its agent panel loaded"),
++        "the error says why: {message}"
++    );
++    assert!(
++        !shows(&fallback_panel, thread_id, cx),
++        "no fallback to the caller's window"
++    );
++}
+diff --git a/crates/agent_ui/src/agent_session_router/routing_tests.rs b/crates/agent_ui/src/agent_session_router/routing_tests.rs
+new file mode 100644
+index 0000000..65b86f6
+--- /dev/null
++++ b/crates/agent_ui/src/agent_session_router/routing_tests.rs
+@@ -0,0 +1,402 @@
++// Story 024, task 2.1 — `open_agent_session` resolves a session's window from its metadata
++// row (R1.1, R1.2 via `open_paths`, R1.3, R1.4, R1.5, Q4). Wired in
++// `src/agent_session_router.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "agent_session_router/routing_tests.rs"]
++//     mod routing;
++//
++// Validation filter: `agent_session_router`. Contract (design.md "Interface"):
++// `crate::{open_agent_session, OpenAgentSessionOptions, OpenedAgentSession}` re-exported at
++// agent_ui's root, as `agent_ui::open_agent_session` is named; adjust the `use` only.
++//
++// Hostile fixtures before benign ones, for "the window that holds the thread's folders":
++//   - wrongly COLLAPSE: `/work/zed-patches` (A's name as a prefix) and `/work/zed/crates` (a
++//     folder inside A's) must never be taken for `/work/zed`; a remote row naming
++//     `/work/zed` must never be taken for the local window over `/work/zed`.
++//   - wrongly SPLIT: a two-folder thread must come back to the window holding both folders,
++//     added in the other order, and no third window may be opened for it; a window holding
++//     only one of the two must not take it.
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++
++use acp_thread::StubAgentConnection;
++use agent_client_protocol::schema::v1 as acp;
++use fs::FakeFs;
++use gpui::{
++    AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle,
++};
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore};
++use crate::{AgentPanel, OpenAgentSessionOptions, open_agent_session};
++
++fn init(cx: &mut TestAppContext) {
++    crate::conversation_view::tests::init_test(cx);
++    cx.update(|cx| {
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++}
++
++async fn shared_fs(cx: &mut TestAppContext, roots: &[&str]) -> Arc<FakeFs> {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    for root in roots {
++        fs.insert_tree(root, json!({ "file.txt": "" })).await;
++    }
++    fs
++}
++
++struct Win {
++    window: WindowHandle<MultiWorkspace>,
++    workspace: Entity<Workspace>,
++    panel: Option<Entity<AgentPanel>>,
++    cx: VisualTestContext,
++}
++
++impl Win {
++    fn any(&self) -> AnyWindowHandle {
++        self.window.into()
++    }
++
++    fn panel(&self) -> Entity<AgentPanel> {
++        self.panel.clone().expect("this window has an agent panel")
++    }
++}
++
++async fn window(
++    fs: &Arc<FakeFs>,
++    roots: &[&str],
++    with_panel: bool,
++    cx: &mut TestAppContext,
++) -> Win {
++    let paths: Vec<&Path> = roots.iter().map(|root| Path::new(*root)).collect();
++    let project = Project::test(fs.clone(), paths, cx).await;
++    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = window
++        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
++        .unwrap();
++    workspace.update(cx, |workspace, _| workspace.set_random_database_id());
++    let mut vcx = VisualTestContext::from_window(window.into(), cx);
++    let panel = with_panel.then(|| {
++        let panel = workspace.update_in(&mut vcx, |workspace, window, cx| {
++            let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++            workspace.add_panel(panel.clone(), window, cx);
++            workspace.focus_panel::<AgentPanel>(window, cx);
++            panel
++        });
++        vcx.run_until_parked();
++        panel
++    });
++    Win {
++        window,
++        workspace,
++        panel,
++        cx: vcx,
++    }
++}
++
++/// A live, persisted thread in `win`'s agent panel; returns its session and thread id.
++fn live_thread(win: &mut Win) -> (acp::SessionId, ThreadId) {
++    let panel = win.panel();
++    crate::test_support::open_thread_with_connection(
++        &panel,
++        StubAgentConnection::new(),
++        &mut win.cx,
++    );
++    crate::test_support::send_message(&panel, &mut win.cx);
++    win.cx.run_until_parked();
++    (
++        crate::test_support::active_session_id(&panel, &win.cx),
++        crate::test_support::active_thread_id(&panel, &win.cx),
++    )
++}
++
++fn save_row(
++    session: &acp::SessionId,
++    folders: &[&str],
++    remote: bool,
++    cx: &mut TestAppContext,
++) -> ThreadId {
++    let thread_id = ThreadId::new();
++    let folders: Vec<&Path> = folders.iter().map(|folder| Path::new(*folder)).collect();
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
++            store.save(
++                ThreadMetadata {
++                    thread_id,
++                    session_id: Some(session.clone()),
++                    agent_id: crate::Agent::Stub.id(),
++                    title: Some("Saved thread".into()),
++                    title_override: None,
++                    updated_at: chrono::Utc::now(),
++                    created_at: None,
++                    interacted_at: None,
++                    worktree_paths: project::WorktreePaths::from_folder_paths(&PathList::new(
++                        &folders,
++                    )),
++                    remote_connection:
++                        remote.then(|| {
++                            remote::RemoteConnectionOptions::Ssh(
++                                remote::SshConnectionOptions::default(),
++                            )
++                        }),
++                    archived: false,
++                },
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++fn shows(panel: &Entity<AgentPanel>, thread_id: ThreadId, cx: &VisualTestContext) -> bool {
++    panel.read_with(cx, |panel, cx| {
++        panel.active_thread_id(cx) == Some(thread_id)
++    })
++}
++
++fn shown_session(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Option<acp::SessionId> {
++    panel.read_with(cx, |panel, cx| {
++        panel
++            .active_agent_thread(cx)
++            .map(|thread| thread.read(cx).session_id().clone())
++    })
++}
++
++fn folders_of(session: &acp::SessionId, cx: &mut TestAppContext) -> Option<Vec<PathBuf>> {
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry_by_session(session)
++            .map(|metadata| metadata.folder_paths().paths().to_vec())
++    })
++}
++
++fn route(
++    session: &acp::SessionId,
++    cwd: Option<&str>,
++    fallback: &Win,
++    cx: &mut TestAppContext,
++) -> gpui::Task<anyhow::Result<crate::OpenedAgentSession>> {
++    let app_state = fallback
++        .workspace
++        .read_with(cx, |workspace, _| workspace.app_state().clone());
++    let fallback_window = fallback.any();
++    let session = session.clone();
++    let cwd = cwd.map(PathBuf::from);
++    cx.update(|cx| {
++        open_agent_session(
++            session,
++            OpenAgentSessionOptions {
++                cwd,
++                fallback_window: Some(fallback_window),
++                tool_call_id: None,
++            },
++            app_state,
++            cx,
++        )
++    })
++}
++
++fn activate(win: &mut Win) {
++    win.cx.update(|window, _| window.activate_window());
++    win.cx.run_until_parked();
++}
++
++// R1.1, R1.3 — wrongly collapse: neither the prefix-named window (B, the caller's fallback
++// and the active one) nor the window over a folder inside A's (C) is taken for A.
++#[gpui::test]
++async fn agent_session_router_opens_in_the_window_holding_the_folders_not_the_fallback(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed/crates", "/work/zed-patches"]).await;
++    let mut a = window(&fs, &["/work/zed"], true, cx).await;
++    let (session, thread_id) = live_thread(&mut a);
++    let (_later, _) = live_thread(&mut a);
++    assert_ne!(shown_session(&a.panel(), &a.cx), Some(session.clone()));
++    let c = window(&fs, &["/work/zed/crates"], true, cx).await;
++    let mut b = window(&fs, &["/work/zed-patches"], true, cx).await;
++    activate(&mut b);
++    let windows = cx.update(|cx| cx.windows().len());
++
++    let routing = route(&session, None, &b, cx);
++    cx.run_until_parked();
++    let opened = routing.await.expect("the session opens");
++
++    assert_eq!(opened.window, a.any(), "A's window is returned");
++    assert_eq!(opened.workspace, a.workspace, "A's workspace is returned");
++    assert_eq!(
++        cx.update(|cx| cx.active_window()),
++        Some(a.any()),
++        "A is raised"
++    );
++    assert_eq!(shown_session(&a.panel(), &a.cx), Some(session.clone()));
++    assert!(
++        !shows(&b.panel(), thread_id, &b.cx),
++        "not the prefix-named fallback"
++    );
++    assert!(
++        !shows(&c.panel(), thread_id, &c.cx),
++        "not the sub-folder window"
++    );
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no window is opened"
++    );
++    assert_eq!(
++        folders_of(&session, cx),
++        Some(vec![PathBuf::from("/work/zed")]),
++        "the metadata row keeps its folders"
++    );
++}
++
++// R1.1 — wrongly split: the window holding both folders (added in the other order) takes a
++// two-folder thread; a window holding one of them does not; no third window is opened.
++#[gpui::test]
++async fn agent_session_router_reuses_the_window_holding_every_folder_in_any_order(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/multi/alpha", "/multi/beta"]).await;
++    let mut both = window(&fs, &["/multi/beta", "/multi/alpha"], true, cx).await;
++    let (session, thread_id) = live_thread(&mut both);
++    let (_later, _) = live_thread(&mut both);
++    let mut one = window(&fs, &["/multi/alpha"], true, cx).await;
++    activate(&mut one);
++    let windows = cx.update(|cx| cx.windows().len());
++    let mut recorded = folders_of(&session, cx).expect("the row exists");
++    recorded.sort();
++    assert_eq!(
++        recorded,
++        vec![PathBuf::from("/multi/alpha"), PathBuf::from("/multi/beta")],
++        "precondition: the row records both folders"
++    );
++
++    let routing = route(&session, None, &one, cx);
++    cx.run_until_parked();
++    let opened = routing.await.expect("the session opens");
++
++    assert_eq!(opened.window, both.any(), "the window holding both folders");
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no third window"
++    );
++    assert_eq!(shown_session(&both.panel(), &both.cx), Some(session));
++    assert!(
++        !shows(&one.panel(), thread_id, &one.cx),
++        "not the one-folder window"
++    );
++}
++
++// R1.4 — a remote row's folders name paths on another host: the session opens in the
++// caller's fallback window even though a LOCAL window holds a folder of the same name.
++#[gpui::test]
++async fn agent_session_router_opens_a_remote_session_in_the_fallback_window(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let a = window(&fs, &["/work/zed"], true, cx).await;
++    let mut b = window(&fs, &["/work/zed-patches"], true, cx).await;
++    let session = acp::SessionId::new("remote-session");
++    let thread_id = save_row(&session, &["/work/zed"], true, cx);
++    activate(&mut b);
++    let windows = cx.update(|cx| cx.windows().len());
++
++    let routing = route(&session, None, &b, cx);
++    cx.run_until_parked();
++    let result = routing.await;
++
++    assert!(
++        !shows(&a.panel(), thread_id, &a.cx),
++        "never the local same-named window"
++    );
++    assert_eq!(
++        cx.update(|cx| cx.active_window()),
++        Some(b.any()),
++        "B stays active"
++    );
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no window is opened"
++    );
++    if let Ok(opened) = result {
++        assert_eq!(opened.window, b.any(), "the fallback window is returned");
++        assert!(shows(&b.panel(), thread_id, &b.cx));
++    }
++}
++
++// R1.1 — a session no row knows yet resolves through the caller's `cwd`, as the tray link's
++// `cwd=` does: A's window is raised, the fallback B is not used.
++#[gpui::test]
++async fn agent_session_router_falls_back_to_cwd_for_a_session_without_a_row(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let a = window(&fs, &["/work/zed"], true, cx).await;
++    let mut b = window(&fs, &["/work/zed-patches"], true, cx).await;
++    activate(&mut b);
++    let windows = cx.update(|cx| cx.windows().len());
++    let session = acp::SessionId::new("session-without-a-row");
++
++    let routing = route(&session, Some("/work/zed"), &b, cx);
++    cx.run_until_parked();
++    let result = routing.await;
++
++    assert_eq!(
++        cx.update(|cx| cx.active_window()),
++        Some(a.any()),
++        "cwd's window is raised"
++    );
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no window is opened"
++    );
++    if let Ok(opened) = result {
++        assert_eq!(opened.window, a.any());
++        assert_eq!(opened.workspace, a.workspace);
++    }
++}
++
++// R1.6, Q4 — the thread cannot be opened in its window (that window has no agent panel):
++// an `Err` naming the session, never a panic, and never a silent fallback to the caller.
++#[gpui::test]
++async fn agent_session_router_returns_an_error_naming_the_session_when_it_cannot_open(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx, &["/work/zed", "/work/zed-patches"]).await;
++    let _a = window(&fs, &["/work/zed"], false, cx).await;
++    let mut b = window(&fs, &["/work/zed-patches"], true, cx).await;
++    let session = acp::SessionId::new("session-of-a-window-without-agent-panel");
++    let thread_id = save_row(&session, &["/work/zed"], false, cx);
++    activate(&mut b);
++
++    let routing = route(&session, None, &b, cx);
++    cx.run_until_parked();
++    let error = match routing.await {
++        Ok(_) => panic!("a window without an agent panel cannot open the session"),
++        Err(error) => error,
++    };
++
++    assert!(
++        format!("{error:#}").contains("session-of-a-window-without-agent-panel"),
++        "the error names the session: {error:#}"
++    );
++    assert!(
++        !shows(&b.panel(), thread_id, &b.cx),
++        "no fallback to the caller's window"
++    );
++}
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index 4239763..916644c 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -4,6 +4,7 @@ mod agent_diff;
+ mod agent_model_selector;
+ mod agent_panel;
+ mod agent_registry_ui;
++mod agent_session_router;
+ mod buffer_codegen;
+ mod completion_provider;
+ mod config_options;
+@@ -82,6 +83,9 @@ pub use crate::agent_panel::{
+     AgentPanel, AgentPanelEvent, AgentPanelTerminalInfo, TerminalId, ThreadTitleRegenerationResult,
+ };
+ use crate::agent_registry_ui::AgentRegistryPage;
++pub use crate::agent_session_router::{
++    OpenAgentSessionOptions, OpenedAgentSession, open_agent_session,
++};
+ pub use crate::inline_assistant::InlineAssistant;
+ pub use crate::message_editor::MessageEditorEvent;
+ pub use crate::task_label::{
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index 2f0dbc5..f215e14 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -1822,6 +1822,14 @@ impl ConversationView {
+         matches!(self.server_state, ServerState::Loading { .. })
+     }
+ 
++    /// Why the conversation failed to load, if it did.
++    pub(crate) fn load_error(&self) -> Option<&LoadError> {
++        match &self.server_state {
++            ServerState::LoadError { error } => Some(error),
++            _ => None,
++        }
++    }
++
+     fn handle_thread_event(
+         &mut self,
+         thread: &Entity<AcpThread>,
+diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
+index b77de80..7397d97 100644
+--- a/crates/zed/src/main.rs
++++ b/crates/zed/src/main.rs
+@@ -1037,47 +1037,42 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
+                 .detach_and_log_err(cx);
+             }
+             OpenRequestKind::AgentPanel {
+-                external_source_prompt,
+-                session_id,
++                external_source_prompt: _,
++                session_id: Some(session_id),
+                 cwd,
++            } => {
++                // A thread belongs to a project, so the router opens it in the
++                // window holding that project, not in whichever window has focus:
++                // on a machine with one window per project on separate virtual
++                // desktops, the focused window is the one on the desktop the click
++                // came from, which says nothing about the thread.
++                let routing = agent_ui::open_agent_session(
++                    session_id.clone(),
++                    agent_ui::OpenAgentSessionOptions {
++                        cwd,
++                        fallback_window: None,
++                        tool_call_id: None,
++                    },
++                    app_state,
++                    cx,
++                );
++                cx.spawn(async move |_| {
++                    if let Err(error) = routing.await {
++                        log::warn!("zed://agent could not open session {session_id}: {error:#}");
++                    }
++                })
++                .detach();
++            }
++            OpenRequestKind::AgentPanel {
++                external_source_prompt,
++                session_id: None,
++                cwd: _,
+             } => {
+                 cx.spawn(async move |cx| {
+-                    // A thread belongs to a project, so a session is opened in the
+-                    // window holding that project -- found across every window, or
+-                    // opened the way `zed <folder>` would -- and not in whichever
+-                    // window has focus. On a machine with one window per project
+-                    // on separate virtual desktops, the focused window is the one
+-                    // on the desktop the click came from, which says nothing about
+-                    // the thread.
+-                    let session_folders = match &session_id {
+-                        Some(session_id) => agent_session_folders(session_id, cwd, cx).await,
+-                        None => None,
+-                    };
+-                    let (multi_workspace, workspace) = match session_folders {
+-                        Some(folders) => {
+-                            let opened = cx
+-                                .update(|cx| {
+-                                    workspace::open_paths(
+-                                        &folders,
+-                                        app_state,
+-                                        workspace::OpenOptions::default(),
+-                                        cx,
+-                                    )
+-                                })
+-                                .await?;
+-                            (opened.window, opened.workspace)
+-                        }
+-                        None => {
+-                            let multi_workspace =
+-                                workspace::get_any_active_multi_workspace(app_state, cx.clone())
+-                                    .await?;
+-                            let workspace = multi_workspace
+-                                .read_with(cx, |multi_workspace, _| {
+-                                    multi_workspace.workspace().clone()
+-                                })?;
+-                            (multi_workspace, workspace)
+-                        }
+-                    };
++                    let multi_workspace =
++                        workspace::get_any_active_multi_workspace(app_state, cx.clone()).await?;
++                    let workspace = multi_workspace
++                        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())?;
+ 
+                     let panels_task =
+                         workspace.update(cx, |workspace, _| workspace.take_panels_task());
+@@ -1098,18 +1093,11 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
+                         workspace.update(cx, |workspace, cx| {
+                             if let Some(panel) = workspace.focus_panel::<AgentPanel>(window, cx) {
+                                 panel.update(cx, |panel, cx| {
+-                                    // A session id reopens that thread, with the
+-                                    // agent that owns it; everything else starts a
+-                                    // new one.
+-                                    if let Some(session_id) = session_id {
+-                                        panel.open_thread_by_session(session_id, window, cx);
+-                                    } else {
+-                                        panel.new_agent_thread_with_external_source_prompt(
+-                                            external_source_prompt,
+-                                            window,
+-                                            cx,
+-                                        );
+-                                    }
++                                    panel.new_agent_thread_with_external_source_prompt(
++                                        external_source_prompt,
++                                        window,
++                                        cx,
++                                    );
+                                 });
+                             } else {
+                                 log::warn!(
+@@ -1418,38 +1406,6 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
+     }
+ }
+ 
+-/// The folders the thread of an agent session belongs to.
+-///
+-/// The session's metadata row is the authority: it records the folders the
+-/// thread was started in. `cwd` -- what the link's producer saw -- only answers
+-/// for a session no row knows yet. `None` leaves the choice to the focused
+-/// window, which is also what a thread on a remote host gets: its folders name
+-/// paths on that host, not on this one.
+-async fn agent_session_folders(
+-    session_id: &agent_client_protocol::schema::v1::SessionId,
+-    cwd: Option<PathBuf>,
+-    cx: &mut AsyncApp,
+-) -> Option<Vec<PathBuf>> {
+-    let store =
+-        cx.update(|cx| agent_ui::thread_metadata_store::ThreadMetadataStore::try_global(cx));
+-    let Some(store) = store else {
+-        return cwd.map(|cwd| vec![cwd]);
+-    };
+-    // The store loads its rows from disk at startup, and a link that launched
+-    // Zed arrives before that finishes; without the wait it finds no row and
+-    // falls through to `cwd` for a thread it does know.
+-    let reload = store.read_with(cx, |store, _| store.reload_task());
+-    reload.await;
+-
+-    store.read_with(cx, |store, _| match store.entry_by_session(session_id) {
+-        Some(metadata) if metadata.remote_connection.is_some() => None,
+-        Some(metadata) => Some(metadata.folder_paths().paths().to_vec())
+-            .filter(|folders| !folders.is_empty())
+-            .or_else(|| cwd.map(|cwd| vec![cwd])),
+-        None => cwd.map(|cwd| vec![cwd]),
+-    })
+-}
+-
+ async fn authenticate(client: Arc<Client>, cx: &AsyncApp) -> Result<()> {
+     if stdout_is_a_pty() {
+         if client::IMPERSONATE_LOGIN.is_some() {
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 1f0510b..c518bf8 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -2874,6 +2874,10 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
+     }
+ }
+ 
++#[cfg(test)]
++#[path = "zed/agent_session_route_tests.rs"]
++mod agent_session_route;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/zed/src/zed/agent_session_route_tests.rs b/crates/zed/src/zed/agent_session_route_tests.rs
+new file mode 100644
+index 0000000..fd9e530
+--- /dev/null
++++ b/crates/zed/src/zed/agent_session_route_tests.rs
+@@ -0,0 +1,168 @@
++// Story 024, task 2.2 — the tray route (`zeo://agent?session=`) opens a session in its
++// project's window, from another focused window (R2.2, R1.5). The first test of `0024`'s
++// window routing. Wired in `src/zed.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "zed/agent_session_route_tests.rs"]
++//     mod agent_session_route;
++//
++// so it reaches `tests::init_test` (a sibling inside `zed`) and the crate root's private
++// `handle_open_request`. Validation filter: `agent_session_route`.
++//
++// Hostile first: the focused window B's folder `/work/zed-patches` carries A's `/work/zed` as
++// a prefix.
++
++use std::path::PathBuf;
++
++use agent_client_protocol::schema::v1 as acp;
++use agent_ui::AgentPanel;
++use agent_ui::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore};
++use gpui::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
++use serde_json::json;
++use workspace::{MultiWorkspace, OpenMode, OpenOptions, PathList, Workspace};
++
++use super::open_listener::{OpenRequest, OpenRequestKind};
++use super::tests::init_test;
++
++async fn open_window(
++    path: &str,
++    app_state: &std::sync::Arc<workspace::AppState>,
++    cx: &mut TestAppContext,
++) -> (gpui::WindowHandle<MultiWorkspace>, Entity<Workspace>) {
++    let opened = cx
++        .update(|cx| {
++            workspace::open_paths(
++                &[PathBuf::from(path)],
++                app_state.clone(),
++                OpenOptions {
++                    open_mode: OpenMode::NewWindow,
++                    ..Default::default()
++                },
++                cx,
++            )
++        })
++        .await
++        .expect("the window opens");
++    let panels = opened
++        .workspace
++        .update(cx, |workspace, _| workspace.take_panels_task());
++    if let Some(panels) = panels {
++        panels.await.expect("the panels load");
++    }
++    // The test init registers no agent panel (Zeo loads it through `initialize_panels`
++    // with AI enabled); give each window the test one, before the route runs.
++    let workspace = opened.workspace.clone();
++    opened
++        .window
++        .update(cx, |_, window, cx| {
++            workspace.update(cx, |workspace, cx| {
++                if workspace.panel::<AgentPanel>(cx).is_none() {
++                    let panel = cx.new(|cx| AgentPanel::test_new(workspace, window, cx));
++                    workspace.add_panel(panel, window, cx);
++                }
++            })
++        })
++        .unwrap();
++    cx.run_until_parked();
++    (opened.window, opened.workspace)
++}
++
++fn agent_panel(workspace: &Entity<Workspace>, cx: &mut TestAppContext) -> Entity<AgentPanel> {
++    workspace
++        .read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx))
++        .expect("the window carries an agent panel")
++}
++
++fn shows(panel: &Entity<AgentPanel>, thread_id: ThreadId, cx: &mut TestAppContext) -> bool {
++    panel.read_with(cx, |panel, cx| {
++        panel.active_thread_id(cx) == Some(thread_id)
++    })
++}
++
++#[gpui::test]
++async fn agent_session_route_opens_a_session_in_its_project_window_from_another(
++    cx: &mut TestAppContext,
++) {
++    let app_state = init_test(cx);
++    let fs = app_state.fs.as_fake();
++    fs.insert_tree("/work/zed", json!({ "file.txt": "" })).await;
++    fs.insert_tree("/work/zed-patches", json!({ "file.txt": "" }))
++        .await;
++
++    let (window_a, workspace_a) = open_window("/work/zed", &app_state, cx).await;
++    let (window_b, workspace_b) = open_window("/work/zed-patches", &app_state, cx).await;
++    assert_ne!(window_a, window_b, "precondition: two windows");
++
++    let session = acp::SessionId::new("tray-session-of-a");
++    let thread_id = ThreadId::new();
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| {
++            store.save(
++                ThreadMetadata {
++                    thread_id,
++                    session_id: Some(session.clone()),
++                    agent_id: "stub".into(),
++                    title: Some("Thread of A".into()),
++                    title_override: None,
++                    updated_at: chrono::Utc::now(),
++                    created_at: None,
++                    interacted_at: None,
++                    worktree_paths: project::WorktreePaths::from_folder_paths(&PathList::new(&[
++                        PathBuf::from("/work/zed"),
++                    ])),
++                    remote_connection: None,
++                    archived: false,
++                },
++                cx,
++            )
++        })
++    });
++    window_b
++        .update(cx, |_, window, _| window.activate_window())
++        .unwrap();
++    cx.run_until_parked();
++    let b: AnyWindowHandle = window_b.into();
++    assert_eq!(
++        cx.update(|cx| cx.active_window()),
++        Some(b),
++        "precondition: B is focused"
++    );
++    let windows = cx.update(|cx| cx.windows().len());
++
++    let request = OpenRequest {
++        kind: Some(OpenRequestKind::AgentPanel {
++            external_source_prompt: None,
++            session_id: Some(session.clone()),
++            cwd: None,
++        }),
++        ..Default::default()
++    };
++    cx.update(|cx| crate::handle_open_request(request, app_state.clone(), cx));
++    cx.run_until_parked();
++
++    let a: AnyWindowHandle = window_a.into();
++    assert_eq!(cx.update(|cx| cx.active_window()), Some(a), "A is raised");
++    let panel_a = agent_panel(&workspace_a, cx);
++    let panel_b = agent_panel(&workspace_b, cx);
++    assert!(
++        shows(&panel_a, thread_id, cx),
++        "A's agent panel holds the thread"
++    );
++    assert!(!shows(&panel_b, thread_id, cx), "B's agent panel does not");
++    assert_eq!(
++        cx.update(|cx| cx.windows().len()),
++        windows,
++        "no window is opened"
++    );
++    let folders = cx.update(|cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry_by_session(&session)
++            .map(|metadata| metadata.folder_paths().paths().to_vec())
++    });
++    assert_eq!(
++        folders,
++        Some(vec![PathBuf::from("/work/zed")]),
++        "the row keeps A's folder"
++    );
++}
