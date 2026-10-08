@@ -50,13 +50,20 @@ held 7 folderless lock files, matching no working directory, alongside two 401
 handshakes. Lock and port move together because the CLI reads the token from
 the lock file of the port it was given: a port without a lock file would make a
 CLI started in that terminal fail the handshake rather than run without an IDE.
+
+`ideName` -- what the CLI's /ide prints as the editor it is connected to -- is
+the release channel's display_name(), read when the lock file is written, not a
+"Zed" constant (2026-10-07). Under Zeo it prints "Zeo"; on an upstream build it
+still prints "Zed", or "Zed Nightly". The CLI only displays the field, so the
+value is free to follow the window title. serverInfo.name stays "zed": that one
+is a protocol identity, not a label.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 0f56e1c..03ccdf1 100644
+index 0f56e1c..fdf0e5b 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -3038,6 +3038,31 @@ version = "0.7.6"
+@@ -3038,6 +3038,32 @@ version = "0.7.6"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
  
@@ -75,6 +82,7 @@ index 0f56e1c..03ccdf1 100644
 + "log",
 + "paths",
 + "project",
++ "release_channel",
 + "serde",
 + "serde_json",
 + "smol",
@@ -88,7 +96,7 @@ index 0f56e1c..03ccdf1 100644
  [[package]]
  name = "cli"
  version = "0.1.0"
-@@ -22447,6 +22472,7 @@ dependencies = [
+@@ -22447,6 +22473,7 @@ dependencies = [
   "channel",
   "chrono",
   "clap",
@@ -118,10 +126,10 @@ index a28c76b..313025b 100644
  clock = { path = "crates/clock" }
 diff --git a/crates/claude_code_ide/Cargo.toml b/crates/claude_code_ide/Cargo.toml
 new file mode 100644
-index 0000000..54fb658
+index 0000000..c83d1ac
 --- /dev/null
 +++ b/crates/claude_code_ide/Cargo.toml
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +[package]
 +name = "claude_code_ide"
 +version = "0.1.0"
@@ -149,6 +157,7 @@ index 0000000..54fb658
 +log.workspace = true
 +paths.workspace = true
 +project.workspace = true
++release_channel.workspace = true
 +serde.workspace = true
 +serde_json.workspace = true
 +smol.workspace = true
@@ -159,10 +168,10 @@ index 0000000..54fb658
 +workspace.workspace = true
 diff --git a/crates/claude_code_ide/README.md b/crates/claude_code_ide/README.md
 new file mode 100644
-index 0000000..eb59c5d
+index 0000000..8481e58
 --- /dev/null
 +++ b/crates/claude_code_ide/README.md
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,67 @@
 +# claude_code_ide
 +
 +Native [Claude Code](https://docs.claude.com/en/docs/claude-code) IDE integration
@@ -190,8 +199,9 @@ index 0000000..eb59c5d
 +1. Each workspace starts a per-window server: it binds `127.0.0.1:0`, then
 +   writes a lockfile to `~/.claude/ide/<port>.lock` (honoring
 +   `CLAUDE_CONFIG_DIR`) with `0600` perms inside a `0700` dir. The lockfile
-+   advertises `{pid, workspaceFolders, ideName: "Zed", transport: "ws",
-+   authToken}` so the CLI can discover the IDE.
++   advertises `{pid, workspaceFolders, ideName, transport: "ws", authToken}`
++   so the CLI can discover the IDE; `ideName` is the release channel's display
++   name, the one the window title carries.
 +2. The transport is a WebSocket authenticated by the
 +   `x-claude-code-ide-authorization` header (which must equal `authToken`),
 +   speaking JSON-RPC 2.0 / MCP (`initialize`, `tools/list`, `tools/call`),
@@ -231,10 +241,10 @@ index 0000000..eb59c5d
 +
 diff --git a/crates/claude_code_ide/src/claude_code_ide.rs b/crates/claude_code_ide/src/claude_code_ide.rs
 new file mode 100644
-index 0000000..140faa4
+index 0000000..492b935
 --- /dev/null
 +++ b/crates/claude_code_ide/src/claude_code_ide.rs
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,249 @@
 +//! IDE-side implementation of the Claude Code editor integration protocol.
 +//!
 +//! This lets the Claude Code CLI connect to Zed the same way it connects to the
@@ -261,10 +271,11 @@ index 0000000..140faa4
 +    WeakEntity,
 +};
 +use project::Project;
++use release_channel::ReleaseChannel;
 +use util::ResultExt as _;
 +use workspace::Workspace;
 +
-+pub use lockfile::{IDE_NAME, generate_auth_token};
++pub use lockfile::generate_auth_token;
 +pub use server::{Dispatcher, ProtocolError, ToolDescriptor, bind, serve_connection};
 +pub use tools::WorkspaceDispatcher;
 +
@@ -461,7 +472,10 @@ index 0000000..140faa4
 +        lockfile::remove(port).log_err();
 +        None
 +    } else {
-+        lockfile::create(port, auth_token, folders)
++        let ide_name = ReleaseChannel::try_global(cx)
++            .unwrap_or(ReleaseChannel::Stable)
++            .display_name();
++        lockfile::create(port, ide_name, auth_token, folders)
 +            .log_err()
 +            .map(|_| port)
 +    };
@@ -482,10 +496,10 @@ index 0000000..140faa4
 +}
 diff --git a/crates/claude_code_ide/src/lockfile.rs b/crates/claude_code_ide/src/lockfile.rs
 new file mode 100644
-index 0000000..78b1095
+index 0000000..cab3586
 --- /dev/null
 +++ b/crates/claude_code_ide/src/lockfile.rs
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,174 @@
 +//! Discovery lock files for the Claude Code IDE integration.
 +//!
 +//! The Claude Code CLI finds a running IDE WebSocket server by scanning
@@ -498,15 +512,14 @@ index 0000000..78b1095
 +use serde::Serialize;
 +use std::{fs, path::PathBuf};
 +
-+/// The `ideName` reported to the CLI; shown in its `/ide` status output.
-+pub const IDE_NAME: &str = "Zed";
-+
 +#[derive(Debug, Serialize)]
 +#[serde(rename_all = "camelCase")]
 +struct LockFileContents {
 +    pid: u32,
 +    workspace_folders: Vec<String>,
-+    ide_name: &'static str,
++    /// Shown in the CLI's `/ide` status output. The caller passes the release
++    /// channel's display name, so a build reports the name its window carries.
++    ide_name: String,
 +    /// The field the CLI actually branches on when it builds our URL:
 +    /// `true` gives `ws://host:port`, absent or `false` gives
 +    /// `http://host:port/sse`. We serve only WebSocket, so omitting this
@@ -523,14 +536,14 @@ index 0000000..78b1095
 +}
 +
 +impl LockFileContents {
-+    fn new(auth_token: &str, workspace_folders: &[PathBuf]) -> Self {
++    fn new(ide_name: &str, auth_token: &str, workspace_folders: &[PathBuf]) -> Self {
 +        Self {
 +            pid: std::process::id(),
 +            workspace_folders: workspace_folders
 +                .iter()
 +                .map(|path| path.to_string_lossy().into_owned())
 +                .collect(),
-+            ide_name: IDE_NAME,
++            ide_name: ide_name.to_owned(),
 +            use_websocket: true,
 +            transport: "ws",
 +            auth_token: auth_token.to_owned(),
@@ -560,14 +573,19 @@ index 0000000..78b1095
 +///
 +/// The write is atomic (temp file + rename) so the CLI never observes a
 +/// partially written file while scanning the directory.
-+pub fn create(port: u16, auth_token: &str, workspace_folders: &[PathBuf]) -> Result<PathBuf> {
++pub fn create(
++    port: u16,
++    ide_name: &str,
++    auth_token: &str,
++    workspace_folders: &[PathBuf],
++) -> Result<PathBuf> {
 +    let dir = lock_dir();
 +    fs::create_dir_all(&dir).with_context(|| format!("creating lock dir {dir:?}"))?;
 +    // The token is a secret, so restrict the directory to the current user
 +    // (0700), matching what the official extensions do.
 +    set_owner_only(&dir, 0o700)?;
 +
-+    let contents = LockFileContents::new(auth_token, workspace_folders);
++    let contents = LockFileContents::new(ide_name, auth_token, workspace_folders);
 +    let json = serde_json::to_string(&contents).context("serializing lock file")?;
 +
 +    let path = dir.join(format!("{port}.lock"));
@@ -621,13 +639,17 @@ index 0000000..78b1095
 +    /// the one field the CLI branches on.
 +    #[test]
 +    fn lock_file_matches_expected_wire_format() {
-+        let contents = LockFileContents::new("the-token", &[PathBuf::from("/home/user/project")]);
++        let contents = LockFileContents::new(
++            "Zed Nightly",
++            "the-token",
++            &[PathBuf::from("/home/user/project")],
++        );
 +        let value: serde_json::Value =
 +            serde_json::from_str(&serde_json::to_string(&contents).unwrap()).unwrap();
 +
 +        assert_eq!(value["pid"], std::process::id());
 +        assert_eq!(value["workspaceFolders"][0], "/home/user/project");
-+        assert_eq!(value["ideName"], "Zed");
++        assert_eq!(value["ideName"], "Zed Nightly");
 +        assert_eq!(value["authToken"], "the-token");
 +        assert_eq!(value["transport"], "ws");
 +    }
@@ -637,7 +659,7 @@ index 0000000..78b1095
 +    /// IDE at all. Pinned separately because it is the whole integration.
 +    #[test]
 +    fn lock_file_selects_the_websocket_transport() {
-+        let contents = LockFileContents::new("the-token", &[]);
++        let contents = LockFileContents::new("Zed", "the-token", &[]);
 +        let value: serde_json::Value =
 +            serde_json::from_str(&serde_json::to_string(&contents).unwrap()).unwrap();
 +

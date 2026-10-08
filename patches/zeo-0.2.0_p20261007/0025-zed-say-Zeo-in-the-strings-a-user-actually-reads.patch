@@ -63,6 +63,17 @@ String and drags in sibling arms like "Updating..." that have nothing to do with
 the rebrand. Converting those sites properly is a separate change, and one worth
 offering upstream rather than carrying: Zed Nightly displays "Zed" in these same
 strings today, where it should display its own channel name.
+
+THE APPLICATION MENU, added 2026-10-07 by a re-measurement that found it missed
+here rather than new upstream. "Zed", "About Zed", "Quit Zed" and the About
+window's title read as macOS strings, but on Linux the title bar renders the same
+menus. Unlike the literals above, these take display_name() cleanly:
+Menu::name and MenuItem::action accept impl Into<SharedString>, so format! costs
+nothing and drags in no sibling. The catch is f10: default-linux.json binds
+["app_menu::OpenApplicationMenu", "Zed"], and ApplicationMenu finds the menu to
+open by comparing that name with ==. Editing the keymap would conflict on every
+bump and still break any user keymap naming "Zed", so open_menu treats "Zed" as
+the application menu's old name instead.
 ---
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs
@@ -172,6 +183,26 @@ index 857a0ce..627c367 100644
                      appears_transparent: true,
                      traffic_light_position: Some(point(px(12.0), px(12.0))),
                  }),
+diff --git a/crates/title_bar/src/application_menu.rs b/crates/title_bar/src/application_menu.rs
+index ced552d..f4b53a7 100644
+--- a/crates/title_bar/src/application_menu.rs
++++ b/crates/title_bar/src/application_menu.rs
+@@ -256,7 +256,14 @@ impl ApplicationMenu {
+         _window: &mut Window,
+         _cx: &mut Context<Self>,
+     ) {
+-        self.pending_menu_open = Some(action.0.clone());
++        // The application menu is named after the release channel, but keymaps
++        // name it "Zed" -- the default `f10` binding among them -- so that name
++        // keeps opening it.
++        let name = match self.entries.first() {
++            Some(entry) if action.0 == "Zed" => entry.menu.name.to_string(),
++            _ => action.0.clone(),
++        };
++        self.pending_menu_open = Some(name);
+     }
+ 
+     #[cfg(not(target_os = "macos"))]
 diff --git a/crates/title_bar/src/title_bar.rs b/crates/title_bar/src/title_bar.rs
 index 3ffc153..1cd5853 100644
 --- a/crates/title_bar/src/title_bar.rs
@@ -288,3 +319,59 @@ index 2ae5f82..dd9198b 100644
                          .body(Some(
                              format!(
                                  "{e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 70c5df3..50959aa 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -1718,7 +1718,7 @@ fn open_about_window(cx: &mut App) {
+     cx.open_window(
+         WindowOptions {
+             titlebar: Some(TitlebarOptions {
+-                title: Some("About Zed".into()),
++                title: Some(format!("About {}", ReleaseChannel::global(cx).display_name()).into()),
+                 appears_transparent: true,
+                 traffic_light_position: Some(point(px(12.), px(12.))),
+             }),
+diff --git a/crates/zed/src/zed/app_menus.rs b/crates/zed/src/zed/app_menus.rs
+index aff790d..4746b0f 100644
+--- a/crates/zed/src/zed/app_menus.rs
++++ b/crates/zed/src/zed/app_menus.rs
+@@ -7,6 +7,9 @@ use terminal_view::terminal_panel;
+ use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, project_panel};
+ 
+ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
++    let app_name = ReleaseChannel::try_global(cx)
++        .unwrap_or(ReleaseChannel::Stable)
++        .display_name();
+     let mut view_items = vec![
+         MenuItem::action(
+             "Zoom In",
+@@ -68,10 +71,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
+ 
+     vec![
+         Menu {
+-            name: "Zed".into(),
++            name: app_name.into(),
+             disabled: false,
+             items: vec![
+-                MenuItem::action("About Zed", zed_actions::About),
++                MenuItem::action(format!("About {app_name}"), zed_actions::About),
+                 MenuItem::action("Check for Updates", auto_update::Check),
+                 MenuItem::separator(),
+                 MenuItem::submenu(Menu::new("Settings").items([
+@@ -103,13 +106,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
+                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
+                 MenuItem::separator(),
+                 #[cfg(target_os = "macos")]
+-                MenuItem::action("Hide Zed", super::Hide),
++                MenuItem::action(format!("Hide {app_name}"), super::Hide),
+                 #[cfg(target_os = "macos")]
+                 MenuItem::action("Hide Others", super::HideOthers),
+                 #[cfg(target_os = "macos")]
+                 MenuItem::action("Show All", super::ShowAll),
+                 MenuItem::separator(),
+-                MenuItem::action("Quit Zed", Quit),
++                MenuItem::action(format!("Quit {app_name}"), Quit),
+             ],
+         },
+         Menu {
