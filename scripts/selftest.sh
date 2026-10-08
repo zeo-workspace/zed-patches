@@ -2048,9 +2048,13 @@ test_xvfb_proof_launch_isolates_bus_and_runtime_dir() {
 	out="$(XDG_RUNTIME_DIR=/run/user/operator run_xvfb_proof "${tmp}" --keep "${tmp}/k" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}]')")"
 	wd="$(workdir_of "${out}")"
 	log="$(stub_log "${tmp}")"
-	assert_contains "${log}" "DISPLAY=:90 dbus-run-session -- " &&
+	# A bus that can activate services starts the operator's kwalletd, whose
+	# password dialog then swallows every typed step (measured on the real Zeo).
+	assert_contains "${log}" "DISPLAY=:90 dbus-run-session --config-file=${wd}/session-bus.conf -- " &&
 		assert_contains "${log}" "XDG_RUNTIME_DIR=${wd}/run " &&
-		assert_equal 700 "$(stat -c %a "${wd}/run" 2>/dev/null)" && ok
+		assert_equal 700 "$(stat -c %a "${wd}/run" 2>/dev/null)" &&
+		assert_contains "$(cat "${wd}/session-bus.conf" 2>/dev/null)" "<type>session</type>" &&
+		assert_not_contains "$(cat "${wd}/session-bus.conf" 2>/dev/null)" "servicedir" && ok
 	rm -rf "${tmp}"
 }
 

@@ -359,6 +359,28 @@ guard_display() {
 		die 1 "refusing input on ${target}: the Xvfb this run started is gone"
 }
 
+# write_bus_config <path> — a session bus that activates nothing. The stock
+# session config lists the installed services, and the first keyring call then
+# starts a kwalletd whose password dialog takes the keyboard from every later
+# step (measured on the real Zeo); portals and their FUSE mount came the same
+# way. With no <servicedir>, such a call fails at once and Zeo goes on without.
+write_bus_config() {
+	cat >"$1" <<EOF || die 2 "cannot write the session bus config: $1"
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:dir=${WORKDIR}/run</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+EOF
+}
+
 # launch_zeo — start the editor on the private display with state of its own.
 #
 # --user-data-dir alone makes it a separate instance: on Linux the socket a second
@@ -372,6 +394,7 @@ launch_zeo() {
 	mkdir -p "${WORKDIR}/config" "${WORKDIR}/cache" "${WORKDIR}/state" "${WORKDIR}/run" ||
 		die 2 "cannot create config/, cache/, state/ and run/ under ${WORKDIR}"
 	chmod 700 "${WORKDIR}/run" || die 2 "cannot restrict ${WORKDIR}/run to its owner"
+	write_bus_config "${WORKDIR}/session-bus.conf"
 	if [[ -n "${SETTINGS}" ]]; then
 		cp -- "${SETTINGS}" "${WORKDIR}/config/settings.json" || die 2 "cannot copy the settings: ${SETTINGS}"
 	fi
@@ -390,7 +413,8 @@ launch_zeo() {
 		XDG_STATE_HOME="${WORKDIR}/state" \
 		XDG_RUNTIME_DIR="${WORKDIR}/run" \
 		XVFB_PROOF_RUN="${RUN_MARK}" \
-		setsid dbus-run-session -- "${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
+		setsid dbus-run-session --config-file="${WORKDIR}/session-bus.conf" -- \
+		"${BINARY}" --user-data-dir "${WORKDIR}" >"${log}" 2>&1 &
 	ZEO_PID=$!
 	ZEO_PGID="${ZEO_PID}"
 	printf 'zeo: pid %s, log %s\n' "${ZEO_PID}" "${log}"
