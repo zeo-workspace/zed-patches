@@ -31,6 +31,30 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.2.1_p20261009-r1] — 2026-10-09 (untagged)
+
+### Fixed
+
+- `0033`: `AgentRegistryStore::init_global` never ran its own first registry
+  fetch, because the store's list always holds Zeo's two built-ins and the guard
+  was `is_empty()`. Now it fetches when the list holds nothing else. Invisible in
+  a running Zeo (default.json's registry agents trigger `refresh_if_stale`
+  anyway); caught by the three `registry_refresh_*` integration tests.
+- Seven upstream tests the series had left failing now describe the patched
+  behaviour, in the patch that changes it: `0001` (acp-beta cannot be switched
+  off: `test_compact_prompt_routes_to_manual_compaction`,
+  `connection_routes_terminal_auth_without_acp_beta`), `0033` (the three
+  `registry_refresh_*`, `test_remote_external_agent_server`) and `0035`
+  (`test_action_namespaces`). `cargo test` over the 30 crates the series
+  touches: 3899 passed, 17 ignored (all upstream `#[ignore]`), 2 failed — the
+  flaky `test_multi_workspace_session_restore`, which passes alone, and
+  `test_extension_store_with_test_extension`, which fails without the series
+  too.
+
+### Changed
+
+- `0010`, `0034`, `0036`, `0040` and `0046` move in context only.
+
 ## [0.2.1_p20261009] — 2026-10-09 (untagged)
 
 ### Changed

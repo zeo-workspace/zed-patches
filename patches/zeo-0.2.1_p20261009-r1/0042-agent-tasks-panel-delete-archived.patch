@@ -1,0 +1,934 @@
+From 762844df73e10d8afcabb51c5d4bcbf8dec88814 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Tue, 6 Oct 2026 15:15:05 -0300
+Subject: [PATCH] agent_tasks_panel: delete archived task records
+
+The Agent Tasks panel of 0035 could archive and unarchive a task record
+but never remove one, so the Archived filter only grew: every task the
+agent ever ran stayed there until the user deleted Zeo's data. Story 025.
+
+An archived row now carries Delete (a trash icon, "Delete This Record")
+beside Unarchive, and with the Archived filter on the filter bar offers
+"Delete All Archived" while there is something archived to delete. Both
+ask first -- "Delete N task records? The threads are not affected." --
+with Delete and Cancel, the way the card's Stop does; Cancel does
+nothing. Delete All deletes the batch the prompt counted, so a task
+archived while the prompt is open is not deleted unasked.
+
+Only an archived record can be deleted. A running task is never archived
+(0035 R3.4), and the statement itself is guarded: DELETE ... WHERE
+session_id = ? AND task_id = ? AND archived = 1, one savepoint per batch,
+so a key that is not archived is left in place and a failure part-way
+keeps every row of the batch. The thread is never touched: deleting
+removes the history row only -- not the thread, its metadata, or its
+transcript.
+
+Memory changes first and keeps the deletion when the write fails, which
+is logged once with every session and task id -- the same contract as
+archiving. A deleted key is also remembered for the rest of the session,
+because the feed keeps repeating a finished task while its thread is
+open, and without it the record would be written again on the next
+snapshot. The remembering is session-only by design: a column or table
+for it would be a migration, and this patch adds none. A thread reopened
+after a restart whose agent still lists the task can therefore record it
+again, as a new, unarchived row.
+
+No migration, no setting, no new dependency. Rides claude-agent-acp-plus
+BY DEPENDENCY after 0041, like 0035 itself: the history is fed only by
+0037's card.
+---
+
+diff --git a/crates/agent_tasks_panel/src/history_db.rs b/crates/agent_tasks_panel/src/history_db.rs
+index 61a3643..7588afc 100644
+--- a/crates/agent_tasks_panel/src/history_db.rs
++++ b/crates/agent_tasks_panel/src/history_db.rs
+@@ -92,8 +92,8 @@ pub struct HistoryEntry {
+     pub label: Option<SharedString>,
+ }
+ 
+-// There is deliberately no delete statement: every record is kept until the user deletes Zeo's
+-// data (R3.5).
++// The only delete is the user's, of records they archived first (story 025): every other record
++// is kept until the user deletes Zeo's data (R3.5).
+ impl AgentTaskHistoryDb {
+     /// Records a task the first time it is seen. A repeat of the same `(session_id, task_id)` is
+     /// ignored, so a later snapshot never rewrites the record nor reopens an ended task. A task
+@@ -242,6 +242,30 @@ impl AgentTaskHistoryDb {
+         .await
+     }
+ 
++    /// Deletes a batch of archived tasks in one transaction: when any row fails, every row of
++    /// the batch is kept. A key that is not archived is left in place, so a running or listed
++    /// task is never deleted. Only the history row goes; the thread is never touched.
++    pub async fn delete(&self, keys: &[(acp_v2::SessionId, AgentTaskId)]) -> Result<()> {
++        let keys: Vec<(String, String)> = keys
++            .iter()
++            .map(|(session_id, task_id)| (session_id.to_string(), task_id.to_string()))
++            .collect();
++        self.write(move |connection| {
++            connection.with_savepoint("agent_task_history_delete", || {
++                let mut delete = connection.exec_bound(sql!(
++                    DELETE FROM agent_task_history
++                    WHERE session_id = ?1 AND task_id = ?2 AND archived = 1
++                ))?;
++                for (session_id, task_id) in &keys {
++                    delete((session_id.as_str(), task_id.as_str()))
++                        .with_context(|| format!("deleting {session_id}/{task_id}"))?;
++                }
++                Ok(())
++            })
++        })
++        .await
++    }
++
+     /// Sets or clears (`None`) the user's label of one task. Only that `(session_id, task_id)`
+     /// row is written; its description, status and archive flag are left as they are.
+     pub async fn set_label(&self, key: &TaskKey, label: Option<&str>) -> Result<()> {
+diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
+index c8d53e8..dcb229b 100644
+--- a/crates/agent_tasks_panel/src/panel.rs
++++ b/crates/agent_tasks_panel/src/panel.rs
+@@ -24,8 +24,9 @@ use db::kvp::KeyValueStore;
+ use editor::{Editor, EditorEvent, actions::SelectAll};
+ use gpui::{
+     Action, AnyElement, AnyView, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter,
+-    FocusHandle, Focusable, IntoElement, Pixels, Render, SharedString, Subscription, Task,
+-    TextStyleRefinement, UniformListScrollHandle, WeakEntity, Window, actions, px, uniform_list,
++    FocusHandle, Focusable, IntoElement, Pixels, PromptLevel, Render, SharedString, Subscription,
++    Task, TextStyleRefinement, UniformListScrollHandle, WeakEntity, Window, actions, px,
++    uniform_list,
+ };
+ use settings::SettingsStore;
+ use ui::{Banner, ButtonLike, ButtonStyle, Severity, TintColor, Tooltip, prelude::*};
+@@ -221,6 +222,8 @@ struct RowFocus {
+     stop: FocusHandle,
+     /// Archive, or Unarchive on an archived row: the two share the row's last slot.
+     archive: FocusHandle,
++    /// Delete, on an archived row only (story 025).
++    delete: FocusHandle,
+ }
+ 
+ impl RowFocus {
+@@ -230,6 +233,7 @@ impl RowFocus {
+             rename: control_focus_handle(cx),
+             stop: control_focus_handle(cx),
+             archive: control_focus_handle(cx),
++            delete: control_focus_handle(cx),
+         }
+     }
+ }
+@@ -286,6 +290,8 @@ pub struct AgentTasksPanel {
+     /// One per filter toggle, in `TaskFilter::ALL` order, kept across renders so keyboard
+     /// focus survives a repaint (Q14).
+     filter_focus_handles: [FocusHandle; 4],
++    /// Delete All Archived, beside the filters while Archived is on (story 025).
++    delete_all_focus_handle: FocusHandle,
+     /// Per listed row and per listed group; entries of rows and groups no longer listed are
+     /// dropped on render.
+     row_focus_handles: HashMap<TaskKey, RowFocus>,
+@@ -370,6 +376,7 @@ impl AgentTasksPanel {
+             store,
+             filters: TaskFilters::default(),
+             filter_focus_handles: std::array::from_fn(|_| control_focus_handle(cx)),
++            delete_all_focus_handle: control_focus_handle(cx),
+             row_focus_handles: HashMap::default(),
+             group_focus_handles: HashMap::default(),
+             notices: HashMap::default(),
+@@ -577,6 +584,58 @@ impl AgentTasksPanel {
+             .update(cx, |store, cx| store.archive_group(session_id, cx));
+     }
+ 
++    /// Deletes `key`'s record once the user confirms (story 025). Only an archived record is
++    /// offered for deletion, so a running or listed task never is; the thread is not touched.
++    pub fn request_delete(&mut self, key: &TaskKey, window: &mut Window, cx: &mut Context<Self>) {
++        let (session_id, task_id) = key;
++        let archived = self.store.read(cx).records().iter().any(|entry| {
++            entry.archived
++                && entry.record.session_id == *session_id
++                && entry.record.task_id == *task_id
++        });
++        if !archived {
++            log::debug!(
++                "agent tasks panel: not deleting task {task_id} of session {session_id}: \
++                 it is not archived"
++            );
++            return;
++        }
++        self.confirm_delete(vec![key.clone()], window, cx);
++    }
++
++    /// Deletes every archived record once the user confirms (story 025). The batch is the one
++    /// the prompt counted, so a task archived while it is open is not deleted unasked.
++    pub fn request_delete_all_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let keys = archived_keys(self.store.read(cx).records());
++        if keys.is_empty() {
++            return;
++        }
++        self.confirm_delete(keys, window, cx);
++    }
++
++    fn confirm_delete(&mut self, keys: Vec<TaskKey>, window: &mut Window, cx: &mut Context<Self>) {
++        let message = match keys.len() {
++            1 => "Delete 1 task record?".to_string(),
++            count => format!("Delete {count} task records?"),
++        };
++        let answer = window.prompt(
++            PromptLevel::Warning,
++            &message,
++            Some("The threads are not affected."),
++            &["Delete", "Cancel"],
++            cx,
++        );
++        let store = self.store.clone();
++        cx.spawn(async move |_, cx| {
++            // Index 0 is "Delete"; `Err` is a prompt whose sender was dropped.
++            if !matches!(answer.await, Ok(0)) {
++                return;
++            }
++            store.update(cx, |store, cx| store.delete_archived(&keys, cx));
++        })
++        .detach();
++    }
++
+     /// Swaps `key`'s row label for a one-line editor holding the label the row shows — whole,
+     /// on one line — fully selected and focused (R3.1). A rename open on another row is
+     /// confirmed first, as losing focus would confirm it (R3.6).
+@@ -769,6 +828,24 @@ impl AgentTasksPanel {
+     }
+ 
+     fn render_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
++        let has_archived = self
++            .store
++            .read(cx)
++            .records()
++            .iter()
++            .any(|entry| entry.archived);
++        let delete_all =
++            (self.filters.archived && has_archived).then(|| {
++                Button::new("agent-tasks-delete-all-archived", "Delete All Archived")
++                    .label_size(LabelSize::Small)
++                    .style(ButtonStyle::Subtle)
++                    .aria_label(control_aria_label("Delete All Archived".to_string()))
++                    .tooltip(Tooltip::text("Delete Every Archived Task Record"))
++                    .track_focus(&self.delete_all_focus_handle)
++                    .on_click(cx.listener(|panel, _, window, cx| {
++                        panel.request_delete_all_archived(window, cx)
++                    }))
++            });
+         h_flex()
+             .p_1()
+             .gap_1()
+@@ -796,6 +873,7 @@ impl AgentTasksPanel {
+                         }))
+                     }),
+             )
++            .children(delete_all)
+     }
+ 
+     fn render_entries(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+@@ -924,7 +1002,8 @@ fn render_header(
+ 
+ /// `row`'s line: its label (the user's, else the description) and its progress or outcome —
+ /// together the control that opens its thread (R2.5) — then Stop while it runs (R2.6), or
+-/// Archive once it has ended (R3.1, R3.4), or Unarchive when archived (R3.3). Watched or
++/// Archive once it has ended (R3.1, R3.4), or Unarchive and Delete when archived (R3.3; story
++/// 025). Watched or
+ /// expanded detail stays on the card, so every row keeps the one-line height `uniform_list`
+ /// relies on.
+ fn render_row(
+@@ -1029,6 +1108,19 @@ fn render_row(
+             move |panel, _, window, cx| panel.request_stop(&key, window, cx)
+         }))
+     });
++    let delete_button = row.entry.archived.then(|| {
++        action_button(
++            control_id("delete"),
++            IconName::Trash,
++            format!("Delete: {shown_label}"),
++            "Delete This Record",
++            &focus.delete,
++        )
++        .on_click(cx.listener({
++            let key = key.clone();
++            move |panel, _, window, cx| panel.request_delete(&key, window, cx)
++        }))
++    });
+     let archive_button = if row.entry.archived {
+         Some(
+             action_button(
+@@ -1070,6 +1162,7 @@ fn render_row(
+         .child(rename_button)
+         .children(stop_button)
+         .children(archive_button)
++        .children(delete_button)
+         .into_any_element()
+ }
+ 
+@@ -1274,6 +1367,20 @@ fn panel_row(
+     }
+ }
+ 
++/// The keys of every archived record, in the store's order.
++fn archived_keys(records: &[HistoryEntry]) -> Vec<TaskKey> {
++    records
++        .iter()
++        .filter(|entry| entry.archived)
++        .map(|entry| {
++            (
++                entry.record.session_id.clone(),
++                entry.record.task_id.clone(),
++            )
++        })
++        .collect()
++}
++
+ /// Newest task first; session and task id break ties, so equal start times list the same
+ /// way on every render.
+ fn newest_first(a: &HistoryEntry, b: &HistoryEntry) -> std::cmp::Ordering {
+@@ -1512,3 +1619,7 @@ mod open_at_task;
+ #[cfg(test)]
+ #[path = "panel/tool_call_id_contract_tests.rs"]
+ mod tool_call_id_contract;
++
++#[cfg(test)]
++#[path = "panel/delete_action_tests.rs"]
++mod delete_action;
+diff --git a/crates/agent_tasks_panel/src/panel/delete_action_tests.rs b/crates/agent_tasks_panel/src/panel/delete_action_tests.rs
+new file mode 100644
+index 0000000..d8a35a9
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/delete_action_tests.rs
+@@ -0,0 +1,246 @@
++// Story 025, task 1.3 — Delete on an archived row and Delete All Archived, both confirmed.
++// Module path: `panel::delete_action`. Every test name starts with `delete_action_`, the
++// story's validation filter.
++
++use acp_thread::AgentTaskStatus;
++use agent_ui::thread_metadata_store::ThreadMetadataStore;
++use gpui::{TestAppContext, VisualTestContext};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter};
++
++fn only(panels: &mut Panels, on: &[TaskFilter]) {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        for filter in TaskFilter::ALL {
++            panel.set_filter(filter, on.contains(&filter), cx);
++        }
++    });
++    panels.cx.run_until_parked();
++}
++
++async fn seed(
++    db: &AgentTaskHistoryDb,
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++    archived: bool,
++) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, status, at))
++        .await
++        .unwrap();
++    if archived {
++        db.set_archived(&[key(session, task)], true).await.unwrap();
++    }
++}
++
++fn request_delete(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.request_delete(&target, window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++fn request_delete_all(panels: &mut Panels) {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.request_delete_all_archived(window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++fn answer(panels: &mut Panels, button: &str) {
++    panels.cx.simulate_prompt_answer(button);
++    panels.cx.run_until_parked();
++}
++
++/// The screen-reader labels of the panel's last paint (GPUI's test windows build no
++/// accessibility tree, so the panel records them).
++fn painted_labels(panels: &mut Panels) -> Vec<String> {
++    let workspace = panels.workspace.clone();
++    workspace.update_in(&mut panels.cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(&mut panels.cx);
++    super::RENDERED_ARIA_LABELS
++        .with_borrow(|labels| labels.iter().map(ToString::to_string).collect())
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++// Hostile: Cancel keeps the record; the same task id in another session survives the confirm.
++#[gpui::test]
++async fn delete_action_on_an_archived_row_asks_first_and_cancel_keeps_it(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "t1", AgentTaskStatus::Completed, 1_000, true).await;
++    seed(&db, "s2", "t1", AgentTaskStatus::Completed, 1_100, true).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Archived]);
++
++    request_delete(&mut panels, "s1", "t1");
++    assert!(
++        panels.cx.has_pending_prompt(),
++        "Delete asks before deleting"
++    );
++    let (message, detail) = panels.cx.pending_prompt().unwrap();
++    assert_eq!(message, "Delete 1 task record?");
++    assert_eq!(detail, "The threads are not affected.");
++    answer(&mut panels, "Cancel");
++    assert!(
++        find_row(&mut panels, "s1", "t1").is_some(),
++        "Cancel deletes nothing"
++    );
++    assert_eq!(load(&db).await.len(), 2);
++
++    request_delete(&mut panels, "s1", "t1");
++    answer(&mut panels, "Delete");
++    assert!(
++        find_row(&mut panels, "s1", "t1").is_none(),
++        "confirm deletes it"
++    );
++    assert!(
++        find_row(&mut panels, "s2", "t1").is_some(),
++        "the same task id in another session stays"
++    );
++    let stored: Vec<_> = load(&db).await.iter().map(key_of).collect();
++    assert_eq!(stored, vec![("s2".to_string(), "t1".to_string())]);
++}
++
++// Hostile: Delete is never offered, nor acted on, for a task that is not archived.
++#[gpui::test]
++async fn delete_action_button_renders_only_on_archived_rows(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "kept", AgentTaskStatus::Completed, 1_000, false).await;
++    seed(&db, "s1", "old", AgentTaskStatus::Completed, 1_100, true).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Archived]);
++
++    let labels = painted_labels(&mut panels);
++    assert!(
++        labels.iter().any(|label| label == "Delete: Task old"),
++        "the archived row offers Delete: {labels:?}"
++    );
++    assert!(
++        !labels.iter().any(|label| label == "Delete: Task kept"),
++        "a row that is not archived offers no Delete: {labels:?}"
++    );
++
++    request_delete(&mut panels, "s1", "kept");
++    assert!(
++        !panels.cx.has_pending_prompt(),
++        "nothing to confirm for a task that is not archived"
++    );
++    assert!(find_row(&mut panels, "s1", "kept").is_some());
++}
++
++// Hostile: Delete All Archived spares every listed task of the other filters, and is offered
++// only while the Archived filter is on.
++#[gpui::test]
++async fn delete_action_all_archived_asks_with_the_count_and_empties_the_archived_filter(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(&db, "s1", "a1", AgentTaskStatus::Completed, 1_000, true).await;
++    seed(&db, "s1", "a2", AgentTaskStatus::Failed, 1_100, true).await;
++    seed(&db, "s2", "a3", AgentTaskStatus::Stopped, 1_200, true).await;
++    seed(&db, "s2", "done", AgentTaskStatus::Completed, 1_300, false).await;
++    seed(&db, "s3", "bad", AgentTaskStatus::Failed, 1_400, false).await;
++    let mut panels = open_panels(cx).await;
++
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Failed]);
++    let labels = painted_labels(&mut panels);
++    assert!(
++        !labels.iter().any(|label| label == "Delete All Archived"),
++        "not offered while Archived is off: {labels:?}"
++    );
++
++    only(&mut panels, &[TaskFilter::Archived]);
++    let labels = painted_labels(&mut panels);
++    assert!(
++        labels.iter().any(|label| label == "Delete All Archived"),
++        "offered under Archived: {labels:?}"
++    );
++
++    request_delete_all(&mut panels);
++    let (message, detail) = panels.cx.pending_prompt().unwrap();
++    assert_eq!(message, "Delete 3 task records?");
++    assert_eq!(detail, "The threads are not affected.");
++    answer(&mut panels, "Cancel");
++    assert_eq!(visible_keys(&mut panels).len(), 3, "Cancel deletes nothing");
++
++    request_delete_all(&mut panels);
++    answer(&mut panels, "Delete");
++    assert!(
++        visible_keys(&mut panels).is_empty(),
++        "the Archived filter is empty"
++    );
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Failed]);
++    let mut kept = visible_keys(&mut panels);
++    kept.sort();
++    assert_eq!(
++        kept,
++        vec![
++            ("s2".to_string(), "done".to_string()),
++            ("s3".to_string(), "bad".to_string()),
++        ],
++        "the other filters keep their rows"
++    );
++    assert_eq!(load(&db).await.len(), 2);
++
++    request_delete_all(&mut panels);
++    assert!(
++        !panels.cx.has_pending_prompt(),
++        "nothing archived is left to confirm"
++    );
++}
++
++// The thread a deleted record belonged to is untouched: its metadata row stays.
++#[gpui::test]
++async fn delete_action_leaves_the_thread_metadata_untouched(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Kept Thread");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "completed", 1_000, None)],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx);
++    let target = key(&session.to_string(), "t");
++    panels
++        .tasks_panel
++        .update(&mut panels.cx, |panel, cx| panel.archive(&target, cx));
++    panels.cx.run_until_parked();
++    only(&mut panels, &[TaskFilter::Archived]);
++
++    request_delete(&mut panels, &session.to_string(), "t");
++    answer(&mut panels, "Delete");
++
++    assert!(find_row(&mut panels, &session.to_string(), "t").is_none());
++    let metadata = panels.cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry_by_session(&session)
++            .cloned()
++    });
++    assert!(metadata.is_some(), "the thread's metadata row is untouched");
++
++    // The thread keeps reporting the task; the deleted record does not come back.
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "completed", 1_000, None)],
++        &mut panels.cx,
++    );
++    only(&mut panels, &TaskFilter::ALL);
++    assert!(find_row(&mut panels, &session.to_string(), "t").is_none());
++}
+diff --git a/crates/agent_tasks_panel/src/store.rs b/crates/agent_tasks_panel/src/store.rs
+index f6c9bf4..c782d72 100644
+--- a/crates/agent_tasks_panel/src/store.rs
++++ b/crates/agent_tasks_panel/src/store.rs
+@@ -19,7 +19,7 @@ use agent_ui::{
+     TaskActivity, TaskLabels, TaskRecord, TasksCard, ThreadTitleChanged, normalize_user_label,
+ };
+ use anyhow::Result;
+-use collections::HashMap;
++use collections::{HashMap, HashSet};
+ use futures::{StreamExt as _, channel::mpsc};
+ use gpui::{
+     App, AppContext as _, BorrowAppContext as _, Context, Entity, EntityId, Global, SharedString,
+@@ -44,6 +44,9 @@ pub struct TaskHistoryStore {
+     /// Every record, newest first (the order `load_all` returns).
+     records: Vec<HistoryEntry>,
+     availability: Availability,
++    /// The records deleted this session. The feed repeats a finished task in later snapshots
++    /// while its thread is open, and without this a deleted record would be recorded again.
++    deleted: HashSet<TaskKey>,
+     /// `Some` until the startup sweep and load finish: what was heard meanwhile, in order.
+     pending: Option<Vec<Heard>>,
+     /// Every registered card — one per workspace's agent panel, across every window — so
+@@ -82,6 +85,10 @@ enum HistoryWrite {
+         keys: Vec<TaskKey>,
+         archived: bool,
+     },
++    /// Archived records the user deleted (story 025).
++    Deleted {
++        keys: Vec<TaskKey>,
++    },
+     Titled(ThreadTitleChanged),
+     Labeled {
+         key: TaskKey,
+@@ -100,6 +107,7 @@ impl HistoryWrite {
+             Self::Started(record) => db.insert_started(record).await,
+             Self::Ended(record) => db.update_ended(record).await,
+             Self::Archived { keys, archived } => db.set_archived(keys, *archived).await,
++            Self::Deleted { keys } => db.delete(keys).await,
+             Self::Titled(change) => {
+                 db.update_thread_title(&change.session_id, &change.title)
+                     .await
+@@ -138,13 +146,9 @@ impl HistoryWrite {
+                 } else {
+                     "unarchiving"
+                 };
+-                let tasks = keys
+-                    .iter()
+-                    .map(|(session_id, task_id)| format!("task {task_id} in session {session_id}"))
+-                    .collect::<Vec<_>>()
+-                    .join(", ");
+-                format!("the {action} of {tasks}")
++                format!("the {action} of {}", describe_keys(keys))
+             }
++            Self::Deleted { keys } => format!("the deletion of {}", describe_keys(keys)),
+             Self::Titled(change) => format!("the new title of session {}", change.session_id),
+             Self::Labeled {
+                 key: (session_id, task_id),
+@@ -160,6 +164,14 @@ impl HistoryWrite {
+     }
+ }
+ 
++/// Every key of a batch, naming its session and task ids.
++fn describe_keys(keys: &[TaskKey]) -> String {
++    keys.iter()
++        .map(|(session_id, task_id)| format!("task {task_id} in session {session_id}"))
++        .collect::<Vec<_>>()
++        .join(", ")
++}
++
+ impl TaskHistoryStore {
+     /// Creates the global store over the application database (the crate's `init`).
+     pub fn init(cx: &mut App) {
+@@ -224,6 +236,7 @@ impl TaskHistoryStore {
+         Self {
+             records: Vec::new(),
+             availability: Availability::Available,
++            deleted: HashSet::default(),
+             pending: Some(Vec::new()),
+             cards: HashMap::default(),
+             writes,
+@@ -345,6 +358,55 @@ impl TaskHistoryStore {
+         cx.notify();
+     }
+ 
++    /// Deletes the archived records among `keys`; any other key is ignored, so a running or
++    /// listed task is never deleted. Memory changes before the write, and keeps the deletion
++    /// even when the write fails (R1.6). Only the history row goes: the thread is never touched.
++    pub fn delete_archived(&mut self, keys: &[TaskKey], cx: &mut Context<Self>) {
++        let keys: HashSet<&TaskKey> = keys.iter().collect();
++        let mut deleted = Vec::new();
++        self.records.retain(|entry| {
++            let key = (
++                entry.record.session_id.clone(),
++                entry.record.task_id.clone(),
++            );
++            if entry.archived && keys.contains(&key) {
++                deleted.push(key);
++                false
++            } else {
++                true
++            }
++        });
++        if deleted.is_empty() {
++            return;
++        }
++        if cx.has_global::<TaskLabels>() {
++            cx.update_global::<TaskLabels, _>(|labels, _| {
++                for key in &deleted {
++                    labels.set(key.clone(), None);
++                }
++            });
++        }
++        self.deleted.extend(deleted.iter().cloned());
++        self.queue_write(HistoryWrite::Deleted { keys: deleted });
++        cx.notify();
++    }
++
++    /// Deletes every archived record (story 025).
++    pub fn delete_all_archived(&mut self, cx: &mut Context<Self>) {
++        let keys: Vec<TaskKey> = self
++            .records
++            .iter()
++            .filter(|entry| entry.archived)
++            .map(|entry| {
++                (
++                    entry.record.session_id.clone(),
++                    entry.record.task_id.clone(),
++                )
++            })
++            .collect();
++        self.delete_archived(&keys, cx);
++    }
++
+     fn finish_loading(
+         &mut self,
+         loaded: Result<Vec<HistoryEntry>, SharedString>,
+@@ -404,6 +466,9 @@ impl TaskHistoryStore {
+     /// snapshot (R1.3), or a re-opened session replaying `Started`, never rewrites a record nor
+     /// brings an ended or interrupted task back to running.
+     fn record_started(&mut self, mut record: TaskRecord) {
++        if self.is_deleted(&record) {
++            return;
++        }
+         if let Some(index) = self.position(&record.session_id, &record.task_id) {
+             self.fill_tool_call_id(index, &record);
+             return;
+@@ -426,6 +491,9 @@ impl TaskHistoryStore {
+     /// Writes a task's outcome (R1.2). Repeated endings are accepted — a resumed task ends
+     /// again — and each overwrites the outcome, as `update_ended` does in the database.
+     fn record_ended(&mut self, record: TaskRecord) {
++        if self.is_deleted(&record) {
++            return;
++        }
+         let Some(index) = self.position(&record.session_id, &record.task_id) else {
+             // `Started` always precedes `Ended`; should one ever be missing, the ending is
+             // still recorded, in one row carrying its outcome.
+@@ -492,6 +560,12 @@ impl TaskHistoryStore {
+         cx.notify();
+     }
+ 
++    /// Whether the user deleted `record`'s task this session.
++    fn is_deleted(&self, record: &TaskRecord) -> bool {
++        self.deleted
++            .contains(&(record.session_id.clone(), record.task_id.clone()))
++    }
++
+     fn position(&self, session_id: &acp_v2::SessionId, task_id: &AgentTaskId) -> Option<usize> {
+         self.records.iter().position(|entry| {
+             entry.record.session_id == *session_id && entry.record.task_id == *task_id
+@@ -562,3 +636,7 @@ mod rename;
+ #[cfg(test)]
+ #[path = "store/tool_call_id_tests.rs"]
+ mod tool_call_id;
++
++#[cfg(test)]
++#[path = "store/delete_tests.rs"]
++mod delete;
+diff --git a/crates/agent_tasks_panel/src/store/delete_tests.rs b/crates/agent_tasks_panel/src/store/delete_tests.rs
+new file mode 100644
+index 0000000..4fdafd3
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/store/delete_tests.rs
+@@ -0,0 +1,203 @@
++// Story 025, task 1.2 — deleting archived records (R1, Q4, Q11). Module path: `store::delete`.
++// Every test name starts with `delete_`, the story's validation filter. Hostile fixtures come
++// before benign ones.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, HistoryEntry, TaskHistoryStore};
++
++/// A store over `name`'s database holding `finished` tasks, the ones in `archived` archived.
++async fn seeded_store(
++    name: &'static str,
++    finished: &[(&str, &str)],
++    archived: &[(&str, &str)],
++    cx: &mut TestAppContext,
++) -> (AgentTaskHistoryDb, Entity<TaskHistoryStore>, CardRig) {
++    let mut rig = card_rig(cx).await;
++    let db = AgentTaskHistoryDb::open_test_db(name).await;
++    for (index, (session, task)) in finished.iter().enumerate() {
++        let at = 1_000 + index as i64 * 100;
++        db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++            .await
++            .unwrap();
++        db.update_ended(&record(session, task, AgentTaskStatus::Completed, at))
++            .await
++            .unwrap();
++    }
++    let keys: Vec<_> = archived
++        .iter()
++        .map(|(session, task)| key(session, task))
++        .collect();
++    db.set_archived(&keys, true).await.unwrap();
++    let store = rig.cx.new(|cx| TaskHistoryStore::new(db.clone(), cx));
++    rig.cx.run_until_parked();
++    let card = rig.card.clone();
++    store.update(&mut rig.cx, |store, cx| store.register_card(&card, cx));
++    rig.cx.run_until_parked();
++    (db, store, rig)
++}
++
++fn entries(store: &Entity<TaskHistoryStore>, cx: &VisualTestContext) -> Vec<HistoryEntry> {
++    store.read_with(cx, |store, _| store.records().to_vec())
++}
++
++fn keys_of(view: &[HistoryEntry]) -> Vec<(String, String)> {
++    let mut keys: Vec<_> = view.iter().map(key_of).collect();
++    keys.sort();
++    keys
++}
++
++fn pairs(keys: &[(&str, &str)]) -> Vec<(String, String)> {
++    let mut pairs: Vec<_> = keys
++        .iter()
++        .map(|(session, task)| (session.to_string(), task.to_string()))
++        .collect();
++    pairs.sort();
++    pairs
++}
++
++// Hostile: a batch naming an unarchived task, a running one and an unknown key deletes only
++// the archived one — in memory and on disk.
++#[gpui::test]
++async fn delete_leaves_a_non_archived_key_in_the_batch_untouched(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store(
++        "delete_non_archived_key",
++        &[("s1", "gone"), ("s1", "kept"), ("s2", "gone")],
++        &[("s1", "gone")],
++        cx,
++    )
++    .await;
++    let card = rig.card.clone();
++    emit(
++        &card,
++        started(&record("s1", "run", AgentTaskStatus::Running, 9_000)),
++        &mut rig.cx,
++    );
++
++    store.update(&mut rig.cx, |store, cx| {
++        store.delete_archived(
++            &[
++                key("s1", "gone"),
++                key("s1", "kept"),
++                key("s1", "run"),
++                key("s2", "gone"),
++                key("s9", "unknown"),
++            ],
++            cx,
++        )
++    });
++    rig.cx.run_until_parked();
++
++    let expected = pairs(&[("s1", "kept"), ("s1", "run"), ("s2", "gone")]);
++    assert_eq!(keys_of(&entries(&store, &rig.cx)), expected, "memory");
++    assert_eq!(keys_of(&load(&db).await), expected, "database");
++}
++
++// Hostile: delete-all spares every unarchived record, a running one and a same-id task of
++// another session included.
++#[gpui::test]
++async fn delete_all_archived_removes_every_archived_row_and_only_those(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store(
++        "delete_all_archived",
++        &[("s1", "a"), ("s1", "b"), ("s2", "a"), ("s3", "c")],
++        &[("s1", "a"), ("s1", "b"), ("s3", "c")],
++        cx,
++    )
++    .await;
++    let card = rig.card.clone();
++    emit(
++        &card,
++        started(&record("s4", "run", AgentTaskStatus::Running, 9_000)),
++        &mut rig.cx,
++    );
++
++    store.update(&mut rig.cx, |store, cx| store.delete_all_archived(cx));
++    rig.cx.run_until_parked();
++
++    let expected = pairs(&[("s2", "a"), ("s4", "run")]);
++    assert_eq!(keys_of(&entries(&store, &rig.cx)), expected, "memory");
++    assert_eq!(keys_of(&load(&db).await), expected, "database");
++}
++
++// Q4: a delete whose write fails keeps the rows gone this session and logs both ids.
++#[gpui::test]
++async fn delete_write_failure_keeps_rows_gone_from_memory_and_logs_ids(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store(
++        "delete_write_failure",
++        &[("session-d1", "task-d1"), ("session-d1", "task-d2")],
++        &[("session-d1", "task-d1")],
++        cx,
++    )
++    .await;
++    drop_history_table(&db).await;
++    capture_logs();
++
++    store.update(&mut rig.cx, |store, cx| {
++        store.delete_archived(&[key("session-d1", "task-d1")], cx)
++    });
++    rig.cx.run_until_parked();
++
++    assert_eq!(
++        keys_of(&entries(&store, &rig.cx)),
++        pairs(&[("session-d1", "task-d2")])
++    );
++    let errors = error_lines();
++    assert!(
++        errors.iter().any(|line| line.contains("delet")
++            && line.contains("session-d1")
++            && line.contains("task-d1")),
++        "the failed delete is logged with both ids: {errors:?}"
++    );
++}
++
++// Hostile: the feed repeats a finished task in later snapshots (a replayed `Started`, then
++// `Ended`); a record deleted this session stays deleted.
++#[gpui::test]
++async fn delete_feed_snapshot_does_not_bring_a_deleted_task_back(cx: &mut TestAppContext) {
++    let (db, store, mut rig) =
++        seeded_store("delete_feed_snapshot", &[("s1", "t1")], &[("s1", "t1")], cx).await;
++
++    store.update(&mut rig.cx, |store, cx| {
++        store.delete_archived(&[key("s1", "t1")], cx)
++    });
++    rig.cx.run_until_parked();
++    let card = rig.card.clone();
++    let finished = record("s1", "t1", AgentTaskStatus::Completed, 1_000);
++    emit(&card, started(&finished), &mut rig.cx);
++    emit(&card, ended(&finished), &mut rig.cx);
++    rig.cx.run_until_parked();
++
++    assert!(entries(&store, &rig.cx).is_empty(), "memory");
++    assert!(load(&db).await.is_empty(), "database");
++}
++
++// R1: deleted records are gone from the database, so a store loaded from it after a restart
++// does not list them; the other records come back as they were.
++#[gpui::test]
++async fn delete_removes_archived_rows_from_memory_and_after_a_reload(cx: &mut TestAppContext) {
++    let (db, store, mut rig) = seeded_store(
++        "delete_reload",
++        &[("s1", "t1"), ("s1", "t2"), ("s2", "t1")],
++        &[("s1", "t1"), ("s2", "t1")],
++        cx,
++    )
++    .await;
++
++    store.update(&mut rig.cx, |store, cx| {
++        store.delete_archived(&[key("s1", "t1"), key("s2", "t1")], cx)
++    });
++    rig.cx.run_until_parked();
++    assert_eq!(
++        keys_of(&entries(&store, &rig.cx)),
++        pairs(&[("s1", "t2")]),
++        "memory"
++    );
++
++    let reloaded = rig.cx.new(|cx| TaskHistoryStore::new(db.clone(), cx));
++    rig.cx.run_until_parked();
++    let view = entries(&reloaded, &rig.cx);
++    assert_eq!(keys_of(&view), pairs(&[("s1", "t2")]), "after a reload");
++    assert!(!view[0].archived);
++}
