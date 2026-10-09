@@ -31,6 +31,32 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.2.1_p20261009] — 2026-10-09 (untagged)
+
+### Changed
+
+- Refreshed onto Zed `089abd691` (20 commits past `20aff3132`).
+  `agent-client-protocol` goes 3.1.0 -> 3.2.0; the schema stays at 1.10.2, and
+  `0017`'s header now names 3.2.0.
+- Upstream `1c9dd3e70` moved every session and tool call ID in shared agent state
+  -- `AgentConnection`, `AcpThread`, the thread metadata store -- from schema v1 to
+  v2. The series follows it: every `SessionId` and `ToolCallId` the patches keep in
+  that state is now `acp_v2`, in `0024`, `0034`-`0042`, `0044` and `0045`. That
+  includes `AgentConnection::stop_task`/`background_task` and
+  `AgentTask::tool_call_id`. Only values put on the wire -- a
+  `SetSessionModeRequest`, a test agent's `NewSessionResponse` or
+  `SessionNotification`, `0029`'s sidebar test updates -- stay v1, converted
+  explicitly as upstream does. Both versions serialize to the same JSON string, so
+  the `acp_thread_config` records `0036` already wrote still read back.
+
+### Fixed
+
+- `0028` applies again: upstream's sidebar background became
+  `color.background.blend(color.panel_background)`; only that context line moved.
+- `0034` and `0036` apply again: upstream retyped `AcpConnection`'s session maps
+  and `register_session`, and made `new_session` wait for registration before
+  answering. `0036` now starts the config recorder inside that registration.
+
 ## [0.2.1_p20261008] — 2026-10-08 (tagged)
 
 ### Added
