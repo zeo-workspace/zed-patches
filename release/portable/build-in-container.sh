@@ -23,14 +23,28 @@ rm -rf "${src}"
 mkdir -p "${src}"
 tar -xzf /in/zed.tar.gz -C "${src}" --strip-components=1
 
+# release_patches -- the series as the release ships it: every group the
+# package's default USE set enables, which is every group except `test` (tests
+# only, applied by the ebuild under USE=test). Same order as the series.
+release_patches() {
+	local line group=""
+	while IFS= read -r line; do
+		if [[ "${line}" =~ ^#[[:space:]]*@feature:[[:space:]]*([^[:space:]]+) ]]; then
+			group="${BASH_REMATCH[1]}"
+			continue
+		fi
+		[[ -z "${line}" || "${line}" == \#* || "${group}" == test ]] && continue
+		printf '%s\n' "${line}"
+	done < /in/patches/series
+}
+
 log "applying the series"
 cd "${src}"
 n=0
 while IFS= read -r patch; do
-	[[ -z "${patch}" || "${patch}" == \#* ]] && continue
 	patch -p1 --no-backup-if-mismatch --quiet < "/in/patches/${patch}"
 	n=$((n + 1))
-done < /in/patches/series
+done < <(release_patches)
 log "${n} patches applied"
 
 # src_prepare: icons, release channel, desktop entry -- byte for byte the edits
@@ -138,9 +152,8 @@ done
 		"${max_glibc}"
 	printf 'patches, in apply order (sha256):\n'
 	while IFS= read -r patch; do
-		[[ -z "${patch}" || "${patch}" == \#* ]] && continue
 		printf '  %s  %s\n' "$(sha256sum "/in/patches/${patch}" | cut -d' ' -f1)" "${patch}"
-	done < /in/patches/series
+	done < <(release_patches)
 	printf '\nNEEDED (usr/libexec/zeo-editor):\n'
 	objdump -p "${stage}/usr/libexec/zeo-editor" | awk '/NEEDED/ { print "  " $2 }'
 	printf '\nThe Corresponding Source is the zed source above plus these patches,\n'
