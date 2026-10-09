@@ -31,6 +31,41 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.2.3_p20261009] — 2026-10-09 (untagged)
+
+### Changed
+
+- `0043`: a swallowed Enter is explained in the composer while the question is
+  pending; the blocking rule is unchanged. User-visible, so Zeo moves to 0.2.3.
+- `0025`: "zed is already running" reads the channel's display name, and
+  onboarding's "unlock all Zed's features" says Zeo.
+
+### Added
+
+- The medium- and low-priority tests of the 2026-10-09 audit, in the patch each
+  guards: `0002` (folderless withdrawal, frame loop, JSON-RPC validation, the
+  terminal environment as one helper), `0008`, `0010`, `0011`, `0013`, `0015`,
+  `0018` (the drop handler itself), `0022`, `0023`, `0025`, `0026`, `0029`, `0030`
+  (the sidebar status as a truth table), `0031`, `0036` (restore through
+  session/resume), `0037`/`0024`, `0038` (type and id capped), `0040`, `0042`
+  (the delete race, in memory and on disk), `0043` (every default keymap), `0047`.
+  Each was run with the line it guards reverted; two that still passed were
+  strengthened until they failed.
+- `scripts/test.sh <PF> [--from-tree] [--doc] [--ignored] [--e2e]`: the suite
+  the release ships, versioned -- the series applied (or the prepared tree as it
+  stands), the ebuild's offline rewrite, nextest run with rustup's toolchain for
+  wasm32-wasip2, doctests, the ignored tests minus e2e, and the e2e suites with a
+  key from the session keyring.
+- `check-rebrand.sh` also tracks lowercase "zed" in prose (`rebrand/zed-prose.txt`):
+  "zed is already running" was the miss that showed the gap.
+
+### Changed (tooling)
+
+- `0039`: the duplicate dock-fallback test is removed (it lives in `0039` because
+  that patch is the last to touch the file).
+- `0016`, `0017`, `0027`, `0032`, `0034`, `0035`, `0041`, `0044`, `0045` move in
+  context only.
+
 ## [0.2.2_p20261009] — 2026-10-09 (untagged)
 
 ### Fixed

@@ -17,6 +17,10 @@
 #   zed-literals.txt         every string literal containing the word "Zed". A
 #                            new one is reported for triage against
 #                            zeo/docs/STRINGS.md: rebrand it, or accept it here.
+#   zed-prose.txt            string literals using a lowercase "zed" in a phrase
+#                            ("zed is already running") -- the same triage. Paths,
+#                            identifiers and URLs (/, ::, .zed, zed-, zed_, zed.dev)
+#                            are not prose and are skipped: 1400+ of them.
 #
 # Entries are `path<TAB>literal`, with no line numbers, so code moving inside a
 # file is not drift. Tests, fixtures and evals are skipped: they are not shipped.
@@ -71,6 +75,18 @@ scan_literals() {
 		'"(?:[^"\\]|\\.)*\bZed\b(?:[^"\\]|\\.)*"' crates || true) |
 		awk -F: -v skip="${NOT_SHIPPED}" '$1 !~ skip {
 			path = $1; sub(/^[^:]*:[^:]*:/, "")
+			print path "\t" $0
+		}' | LC_ALL=C sort -u
+}
+
+# scan_prose <tree> -- `path<TAB>literal` for each literal using "zed" in a phrase.
+scan_prose() {
+	(cd "$1" && grep -rnoP --include='*.rs' \
+		'"(?:[^"\\]|\\.)*\bzed\b(?:[^"\\]|\\.)*"' crates || true) |
+		awk -F: -v skip="${NOT_SHIPPED}" '$1 !~ skip {
+			path = $1; sub(/^[^:]*:[^:]*:/, "")
+			if ($0 ~ /\/|::|[.]zed|zed-|zed_|zed[.]dev/) next
+			if ($0 !~ /[A-Za-z]+ zed\>|\<zed [A-Za-z]+/) next
 			print path "\t" $0
 		}' | LC_ALL=C sort -u
 }
@@ -145,22 +161,25 @@ main() {
 
 	scan_identity "${scratch}/tree" >"${scratch}/identity"
 	scan_literals "${scratch}/tree" >"${scratch}/literals"
+	scan_prose "${scratch}/tree" >"${scratch}/prose"
 
 	if ((update)); then
 		mkdir -p "${baselines}"
 		cp "${scratch}/identity" "${baselines}/identity-allowlist.txt"
 		cp "${scratch}/literals" "${baselines}/zed-literals.txt"
-		printf 'rewrote rebrand/identity-allowlist.txt (%d) and rebrand/zed-literals.txt (%d) from %s\n' \
-			"$(wc -l <"${scratch}/identity")" "$(wc -l <"${scratch}/literals")" "${ZP_PV}"
+		cp "${scratch}/prose" "${baselines}/zed-prose.txt"
+		printf 'rewrote rebrand/ identity-allowlist.txt (%d), zed-literals.txt (%d), zed-prose.txt (%d) from %s\n' \
+			"$(wc -l <"${scratch}/identity")" "$(wc -l <"${scratch}/literals")" "$(wc -l <"${scratch}/prose")" "${ZP_PV}"
 		return 0
 	fi
 
-	[[ -f "${baselines}/identity-allowlist.txt" && -f "${baselines}/zed-literals.txt" ]] ||
+	[[ -f "${baselines}/identity-allowlist.txt" && -f "${baselines}/zed-literals.txt" && -f "${baselines}/zed-prose.txt" ]] ||
 		die 2 "no baselines in ${baselines} -- create them with: check-rebrand.sh ${ZP_PV} --update"
 
 	local drift=0
 	report "Zed identity literals" "${baselines}/identity-allowlist.txt" "${scratch}/identity" hard || drift=1
 	report "\"Zed\" string literals" "${baselines}/zed-literals.txt" "${scratch}/literals" soft || drift=1
+	report "lowercase \"zed\" in prose" "${baselines}/zed-prose.txt" "${scratch}/prose" soft || drift=1
 	if ((drift)); then
 		printf '\nnew entries above: rebrand them in a patch, or accept them with --update after triage (zeo/docs/STRINGS.md)\n'
 		return 1
