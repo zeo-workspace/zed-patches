@@ -31,6 +31,42 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.2.2_p20261009] — 2026-10-09 (untagged)
+
+### Fixed
+
+- `0042`: one task-history row this build cannot read (a status a newer Zeo
+  wrote) no longer makes the whole history Unavailable — which also dropped
+  every write for the session. The row is skipped with a warning naming it.
+  User-visible, so Zeo moves to 0.2.2.
+- `0001`: the two upstream tests adapted in `-r1` proved nothing — a debug
+  build counts as staff, so the flag was on without the patch. They keep
+  upstream's "off" override again and assert ON, which only `0001` makes true.
+
+### Added
+
+- `0050` (USE=test): three upstream git tests, `#[ignore]`d and rotted, revived —
+  `test_git_status_postprocessing`, `test_ignored_dirs_events`,
+  `test_odd_events_for_ignored_dirs`. 20/20 under `--stress-count 20`.
+- `0051` (USE=test): the e2e suites made runnable on Linux, and run against
+  Claude Agent (Plus) as well as the native agent — 16/16 with a real key.
+  The ebuild applies `0050`/`0051` only under USE=test and requires the
+  default adapter flags with it, since both are generated on top of them.
+- Tests pinning what a bump could break silently, each verified to fail with
+  its guard reverted: `0002` lock-file permissions and wrong-token handshake;
+  `0021` Zeo's channel identity (`poll_for_updates() == false`) and Wasm API
+  range; `0017` the status-less compaction frame; `0027` the card predicate;
+  `0034` task-aware thread retention; `0037` batch entry sync; `0043` a URL
+  elicitation blocking Enter (pinned on purpose) and `0005`'s Shift-Enter.
+- `scripts/check-rebrand.sh`, run by `bump.sh` after verify: a new literal naming
+  Zed's identity fails, a new `"…Zed…"` string is reported for triage, against
+  the baselines in `rebrand/`.
+
+### Changed
+
+- `0010`, `0029`, `0031`, `0035`, `0036`, `0038`, `0040`, `0041`, `0044`,
+  `0045` move in context only.
+
 ## [0.2.1_p20261009-r1] — 2026-10-09 (untagged)
 
 ### Fixed

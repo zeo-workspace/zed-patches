@@ -57,6 +57,7 @@ isolation — the default run applies **every** patch, which is the strictest ca
 | `scripts/bump.sh [--from <PF>] [--to <PF>] [--apply]` | carry the series onto the version the overlay now packages: refresh, verify, sync, check — stopping at the ebuild |
 | `scripts/prepare-tree.sh <PF> [--force]` | extract the Zed distfile the ebuild's `SRC_URI` names (`zed-<commit>.tar.gz` for zeo) into `work/zed-<commit>/` and give it a baseline commit |
 | `scripts/verify.sh <PF> [--feature=<flag>]` | apply the whole series cumulatively, in a throwaway worktree cut from the prepared tree's baseline -- never in the tree itself |
+| `scripts/check-rebrand.sh <PF> [--update]` | compare the patched source against `rebrand/`: a new literal naming Zed's identity (`dev.zed.Zed`, `zed-editor`, `./zed`, `join("zed")`) fails, a new `"…Zed…"` string is reported for triage; `bump.sh` runs it after verify |
 | `scripts/sync-overlay.sh <PF> [--dry-run]` | copy the verified series into the overlay's `files/`, reporting orphans |
 | `scripts/refresh.sh --from <PF_old> --to <PF_new>` | carry the series onto a new packaged commit, regenerating each patch |
 | `scripts/check-sync.sh [<PF>]` | verify the series against the ebuild, the overlay and the packaged source, in one pass |

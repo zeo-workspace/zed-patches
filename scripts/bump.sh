@@ -7,6 +7,8 @@
 #
 #   1. refresh      regenerate every patch against the new packaged source
 #   2. verify       confirm the regenerated series applies, from a clean baseline
+#      rebrand      ...and brings in nothing new that still says "Zed"
+#                   (check-rebrand.sh; a new entry is a decision, so it stops here)
 #   3. sync         copy it into the overlay's files/
 #   4. check-sync   confirm all three relations agree afterwards
 #
@@ -135,6 +137,12 @@ fi
 
 step '2/4 verify — the whole series against a clean baseline'
 bash "${SCRIPTS}/verify.sh" "${to}" || exit 1
+
+# Applying and compiling cannot notice an upstream string or path that still names
+# Zed; this can. Before the sync, because a new identity literal may share state
+# with an installed Zed, and that must not reach the overlay untriaged.
+step '2/4 rebrand — anything new upstream that still says "Zed"?'
+bash "${SCRIPTS}/check-rebrand.sh" "${to}" || exit 1
 
 # --- 3. sync -----------------------------------------------------------------
 

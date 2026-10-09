@@ -1,0 +1,2444 @@
+From bc97ddf2acbbc2561deaf9fdb81328fdc354e2c9 Mon Sep 17 00:00:00 2001
+From: zed-patches <zed-patches@localhost>
+Date: Tue, 6 Oct 2026 18:20:44 -0300
+Subject: [PATCH] agent_ui: Up and Down in the composer recall the thread's
+ sent messages
+
+Resending or tweaking an earlier prompt meant scrolling up, copying it and
+pasting it back. A shell solves this with Up/Down history and the composer had
+those keys free, so it now has a per-thread history: Up recalls the operator's
+earlier messages in this thread, newest first; Down walks back and finally
+restores the draft that was in the composer when browsing started -- an empty
+one included (story 018).
+
+**What counts as a sent message.** The operator's own `UserMessage` entries of
+the current thread, re-read from `AcpThread::entries()` on every fresh Up, so a
+message sent since the last browse is the first one offered and a reopened
+thread's replayed messages and its live ones form one history. Not counted:
+`indented` entries (a subagent's prompt rendered inside the thread), agent
+output, and queued messages, which are not thread entries at all. It does NOT
+filter on `is_optimistic`: a live-sent message stays optimistic for good when
+the agent does not echo it, so that flag says nothing about whether it was
+sent. A message sent twice is two steps (no shell-style de-duplication), and an
+entry with no content to rebuild is skipped (logged at DEBUG with the session
+id and entry index).
+
+**The caret rules -- editing is never hijacked.** `up` and `down` are bound in
+`AcpThread > Editor` to `agent::RecallOlderMessage` / `RecallNewerMessage`.
+Up recalls only with a single caret, nothing selected, on the composer's first
+DISPLAY row (so a wrapped first line still moves the caret); Down only while
+browsing and on the last row. Everywhere else the handler calls
+`cx.propagate()`, and GPUI then tries the next binding for the same keystroke
+-- `editor::MoveUp`/`MoveDown`, or vim's -- so caret movement is exactly what it
+was. Menus win before either: `Editor && showing_completions` (completions,
+@-mentions, slash commands), `showing_signature_help` and `Picker > Editor`
+come later in the keymap at the same depth, and `context_menu_visible()` is a
+second guard. Upstream's Up-in-an-empty-composer, which pulls the last QUEUED
+message back, keeps priority: with a non-empty queue and an empty composer the
+recall propagates to it. An older step leaves the caret at the start and a
+newer one at the end, so repeated Up/Down walk straight through a multi-line
+message instead of stopping on each of its lines.
+
+**The draft rule.** Browsing starts by keeping the composer's content
+(`draft_content_blocks_snapshot`, so mentions survive) and ends three ways:
+Down past the newest message restores it; any edit of a recalled message ends
+browsing, so the edited text is the new draft and the next Up starts from the
+newest again; and any operator message entering the thread ends it. That is one
+end point, on the thread's new-entry event, rather than one call per send path:
+the composer, the message queue (Send Now and the automatic send at the end of
+a turn) and resubmitting an edited earlier message (`regenerate`) all arrive
+there. When the message did not come from the composer, the recalled text in
+the composer was never the operator's, so the saved draft is put back; the
+composer's own send ends browsing before it clears the composer, so its entry
+finds nothing to undo. A recalled index that no longer names a sent message
+also ends browsing with the draft put back. The recall's own replacement is
+told apart from an operator edit by the composer buffer's version, captured
+right after the recall -- every edit `set_source_message` makes is synchronous.
+While browsing, the thread's persisted `draft_prompt` is left alone: a recalled
+message is not the draft, and switching thread or quitting mid-browse must not
+lose the one being written. Known and accepted: the snapshot trims leading and
+trailing whitespace, and a mention still loading comes back as a plain link.
+
+Recalled messages are rebuilt with `set_source_message(source_blocks)`, the
+same reconstruction the edit-message action uses, so mentions and images come
+back as they were sent. No recall in a read-only composer (a draft with
+unsupported content -- the same refusal `move_queued_message_to_main_editor`
+makes) or while a send is resolving its contents.
+
+**Keymaps.** linux, macos and windows each get the block; vim.json gets one
+under `MessageEditor > Editor && VimControl && !menu`, because vim.json loads
+after the defaults and `vim::Up`/`vim::Down` would otherwise shadow recall in
+normal mode, which is the composer's starting mode there.
+
+The model is a pure `SentMessageHistory` in `conversation_view/sent_history.rs`
+(entry indices plus the saved draft), held per `ThreadView`. Tests: 10 unit
+tests for the model, 22 GPUI tests driving the real keymap with real keystrokes
+(`recall_*`).
+
+Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
+0014 and 0026, and needs no adapter feature.
+---
+
+diff --git a/assets/keymaps/default-linux.json b/assets/keymaps/default-linux.json
+index 3773514..95c79f5 100644
+--- a/assets/keymaps/default-linux.json
++++ b/assets/keymaps/default-linux.json
+@@ -339,6 +339,16 @@
+       "ctrl-alt-.": "agent::ToggleFastMode",
+     },
+   },
++  {
++    // Up on the composer's first line recalls the messages sent in this
++    // thread, newest first; Down on its last line walks forward and back to
++    // the draft. Anywhere else they move the caret as usual.
++    "context": "AcpThread > Editor",
++    "bindings": {
++      "up": "agent::RecallOlderMessage",
++      "down": "agent::RecallNewerMessage",
++    },
++  },
+   {
+     "context": "AcpThread > Editor && start_of_input",
+     "use_key_equivalents": true,
+diff --git a/assets/keymaps/default-macos.json b/assets/keymaps/default-macos.json
+index 73bbf3d..9c4ffae 100644
+--- a/assets/keymaps/default-macos.json
++++ b/assets/keymaps/default-macos.json
+@@ -374,6 +374,16 @@
+       "cmd-alt-.": "agent::ToggleFastMode",
+     },
+   },
++  {
++    // Up on the composer's first line recalls the messages sent in this
++    // thread, newest first; Down on its last line walks forward and back to
++    // the draft. Anywhere else they move the caret as usual.
++    "context": "AcpThread > Editor",
++    "bindings": {
++      "up": "agent::RecallOlderMessage",
++      "down": "agent::RecallNewerMessage",
++    },
++  },
+   {
+     "context": "AcpThread > Editor && start_of_input",
+     "use_key_equivalents": true,
+diff --git a/assets/keymaps/default-windows.json b/assets/keymaps/default-windows.json
+index d05d155..1bf94b3 100644
+--- a/assets/keymaps/default-windows.json
++++ b/assets/keymaps/default-windows.json
+@@ -342,6 +342,16 @@
+       "ctrl-alt-.": "agent::ToggleFastMode",
+     },
+   },
++  {
++    // Up on the composer's first line recalls the messages sent in this
++    // thread, newest first; Down on its last line walks forward and back to
++    // the draft. Anywhere else they move the caret as usual.
++    "context": "AcpThread > Editor",
++    "bindings": {
++      "up": "agent::RecallOlderMessage",
++      "down": "agent::RecallNewerMessage",
++    },
++  },
+   {
+     "context": "AcpThread > Editor && start_of_input",
+     "use_key_equivalents": true,
+diff --git a/assets/keymaps/vim.json b/assets/keymaps/vim.json
+index 41dd2ec..ed7a9c2 100644
+--- a/assets/keymaps/vim.json
++++ b/assets/keymaps/vim.json
+@@ -1197,6 +1197,16 @@
+       "enter": "agent::Chat",
+     },
+   },
++  {
++    // vim.json loads after the default keymaps, so in normal mode vim::Up and
++    // vim::Down would shadow the composer's history. The recall actions fall
++    // back to them whenever they do not recall.
++    "context": "MessageEditor > Editor && VimControl && !menu",
++    "bindings": {
++      "up": "agent::RecallOlderMessage",
++      "down": "agent::RecallNewerMessage",
++    },
++  },
+   {
+     // Outranks the binding above while the agent waits on an answer to its
+     // question, as the default keymaps' `question_pending` block does.
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index a208e21..a508964 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -329,6 +329,14 @@ actions!(
+         /// is what keeps the keystroke from reaching the editor as a newline,
+         /// which an unbound (`null`) Enter would.
+         IgnoreSendWhileQuestionPending,
++        /// Recalls the previous message sent in this thread into the composer.
++        /// Bound to Up: moves the caret instead unless it sits on the composer's
++        /// first line with nothing selected.
++        RecallOlderMessage,
++        /// Walks forward through the recalled messages, ending on the draft that
++        /// was in the composer when browsing started. Bound to Down: moves the
++        /// caret instead unless browsing with the caret on the last line.
++        RecallNewerMessage,
+         /// Cycles to the next inline assist suggestion.
+         CycleNextInlineAssist,
+         /// Cycles to the previous inline assist suggestion.
+diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
+index 607af91..146a571 100644
+--- a/crates/agent_ui/src/conversation_view.rs
++++ b/crates/agent_ui/src/conversation_view.rs
+@@ -110,6 +110,7 @@ pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis
+ 
+ pub(crate) mod elicitation;
+ mod message_queue;
++mod sent_history;
+ mod session_stats;
+ mod thread_search_bar;
+ mod thread_view;
+@@ -1910,6 +1911,7 @@ impl ConversationView {
+                     active.update(cx, |active, cx| {
+                         for index in new_entries {
+                             active.sync_elicitation_state_for_entry(index, window, cx);
++                            active.end_sent_history_on_new_entry(index, window, cx);
+                         }
+                         active.sync_editor_mode(cx);
+                         active.sync_generating_indicator(cx);
+@@ -4120,6 +4122,14 @@ pub(crate) mod tests {
+ 
+     use super::*;
+ 
++    mod recall_tests;
++
++    mod recall_ends_tests;
++
++    mod recall_indices_tests;
++
++    mod recall_end_point_tests;
++
+     #[test]
+     fn test_data_retention_error_maps_from_provider_error() {
+         // The agent wraps the provider error in a fresh `anyhow::Error`, so
+diff --git a/crates/agent_ui/src/conversation_view/sent_history.rs b/crates/agent_ui/src/conversation_view/sent_history.rs
+new file mode 100644
+index 0000000..b8350f1
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/sent_history.rs
+@@ -0,0 +1,123 @@
++//! Shell-style history of the messages the operator sent in one thread.
++//!
++//! The composer walks it with Up and Down: Up recalls the operator's earlier
++//! messages, newest first, and Down walks back towards the draft that was in the
++//! composer when browsing started. The model only answers *which* entry to show;
++//! rebuilding it in the composer is the caller's job.
++
++use acp_thread::AgentThreadEntry;
++use agent_client_protocol::schema::v2 as acp_v2;
++
++/// What the composer shows after one step through the history.
++#[derive(Debug, PartialEq)]
++pub enum Recall {
++    /// The operator message at this index of `AcpThread::entries()`.
++    Entry(usize),
++    /// The draft that was in the composer when browsing started.
++    Draft(Vec<acp_v2::ContentBlock>),
++}
++
++#[derive(Default)]
++pub struct SentMessageHistory {
++    browsing: Option<Browse>,
++    skipped: Vec<usize>,
++}
++
++struct Browse {
++    /// Indices of the operator's messages, newest first.
++    entries: Vec<usize>,
++    /// Position in `entries` of the message shown now.
++    position: usize,
++    draft: Vec<acp_v2::ContentBlock>,
++}
++
++impl SentMessageHistory {
++    /// Starts browsing from the newest operator message in `entries`, keeping
++    /// `draft` for the walk back. Returns `None`, and does not start, when the
++    /// thread has no operator message to recall.
++    ///
++    /// The list is read from `entries` on every call and never cached across
++    /// sends, so a message sent since the last browse is the first one offered.
++    pub fn start(
++        &mut self,
++        entries: &[AgentThreadEntry],
++        draft: Vec<acp_v2::ContentBlock>,
++    ) -> Option<Recall> {
++        self.browsing = None;
++        self.skipped.clear();
++
++        let mut sent = Vec::new();
++        for (ix, entry) in entries.iter().enumerate().rev() {
++            // `indented` marks a subagent's prompt rendered inside this thread:
++            // a `UserMessage`, but not one the operator wrote. Queued messages are
++            // not thread entries at all, and a live-sent message stays optimistic
++            // for good when the agent does not echo it, so `is_optimistic` says
++            // nothing about whether a message was sent.
++            let Some(message) = entry.user_message() else {
++                continue;
++            };
++            if message.indented {
++                continue;
++            }
++            if message.content.source_blocks().is_empty() {
++                self.skipped.push(ix);
++                continue;
++            }
++            sent.push(ix);
++        }
++
++        let newest = *sent.first()?;
++        self.browsing = Some(Browse {
++            entries: sent,
++            position: 0,
++            draft,
++        });
++        Some(Recall::Entry(newest))
++    }
++
++    /// The next older message, staying on the oldest once it is reached.
++    /// `None` when not browsing.
++    pub fn older(&mut self) -> Option<Recall> {
++        let browse = self.browsing.as_mut()?;
++        browse.position = (browse.position + 1).min(browse.entries.len() - 1);
++        Some(Recall::Entry(browse.entries[browse.position]))
++    }
++
++    /// The next newer message, or — past the newest — the saved draft, which
++    /// also ends browsing. `None` when not browsing.
++    pub fn newer(&mut self) -> Option<Recall> {
++        let browse = self.browsing.as_mut()?;
++        if browse.position == 0 {
++            let browse = self.browsing.take()?;
++            return Some(Recall::Draft(browse.draft));
++        }
++        browse.position -= 1;
++        Some(Recall::Entry(browse.entries[browse.position]))
++    }
++
++    /// Ends browsing and hands back the saved draft, for when the composer
++    /// still shows a recalled message that the operator never chose to keep.
++    /// `None` when not browsing.
++    pub fn abandon(&mut self) -> Option<Vec<acp_v2::ContentBlock>> {
++        self.browsing.take().map(|browse| browse.draft)
++    }
++
++    /// Forgets the position and the saved draft: the next `start` begins again
++    /// from the newest message.
++    pub fn end(&mut self) {
++        self.browsing = None;
++    }
++
++    pub fn is_browsing(&self) -> bool {
++        self.browsing.is_some()
++    }
++
++    /// Operator messages the last `start` passed over because they carry no
++    /// content to rebuild in the composer.
++    pub fn skipped_entries(&self) -> &[usize] {
++        &self.skipped
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/crates/agent_ui/src/conversation_view/sent_history/tests.rs b/crates/agent_ui/src/conversation_view/sent_history/tests.rs
+new file mode 100644
+index 0000000..580e9fc
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/sent_history/tests.rs
+@@ -0,0 +1,385 @@
++//! Unit tests for `SentMessageHistory` (story 018, Task 2.1).
++//!
++//! Wiring: `crates/agent_ui/src/conversation_view/sent_history.rs` declares
++//! `#[cfg(test)] mod tests;`, which resolves to this file.
++//!
++//! Contract under test (from the sub-task Objective): a per-thread model holding the
++//! browse position and the saved draft, with `start(entries, draft)`, `older()`,
++//! `newer()` returning the entry index to show or the `Draft`, and `end()`.
++//!
++//! The only lines tied to the model's exact signature are in the "contract adapter"
++//! section below; if the implementation's names drift, change them there only.
++//!
++//! Identity rules are tested hostile-half first (see each test's comment): the fixture
++//! that would make the rule wrongly collapse two things, then the one that would make it
++//! wrongly split one thing, then the benign case.
++
++use std::sync::Arc;
++
++use acp_thread::{
++    AgentThreadEntry, AssistantMessage, AssistantMessageChunk, MessageContent, MessageIdentity,
++    UserMessage,
++};
++use agent_client_protocol::schema::v2 as acp_v2;
++use gpui::{App, TestAppContext};
++use language::LanguageRegistry;
++
++use crate::conversation_view::sent_history::{Recall, SentMessageHistory};
++
++// ---------------------------------------------------------------------------
++// Contract adapter
++// ---------------------------------------------------------------------------
++
++type Draft = Vec<acp_v2::ContentBlock>;
++
++/// What the composer is told to show after one step of the history.
++#[derive(Debug, PartialEq)]
++enum Shown {
++    /// The user message at this index of `AcpThread::entries()`.
++    Entry(usize),
++    /// The draft that was in the composer when browsing started.
++    Draft(Draft),
++    /// No history step happened: the caller falls back to caret movement.
++    Nothing,
++}
++
++fn shown(step: Option<Recall>) -> Shown {
++    match step {
++        Some(Recall::Entry(ix)) => Shown::Entry(ix),
++        Some(Recall::Draft(draft)) => Shown::Draft(draft),
++        None => Shown::Nothing,
++    }
++}
++
++fn start(history: &mut SentMessageHistory, entries: &[AgentThreadEntry], draft: Draft) -> Shown {
++    shown(history.start(entries, draft))
++}
++
++fn older(history: &mut SentMessageHistory) -> Shown {
++    shown(history.older())
++}
++
++fn newer(history: &mut SentMessageHistory) -> Shown {
++    shown(history.newer())
++}
++
++// ---------------------------------------------------------------------------
++// Fixtures
++// ---------------------------------------------------------------------------
++
++fn draft(text: &str) -> Draft {
++    vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
++        text.to_string(),
++    ))]
++}
++
++fn languages(cx: &App) -> Arc<LanguageRegistry> {
++    Arc::new(LanguageRegistry::test(cx.background_executor().clone()))
++}
++
++fn user_message(text: &str, is_optimistic: bool, indented: bool, cx: &mut App) -> AgentThreadEntry {
++    let languages = languages(cx);
++    AgentThreadEntry::UserMessage(UserMessage {
++        identity: MessageIdentity::Legacy(None),
++        meta: None,
++        client_id: None,
++        is_optimistic,
++        content: MessageContent::new(text.into(), &languages, util::paths::PathStyle::local(), cx),
++        checkpoint: None,
++        indented,
++    })
++}
++
++/// A message the operator typed and sent in this session. The client pushes it itself,
++/// so it is optimistic -- and it stays optimistic for the rest of the session when the
++/// agent does not echo it back. It is SENT, not queued.
++fn sent_live(text: &str, cx: &mut App) -> AgentThreadEntry {
++    user_message(text, true, false, cx)
++}
++
++/// An operator message replayed by the agent when a thread is reopened.
++fn sent_restored(text: &str, cx: &mut App) -> AgentThreadEntry {
++    user_message(text, false, false, cx)
++}
++
++/// A prompt shown inside a subagent's output: a `UserMessage`, but not the operator's.
++fn subagent_prompt(text: &str, cx: &mut App) -> AgentThreadEntry {
++    user_message(text, false, true, cx)
++}
++
++fn agent(text: &str, cx: &mut App) -> AgentThreadEntry {
++    let languages = languages(cx);
++    AgentThreadEntry::AssistantMessage(AssistantMessage {
++        chunks: vec![AssistantMessageChunk::from_str(
++            text,
++            &languages,
++            util::paths::PathStyle::local(),
++            cx,
++        )],
++        indented: false,
++        is_subagent_output: false,
++    })
++}
++
++/// An operator message whose content is missing: nothing to rebuild in the composer.
++fn without_content() -> AgentThreadEntry {
++    AgentThreadEntry::UserMessage(UserMessage {
++        identity: MessageIdentity::Legacy(None),
++        meta: None,
++        client_id: None,
++        is_optimistic: false,
++        content: MessageContent::default(),
++        checkpoint: None,
++        indented: false,
++    })
++}
++
++// ---------------------------------------------------------------------------
++// R4.1 -- only the operator's own messages
++// ---------------------------------------------------------------------------
++
++/// Hostile half 1 (wrong collapse): entries that LOOK like operator messages -- a subagent
++/// prompt (a `UserMessage`, even the newest entry) and an agent reply with the same text
++/// as an operator message -- must never be offered.
++#[gpui::test]
++fn sent_history_never_offers_subagent_prompts_or_agent_messages(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("deploy it", cx),        // 0
++            agent("deploy it", cx),            // 1 -- same text, agent's
++            subagent_prompt("deploy it", cx),  // 2 -- same text, subagent's
++            sent_live("now roll back", cx),    // 3
++            agent("rolled back", cx),          // 4
++            subagent_prompt("check logs", cx), // 5 -- newest entry, not the operator's
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(start(&mut history, &entries, draft("")), Shown::Entry(3));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        assert_eq!(
++            older(&mut history),
++            Shown::Entry(0),
++            "R1.3: saturates at the oldest"
++        );
++        assert_eq!(newer(&mut history), Shown::Entry(3));
++        assert_eq!(newer(&mut history), Shown::Draft(draft("")));
++    });
++}
++
++/// Hostile half 2 (wrong split): the operator's messages come in different shapes -- sent
++/// live in this session (optimistic, never echoed) and replayed from a previous run
++/// (not optimistic). Both are the operator's sent messages and both must be offered.
++/// R4.4's "queued" messages are not thread entries at all, so being optimistic must not
++/// be mistaken for being queued.
++#[gpui::test]
++fn sent_history_offers_live_and_restored_operator_messages_alike(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_restored("from the previous run", cx), // 0
++            agent("ok", cx),                            // 1
++            sent_live("from this run", cx),             // 2
++            agent("ok", cx),                            // 3
++            sent_live("just sent, no reply yet", cx),   // 4
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(start(&mut history, &entries, draft("")), Shown::Entry(4));
++        assert_eq!(older(&mut history), Shown::Entry(2));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++    });
++}
++
++/// R1.2: the history steps through sent MESSAGES, not distinct texts. Two sends of the
++/// same text are two messages; collapsing them would make one Up appear to do nothing.
++#[gpui::test]
++fn sent_history_keeps_repeated_texts_as_separate_messages(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("run the tests", cx), // 0
++            agent("2 failures", cx),        // 1
++            sent_live("run the tests", cx), // 2
++            agent("all green", cx),         // 3
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(start(&mut history, &entries, draft("")), Shown::Entry(2));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++    });
++}
++
++// ---------------------------------------------------------------------------
++// R1.1-R1.4, R2.1-R2.2, R3.3 -- walking and the saved draft
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++fn sent_history_walks_newest_first_saturates_and_returns_the_draft(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("first", cx),  // 0
++            agent("a", cx),          // 1
++            sent_live("second", cx), // 2
++            agent("b", cx),          // 3
++            sent_live("third", cx),  // 4
++            agent("c", cx),          // 5
++        ];
++        let mut history = SentMessageHistory::default();
++
++        // R1.1 / R1.2 / R1.3
++        assert_eq!(
++            start(&mut history, &entries, draft("half-typed")),
++            Shown::Entry(4)
++        );
++        assert_eq!(older(&mut history), Shown::Entry(2));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        // R2.1
++        assert_eq!(newer(&mut history), Shown::Entry(2));
++        assert_eq!(newer(&mut history), Shown::Entry(4));
++        // R2.2 / R3.3: the draft given to `start`, unchanged by the walk
++        assert_eq!(newer(&mut history), Shown::Draft(draft("half-typed")));
++        // Restoring the draft ends browsing: another step is not a history step.
++        assert_eq!(newer(&mut history), Shown::Nothing);
++        assert_eq!(older(&mut history), Shown::Nothing);
++    });
++}
++
++/// R2.2: "including an empty draft" -- an empty composer is restored as empty, not as
++/// "no draft".
++#[gpui::test]
++fn sent_history_restores_an_empty_draft(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![sent_live("only", cx)];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(start(&mut history, &entries, Vec::new()), Shown::Entry(0));
++        assert_eq!(newer(&mut history), Shown::Draft(Vec::new()));
++    });
++}
++
++/// R1.4: no operator message means no history step, so the caller moves the caret.
++/// Hostile: entries that are all NOT the operator's still count as "no message sent".
++#[gpui::test]
++fn sent_history_without_operator_messages_does_not_start(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let mut history = SentMessageHistory::default();
++        assert_eq!(start(&mut history, &[], draft("x")), Shown::Nothing);
++
++        let not_the_operators = vec![agent("hello", cx), subagent_prompt("look around", cx)];
++        assert_eq!(
++            start(&mut history, &not_the_operators, draft("x")),
++            Shown::Nothing
++        );
++        // Not browsing: Down is not a history step either (R2.3).
++        assert_eq!(newer(&mut history), Shown::Nothing);
++    });
++}
++
++// ---------------------------------------------------------------------------
++// R3.4 / R4.3 -- ending and restarting
++// ---------------------------------------------------------------------------
++
++/// After `end()`, the next `start` begins again at the newest message and saves the NEW
++/// draft. Hostile: a stale saved draft or a stale position surviving `end()`.
++#[gpui::test]
++fn sent_history_end_forgets_position_and_draft(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("first", cx),
++            agent("a", cx),
++            sent_live("second", cx),
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(
++            start(&mut history, &entries, draft("old draft")),
++            Shown::Entry(2)
++        );
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        history.end();
++
++        assert_eq!(
++            newer(&mut history),
++            Shown::Nothing,
++            "not browsing after end()"
++        );
++        assert_eq!(
++            start(&mut history, &entries, draft("edited")),
++            Shown::Entry(2)
++        );
++        assert_eq!(newer(&mut history), Shown::Draft(draft("edited")));
++    });
++}
++
++/// R4.3 / Task 4: the list is taken from the entries given to each `start`, not cached.
++/// Hostile third element: a message sent after the previous browse must be the first one
++/// offered by the next.
++#[gpui::test]
++fn sent_history_start_reads_the_current_entries(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let mut entries = vec![sent_live("first", cx), agent("a", cx)];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(start(&mut history, &entries, draft("")), Shown::Entry(0));
++        history.end();
++
++        entries.push(sent_live("second", cx)); // 2
++        entries.push(agent("b", cx)); // 3
++        assert_eq!(start(&mut history, &entries, draft("")), Shown::Entry(2));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++    });
++}
++
++// ---------------------------------------------------------------------------
++// Q4 -- an entry that cannot be rebuilt is skipped
++// ---------------------------------------------------------------------------
++
++/// Q4: an operator message with no content cannot be rebuilt in the composer; it is
++/// skipped in both directions instead of showing an empty composer.
++#[gpui::test]
++fn sent_history_skips_a_message_without_content(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("first", cx), // 0
++            without_content(),      // 1
++            sent_live("third", cx), // 2
++            without_content(),      // 3 -- newest
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(start(&mut history, &entries, draft("d")), Shown::Entry(2));
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        assert_eq!(newer(&mut history), Shown::Entry(2));
++        assert_eq!(newer(&mut history), Shown::Draft(draft("d")));
++    });
++}
++
++/// Validation fix round 2: abandoning hands back the saved draft and ends
++/// browsing, so a caller can put the draft back in the composer.
++#[gpui::test]
++fn sent_history_abandon_returns_the_draft_and_ends_browsing(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let entries = vec![
++            sent_live("first", cx),
++            agent("a", cx),
++            sent_live("second", cx),
++        ];
++        let mut history = SentMessageHistory::default();
++
++        assert_eq!(
++            history.abandon(),
++            None,
++            "nothing to abandon when not browsing"
++        );
++        assert_eq!(
++            start(&mut history, &entries, draft("kept")),
++            Shown::Entry(2)
++        );
++        assert_eq!(older(&mut history), Shown::Entry(0));
++        assert_eq!(history.abandon(), Some(draft("kept")));
++        assert_eq!(
++            newer(&mut history),
++            Shown::Nothing,
++            "not browsing after abandon()"
++        );
++    });
++}
+diff --git a/crates/agent_ui/src/conversation_view/tests/recall_end_point_tests.rs b/crates/agent_ui/src/conversation_view/tests/recall_end_point_tests.rs
+new file mode 100644
+index 0000000..ada3d9c
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/tests/recall_end_point_tests.rs
+@@ -0,0 +1,294 @@
++//! Composer recall: one end point for browsing (story 018, Task 8.1).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view.rs`'s `mod tests { .. }`, declare
++//! `mod recall_end_point_tests;` (resolves to this file). Uses the harness in
++//! `recall_tests.rs` (Task 3.1).
++//!
++//! Contract (R4.3, R4.5, R2.4): whatever path an operator message enters the thread by,
++//! browsing ends and the next Up starts from that message. When the message did NOT come
++//! from the composer, the composer is put back on the draft browsing started from; when it
++//! DID, the composer stays empty -- the old draft is not resurrected over a send. A
++//! recalled message that stops existing ends browsing with the draft back.
++//!
++//! Order follows the hostile-half rule: the composer send (where restoring the draft
++//! would be the wrong collapse) comes before the queue's Send Now (where leaving the
++//! browse alive would be the wrong split).
++
++use super::recall_tests::{
++    composer_text, composer_with_stub, focus_composer, press, send, type_draft,
++};
++use super::*;
++use gpui::{TestAppContext, VisualTestContext};
++
++/// The operator's own messages in the thread, oldest first.
++fn operator_messages(view: &Entity<ConversationView>, cx: &mut VisualTestContext) -> Vec<String> {
++    active_thread(view, cx).read_with(cx, |view, cx| {
++        view.thread
++            .read(cx)
++            .entries()
++            .iter()
++            .filter_map(|entry| entry.user_message())
++            .filter(|message| !message.indented)
++            .map(|message| message.content.to_markdown(cx).trim().to_string())
++            .collect()
++    })
++}
++
++fn next_turn_says(connection: &StubAgentConnection, text: &'static str) {
++    connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
++        acp_v1::ContentChunk::new(text.into()),
++    )]);
++}
++
++// ---------------------------------------------------------------------------
++// R4.3 hostile half -- a composer send must NOT bring the old draft back
++// ---------------------------------------------------------------------------
++
++/// The operator sends the recalled message itself, unedited, from the composer. Browsing
++/// ends, but the composer was the source of the message: it stays empty, and the draft
++/// saved when browsing started ("old draft") is gone for good -- also from the next
++/// browse, whose own saved draft is the empty composer.
++#[gpui::test]
++async fn recall_end_point_composer_send_leaves_the_composer_empty(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "alpha", cx);
++    send(&view, &connection, "bravo", cx);
++
++    type_draft(&view, "old draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "alpha", "precondition: browsing");
++
++    // Send exactly what is shown -- no retyping, so browsing is still on when send runs.
++    next_turn_says(&connection, "Again.");
++    active_thread(&view, cx).update_in(cx, |thread, window, cx| thread.send(window, cx));
++    cx.run_until_parked();
++    assert_eq!(
++        operator_messages(&view, cx),
++        vec!["alpha", "bravo", "alpha"],
++        "precondition: the recalled message was sent"
++    );
++
++    assert_eq!(
++        composer_text(&view, cx),
++        "",
++        "R4.5 converse: a message sent from the composer does not restore the old draft"
++    );
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "alpha",
++        "R4.3: the next Up starts from the message just sent"
++    );
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "bravo",
++        "R4.3: a fresh walk, not the old browse's position"
++    );
++    press("down", cx);
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "",
++        "the new browse saved the empty composer, not \"old draft\""
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R4.3 + R4.5 -- a queued message sent with Send Now while browsing
++// ---------------------------------------------------------------------------
++
++/// Send Now dispatches a queued message without going through the composer. The composer
++/// still shows a recalled message, which was never the operator's draft: browsing must end
++/// with the saved draft back (R4.5), and the next Up must start from the message that just
++/// entered the thread from the queue (R4.3).
++#[gpui::test]
++async fn recall_end_point_send_now_from_the_queue_restores_the_draft(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "first", cx);
++    send(&view, &connection, "second", cx);
++
++    let thread_view = active_thread(&view, cx);
++    thread_view.update_in(cx, |thread, window, cx| {
++        thread.add_to_queue(
++            vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
++                "queued one".to_string(),
++            ))],
++            vec![],
++            window,
++            cx,
++        );
++    });
++    cx.run_until_parked();
++
++    type_draft(&view, "my draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "second", "precondition: browsing");
++
++    next_turn_says(&connection, "Done with the queue.");
++    thread_view.update_in(cx, |thread, window, cx| {
++        let id = thread
++            .message_queue
++            .first_id()
++            .expect("precondition: the message is queued");
++        thread.send_queued_message_now(id, window, cx);
++    });
++    cx.run_until_parked();
++    let queue_len = thread_view.read_with(cx, |thread, _| thread.message_queue.len());
++    assert_eq!(queue_len, 0, "precondition: Send Now took it off the queue");
++    assert_eq!(
++        operator_messages(&view, cx),
++        vec!["first", "second", "queued one"],
++        "precondition: the queued message entered the thread"
++    );
++
++    assert_eq!(
++        composer_text(&view, cx),
++        "my draft",
++        "R4.5: a message sent from the queue ends browsing and puts the saved draft back"
++    );
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "queued one",
++        "R4.3: the next Up starts from the message just sent from the queue"
++    );
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "second");
++    press("down", cx);
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "my draft",
++        "the draft survives the second browse too"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R2.4 -- the recalled message stops existing under the browse
++// ---------------------------------------------------------------------------
++
++fn rewind_to_operator_message(
++    view: &Entity<ConversationView>,
++    nth: usize,
++    cx: &mut VisualTestContext,
++) -> Task<Result<()>> {
++    let thread = active_thread(view, cx).read_with(cx, |view, _| view.thread.clone());
++    let client_id = thread.read_with(cx, |thread, _| {
++        thread
++            .entries()
++            .iter()
++            .filter_map(|entry| entry.user_message())
++            .filter(|message| !message.indented)
++            .nth(nth)
++            .and_then(|message| message.client_id.clone())
++            .expect("precondition: the message has a client id to rewind to")
++    });
++    thread.update(cx, |thread, cx| thread.rewind(client_id, cx))
++}
++
++/// The thread is rewound to before "second" while the composer shows "third": both
++/// messages the browse knows about past "first" are gone. The next step must not walk on
++/// to an entry that no longer exists -- browsing ends with the saved draft back -- and a
++/// fresh Up then starts from what is left.
++#[gpui::test]
++async fn recall_end_point_truncated_entries_end_browsing_with_the_draft(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "first", cx);
++    send(&view, &connection, "second", cx);
++    send(&view, &connection, "third", cx);
++
++    type_draft(&view, "my draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "third", "precondition: browsing");
++
++    rewind_to_operator_message(&view, 1, cx)
++        .await
++        .expect("precondition: the rewind succeeds");
++    cx.run_until_parked();
++    assert_eq!(
++        operator_messages(&view, cx),
++        vec!["first"],
++        "precondition: second and third were truncated"
++    );
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "my draft",
++        "R2.4: a recalled message that no longer exists ends browsing with the draft back"
++    );
++
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "first",
++        "a fresh browse starts from what survived the truncation"
++    );
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "my draft");
++}
++
++/// Hostile third element: after the truncation, the stale index is occupied again -- by a
++/// subagent prompt, a `UserMessage` that is not the operator's. The index exists, the
++/// recalled message does not; browsing must still end with the draft back rather than
++/// show the subagent's prompt as if it were the operator's.
++#[gpui::test]
++async fn recall_end_point_a_reused_stale_index_still_ends_browsing(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "first", cx);
++    send(&view, &connection, "second", cx);
++    send(&view, &connection, "third", cx);
++
++    type_draft(&view, "my draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "third", "precondition: browsing");
++
++    rewind_to_operator_message(&view, 1, cx)
++        .await
++        .expect("precondition: the rewind succeeds");
++    cx.run_until_parked();
++    let thread = active_thread(&view, cx).read_with(cx, |view, _| view.thread.clone());
++    thread.update(cx, |thread, cx| {
++        thread.push_user_content_block_with_indent(
++            None,
++            "subagent: check the logs".into(),
++            true,
++            cx,
++        );
++    });
++    cx.run_until_parked();
++    assert_eq!(
++        operator_messages(&view, cx),
++        vec!["first"],
++        "precondition: the subagent prompt is not an operator message"
++    );
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "my draft",
++        "R2.4: the stale position now holds another entry -- browsing ends with the draft"
++    );
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "first",
++        "a fresh browse skips the subagent prompt"
++    );
++}
+diff --git a/crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs b/crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs
+new file mode 100644
+index 0000000..3529b12
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/tests/recall_ends_tests.rs
+@@ -0,0 +1,347 @@
++//! Composer recall: when browsing ends, and whose history it is (story 018, Task 3.2).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view.rs`'s `mod tests { .. }`, declare
++//! `mod recall_ends_tests;` (resolves to this file). Uses the harness in
++//! `recall_tests.rs` (Task 3.1), declared beside it.
++//!
++//! Behaviour-level: real default keymap, real keystrokes, real send path.
++
++use super::recall_tests::{
++    bind_default_keymap, composer_text, composer_with_stub, focus_composer, press, send, type_draft,
++};
++use super::*;
++use gpui::{TestAppContext, VisualTestContext};
++
++/// Sends whatever is in the composer right now, as the operator pressing Enter would.
++fn send_composer_as_is(
++    view: &Entity<ConversationView>,
++    connection: &StubAgentConnection,
++    cx: &mut VisualTestContext,
++) {
++    connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
++        acp_v1::ContentChunk::new("Done again.".into()),
++    )]);
++    active_thread(view, cx).update_in(cx, |thread, window, cx| thread.send(window, cx));
++    cx.run_until_parked();
++}
++
++// ---------------------------------------------------------------------------
++// R3.4 -- an edit ends browsing
++// ---------------------------------------------------------------------------
++
++/// The recall's own replacement of the composer is NOT an operator edit (otherwise the
++/// second Up would restart at the newest); typing into the recalled text IS one.
++#[gpui::test]
++async fn recall_ends_when_the_recalled_message_is_edited(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "alpha", cx);
++    send(&view, &connection, "bravo", cx);
++    send(&view, &connection, "charlie", cx);
++
++    type_draft(&view, "old draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "bravo",
++        "the recall itself must not end browsing"
++    );
++
++    cx.simulate_input("!");
++    cx.run_until_parked();
++    let edited = composer_text(&view, cx);
++    assert!(
++        edited.contains("bravo") && edited.contains('!'),
++        "precondition: the operator edited the recalled text, got {edited:?}"
++    );
++
++    // Browsing ended: Up starts again from the most recent message. Had it continued,
++    // Up would have gone on to "alpha".
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "charlie",
++        "R3.4: next Up starts from the most recent message"
++    );
++    // ...and the edited text is the draft Down restores, not the one from before.
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        edited,
++        "R3.4: the edited text became the new draft"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R4.3 -- sending ends browsing
++// ---------------------------------------------------------------------------
++
++/// Hostile third element: the resent text equals a message already in the history, so
++/// only its POSITION tells the two apart. A stale browse position would walk on to
++/// "alpha"; a stale saved draft would bring back "old draft".
++#[gpui::test]
++async fn recall_ends_when_a_message_is_sent(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "alpha", cx);
++    send(&view, &connection, "bravo", cx);
++    send(&view, &connection, "charlie", cx);
++
++    type_draft(&view, "old draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "bravo");
++
++    send_composer_as_is(&view, &connection, cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "",
++        "precondition: the resend went out"
++    );
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "bravo",
++        "R4.3: the message just sent comes first"
++    );
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "charlie",
++        "R4.3: then the one sent before it, not the stale position's neighbour"
++    );
++    press("down", cx);
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "",
++        "R4.3: the draft is the empty composer after the send, not the old draft"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R4.2 -- each thread has its own history, including a reopened thread's
++// ---------------------------------------------------------------------------
++
++fn new_conversation_view(
++    connection: &StubAgentConnection,
++    resume_session_id: Option<acp_v2::SessionId>,
++    workspace: &Entity<workspace::Workspace>,
++    project: &Entity<Project>,
++    cx: &mut VisualTestContext,
++) -> Entity<ConversationView> {
++    let thread_store = cx.update(|_window, cx| cx.new(|cx| ThreadStore::new(cx)));
++    let connection_store =
++        cx.update(|_window, cx| cx.new(|cx| AgentConnectionStore::new(project.clone(), cx)));
++    let view = cx.update(|window, cx| {
++        cx.new(|cx| {
++            ConversationView::new(
++                Rc::new(StubAgentServer::new(connection.clone())),
++                connection_store,
++                Agent::Custom { id: "Test".into() },
++                resume_session_id,
++                None,
++                None,
++                None,
++                None,
++                workspace.downgrade(),
++                project.clone(),
++                Some(thread_store),
++                AgentThreadSource::AgentPanel,
++                window,
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    view
++}
++
++/// Hostile half (wrong collapse): two threads side by side must not share a history.
++#[gpui::test]
++async fn recall_ends_at_the_thread_boundary(cx: &mut TestAppContext) {
++    init_test(cx);
++    bind_default_keymap(cx);
++    let fs = FakeFs::new(cx.executor());
++    let project = Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++
++    let connection_a = StubAgentConnection::new();
++    let connection_b = StubAgentConnection::new();
++    let view_a = new_conversation_view(&connection_a, None, &workspace, &project, cx);
++    let view_b = new_conversation_view(&connection_b, None, &workspace, &project, cx);
++
++    add_to_workspace(view_a.clone(), cx);
++    send(&view_a, &connection_a, "alpha in A", cx);
++    add_to_workspace(view_b.clone(), cx);
++    send(&view_b, &connection_b, "bravo in B", cx);
++
++    focus_composer(&view_b, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view_b, cx),
++        "bravo in B",
++        "R4.2: B's own message"
++    );
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view_b, cx),
++        "bravo in B",
++        "R4.2: B's oldest is B's -- A's message is not in B's history"
++    );
++    press("down", cx);
++    assert_eq!(composer_text(&view_b, cx), "");
++
++    // Switch back to A.
++    add_to_workspace(view_a.clone(), cx);
++    focus_composer(&view_a, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view_a, cx),
++        "alpha in A",
++        "R4.2: A's own message"
++    );
++    press("up", cx);
++    assert_eq!(composer_text(&view_a, cx), "alpha in A");
++}
++
++/// Hostile half (wrong split): a reopened thread's replayed messages and the messages sent
++/// after reopening are one history.
++#[gpui::test]
++async fn recall_ends_reopened_thread_keeps_restored_messages(cx: &mut TestAppContext) {
++    init_test(cx);
++    bind_default_keymap(cx);
++    let fs = FakeFs::new(cx.executor());
++    let project = Project::test(fs, [], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++
++    let connection = StubAgentConnection::new().with_supports_load_session(true);
++    let session_id = acp_v2::SessionId::new("reopened-session");
++    let view = new_conversation_view(
++        &connection,
++        Some(session_id.clone()),
++        &workspace,
++        &project,
++        cx,
++    );
++    add_to_workspace(view.clone(), cx);
++
++    // The agent replays the previous run, as `session/load` does.
++    cx.update(|_, cx| {
++        connection.send_update(
++            session_id.clone(),
++            acp_v1::SessionUpdate::UserMessageChunk(acp_v1::ContentChunk::new(
++                "restored question".into(),
++            )),
++            cx,
++        );
++        connection.send_update(
++            session_id.clone(),
++            acp_v1::SessionUpdate::AgentMessageChunk(acp_v1::ContentChunk::new(
++                "restored answer".into(),
++            )),
++            cx,
++        );
++    });
++    cx.run_until_parked();
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "restored question",
++        "R4.2: a message restored from a previous run is in the history"
++    );
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "");
++
++    send(&view, &connection, "live follow-up", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "live follow-up");
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "restored question",
++        "R4.2: restored and live messages form one history"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R4.3 / R2.2 -- resubmitting an edited earlier message (validation fix round 2)
++// ---------------------------------------------------------------------------
++
++/// `regenerate` resends an earlier message from its own editor and never goes
++/// through the composer's send, so it must end browsing itself. The recalled
++/// text in the composer was never the operator's draft: the draft comes back.
++#[gpui::test]
++async fn recall_ends_when_an_earlier_message_is_resubmitted(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "alpha", cx);
++    send(&view, &connection, "bravo", cx);
++
++    type_draft(&view, "my draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "bravo", "precondition: browsing");
++
++    let thread_view = active_thread(&view, cx);
++    let (alpha_ix, alpha_editor) = thread_view.read_with(cx, |view, cx| {
++        let alpha_ix = view
++            .thread
++            .read(cx)
++            .entries()
++            .iter()
++            .position(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
++            .expect("precondition: alpha is in the thread");
++        let editor = view
++            .entry_view_state
++            .read(cx)
++            .entry(alpha_ix)
++            .and_then(|entry| entry.message_editor())
++            .cloned()
++            .expect("precondition: alpha has an edit-message editor");
++        (alpha_ix, editor)
++    });
++    alpha_editor.update_in(cx, |editor, window, cx| {
++        editor.set_text("alpha edited", window, cx)
++    });
++    connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
++        acp_v1::ContentChunk::new("Redone.".into()),
++    )]);
++    thread_view.update_in(cx, |view, window, cx| {
++        view.regenerate(alpha_ix, alpha_editor.clone(), window, cx)
++    });
++    cx.run_until_parked();
++
++    assert_eq!(
++        composer_text(&view, cx),
++        "my draft",
++        "R2.2: the recalled message is replaced by the draft browsing started from"
++    );
++    focus_composer(&view, cx);
++    set_caret_to_start(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "alpha edited",
++        "R4.3: the next Up starts from the message just resubmitted"
++    );
++}
++
++fn set_caret_to_start(view: &Entity<ConversationView>, cx: &mut VisualTestContext) {
++    message_editor(view, cx).update_in(cx, |editor, window, cx| {
++        editor.set_cursor_offset(0, window, cx)
++    });
++    cx.run_until_parked();
++}
+diff --git a/crates/agent_ui/src/conversation_view/tests/recall_indices_tests.rs b/crates/agent_ui/src/conversation_view/tests/recall_indices_tests.rs
+new file mode 100644
+index 0000000..51ed194
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/tests/recall_indices_tests.rs
+@@ -0,0 +1,154 @@
++//! Composer recall vs. a thread whose entries keep changing (story 018, Task 4.1).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view.rs`'s `mod tests { .. }`, declare
++//! `mod recall_indices_tests;` (resolves to this file). Uses the harness in
++//! `recall_tests.rs` (Task 3.1).
++//!
++//! Contract: whatever the composer recalls is always one of the operator's own messages
++//! of the current thread -- never an agent message, never a subagent prompt, never a
++//! queued message -- even while the agent streams new entries during browsing.
++
++use super::recall_tests::{
++    composer_text, composer_with_stub, focus_composer, press, send, type_draft,
++};
++use super::*;
++use gpui::{TestAppContext, VisualTestContext};
++
++/// Sends `text` and leaves the agent's turn open, so entries can stream in afterwards.
++fn send_and_keep_turn_open(
++    view: &Entity<ConversationView>,
++    text: &str,
++    cx: &mut VisualTestContext,
++) {
++    type_draft(view, text, cx);
++    active_thread(view, cx).update_in(cx, |thread, window, cx| thread.send(window, cx));
++    cx.run_until_parked();
++}
++
++fn stream_agent_chunk(
++    connection: &StubAgentConnection,
++    session_id: &acp_v2::SessionId,
++    text: &'static str,
++    cx: &mut VisualTestContext,
++) {
++    cx.update(|_, cx| {
++        connection.send_update(
++            session_id.clone(),
++            acp_v1::SessionUpdate::AgentMessageChunk(acp_v1::ContentChunk::new(text.into())),
++            cx,
++        );
++    });
++    cx.run_until_parked();
++}
++
++/// A subagent's prompt, rendered indented in the parent thread: a `UserMessage` entry that
++/// is not the operator's.
++fn stream_subagent_prompt(thread: &Entity<AcpThread>, text: &str, cx: &mut VisualTestContext) {
++    thread.update(cx, |thread, cx| {
++        thread.push_user_content_block_with_indent(None, text.into(), true, cx);
++    });
++    cx.run_until_parked();
++}
++
++/// Hostile third element: while browsing, entries that are NOT the operator's arrive --
++/// including a subagent prompt that is newer than every operator message. Every step must
++/// land on an operator message, and a fresh Up must skip the subagent prompt.
++#[gpui::test]
++async fn recall_indices_stay_on_operator_messages_while_entries_stream(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "first", cx);
++    send(&view, &connection, "second", cx);
++    send_and_keep_turn_open(&view, "third", cx);
++
++    let thread = active_thread(&view, cx).read_with(cx, |view, _| view.thread.clone());
++    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "third");
++
++    stream_agent_chunk(&connection, &session_id, "Working on it", cx);
++    stream_subagent_prompt(&thread, "subagent: check the logs", cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "second",
++        "R4.1: streaming did not shift the walk"
++    );
++
++    stream_agent_chunk(&connection, &session_id, "Still working", cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "first");
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "second");
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "third");
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "", "back to the empty draft");
++
++    // A fresh browse: the newest UserMessage entry is the subagent's prompt.
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "third",
++        "R4.1: the subagent's prompt is not the operator's message"
++    );
++    press("down", cx);
++
++    cx.update(|_, _| connection.end_turn(session_id.clone(), acp_v1::StopReason::EndTurn));
++    cx.run_until_parked();
++}
++
++/// R4.4. Hostile split: a message sent in this session stays optimistic in the thread (the
++/// stub, like many agents, never echoes it) -- it is SENT and belongs in the history. A
++/// queued message is not sent and does not.
++#[gpui::test]
++async fn recall_indices_leave_queued_messages_out(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "sent one", cx);
++
++    let thread_view = active_thread(&view, cx);
++    thread_view.read_with(cx, |view, cx| {
++        let sent_is_optimistic = view.thread.read(cx).entries().iter().any(|entry| {
++            matches!(entry, AgentThreadEntry::UserMessage(message) if message.is_optimistic)
++        });
++        assert!(
++            sent_is_optimistic,
++            "precondition: a live-sent message is optimistic, yet sent"
++        );
++    });
++
++    thread_view.update_in(cx, |thread, window, cx| {
++        thread.add_to_queue(
++            vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
++                "queued one".to_string(),
++            ))],
++            vec![],
++            window,
++            cx,
++        );
++    });
++    cx.run_until_parked();
++
++    type_draft(&view, "draft", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "sent one",
++        "R4.4: the sent message, not the queued one"
++    );
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "sent one",
++        "R4.4: nothing older -- the queue is not history"
++    );
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "draft");
++
++    let queue_len = thread_view.read_with(cx, |thread, _| thread.message_queue.len());
++    assert_eq!(queue_len, 1, "browsing the history leaves the queue alone");
++}
+diff --git a/crates/agent_ui/src/conversation_view/tests/recall_tests.rs b/crates/agent_ui/src/conversation_view/tests/recall_tests.rs
+new file mode 100644
+index 0000000..949d577
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/tests/recall_tests.rs
+@@ -0,0 +1,580 @@
++//! Composer Up/Down recall (story 018, Task 3.1).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view.rs`'s `mod tests { .. }`, declare
++//! `mod recall_tests;` -- an inline module of a non-mod-rs file, so this resolves to
++//! `crates/agent_ui/src/conversation_view/tests/recall_tests.rs`.
++//!
++//! Behaviour-level: the tests drive the real keymap (`keymaps/default-linux.json`) with
++//! real keystrokes into a focused composer, and send through `ThreadView::send`. Only the
++//! action NAMES `agent::RecallOlderMessage` / `agent::RecallNewerMessage` are pinned
++//! (by the keymap test); no new Rust signature is.
++//!
++//! Every test ends with a step that needs the feature, so none of them is green before
++//! the feature exists -- including the ones whose first half checks that caret movement
++//! is NOT hijacked (R1.4, R2.3, R3.1, R3.2).
++
++use super::*;
++use editor::MultiBufferOffset;
++use gpui::{TestAppContext, VisualTestContext};
++use rope::Point;
++
++// ---------------------------------------------------------------------------
++// Harness -- shared with `recall_ends_tests.rs` and `recall_indices_tests.rs`
++// ---------------------------------------------------------------------------
++
++pub(super) fn bind_default_keymap(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let mut bindings = settings::KeymapFile::load_asset_allow_partial_failure(
++            "keymaps/default-linux.json",
++            cx,
++        )
++        .expect("the default keymap loads");
++        for binding in &mut bindings {
++            binding.set_meta(settings::KeybindSource::Default.meta());
++        }
++        cx.bind_keys(bindings);
++    });
++}
++
++pub(super) async fn composer_with_stub<'a>(
++    connection: &StubAgentConnection,
++    cx: &'a mut TestAppContext,
++) -> (Entity<ConversationView>, &'a mut VisualTestContext) {
++    init_test(cx);
++    bind_default_keymap(cx);
++    let (view, cx) = setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
++    add_to_workspace(view.clone(), cx);
++    (view, cx)
++}
++
++/// Sends `text` through the composer and lets the agent's turn end.
++pub(super) fn send(
++    view: &Entity<ConversationView>,
++    connection: &StubAgentConnection,
++    text: &str,
++    cx: &mut VisualTestContext,
++) {
++    connection.set_next_prompt_updates(vec![acp_v1::SessionUpdate::AgentMessageChunk(
++        acp_v1::ContentChunk::new("Done.".into()),
++    )]);
++    type_draft(view, text, cx);
++    active_thread(view, cx).update_in(cx, |thread, window, cx| thread.send(window, cx));
++    cx.run_until_parked();
++    assert_eq!(
++        composer_text(view, cx),
++        "",
++        "precondition: sending empties the composer"
++    );
++}
++
++pub(super) fn type_draft(view: &Entity<ConversationView>, text: &str, cx: &mut VisualTestContext) {
++    message_editor(view, cx).update_in(cx, |editor, window, cx| editor.set_text(text, window, cx));
++    cx.run_until_parked();
++}
++
++pub(super) fn composer_text(view: &Entity<ConversationView>, cx: &mut VisualTestContext) -> String {
++    message_editor(view, cx).read_with(cx, |editor, cx| editor.text(cx))
++}
++
++pub(super) fn focus_composer(view: &Entity<ConversationView>, cx: &mut VisualTestContext) {
++    let editor = message_editor(view, cx);
++    cx.focus(&editor);
++    cx.run_until_parked();
++}
++
++pub(super) fn press(keys: &str, cx: &mut VisualTestContext) {
++    cx.simulate_keystrokes(keys);
++    cx.run_until_parked();
++}
++
++pub(super) fn set_caret(
++    view: &Entity<ConversationView>,
++    offset: usize,
++    cx: &mut VisualTestContext,
++) {
++    message_editor(view, cx).update_in(cx, |editor, window, cx| {
++        editor.set_cursor_offset(offset, window, cx)
++    });
++    cx.run_until_parked();
++}
++
++pub(super) fn select_all(view: &Entity<ConversationView>, cx: &mut VisualTestContext) {
++    message_editor(view, cx).update_in(cx, |message_editor, window, cx| {
++        message_editor.editor().update(cx, |editor, cx| {
++            let len = editor.text(cx).len();
++            editor.change_selections(Default::default(), window, cx, |selections| {
++                selections.select_ranges([MultiBufferOffset(0)..MultiBufferOffset(len)]);
++            });
++        })
++    });
++    cx.run_until_parked();
++}
++
++/// (caret head, whether text is selected)
++pub(super) fn caret(view: &Entity<ConversationView>, cx: &mut VisualTestContext) -> (Point, bool) {
++    message_editor(view, cx).update_in(cx, |message_editor, _window, cx| {
++        message_editor.editor().update(cx, |editor, cx| {
++            let snapshot = editor.display_snapshot(cx);
++            let selection = editor.selections.newest::<Point>(&snapshot);
++            (selection.head(), !selection.is_empty())
++        })
++    })
++}
++
++// ---------------------------------------------------------------------------
++// Bindings
++// ---------------------------------------------------------------------------
++
++/// Constraint: both keymaps change; the recall actions are bound to plain Up/Down in the
++/// composer's context.
++#[gpui::test]
++fn recall_keys_are_bound_in_the_composer_in_both_keymaps(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        for keymap in ["keymaps/default-linux.json", "keymaps/default-macos.json"] {
++            let bindings = settings::KeymapFile::load_asset_allow_partial_failure(keymap, cx)
++                .expect("keymap loads");
++            for (key, action) in [
++                ("up", "agent::RecallOlderMessage"),
++                ("down", "agent::RecallNewerMessage"),
++            ] {
++                let bound = bindings.iter().any(|binding| {
++                    binding.action().name() == action
++                        && binding.keystrokes().len() == 1
++                        && binding.keystrokes()[0].unparse() == key
++                        && format!("{:?}", binding.predicate()).contains("AcpThread")
++                });
++                assert!(
++                    bound,
++                    "{keymap}: `{key}` must be bound to {action} in the composer (AcpThread > Editor)"
++                );
++            }
++        }
++    });
++}
++
++// ---------------------------------------------------------------------------
++// R1.1, R1.2, R1.3, R2.1, R2.2, R3.3
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_up_walks_back_and_down_restores_the_draft(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "first", cx);
++    send(&view, &connection, "second", cx);
++    send(&view, &connection, "third", cx);
++
++    type_draft(&view, "half-typed", cx);
++    focus_composer(&view, cx);
++
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "third",
++        "R1.1: the most recent sent message"
++    );
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "second",
++        "R1.2: the next older one"
++    );
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "first");
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "first",
++        "R1.3: stays on the oldest"
++    );
++
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "second",
++        "R2.1: the next newer one"
++    );
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "third");
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "half-typed",
++        "R2.2 / R3.3: the draft from when browsing started"
++    );
++}
++
++/// R2.2: "including an empty draft".
++#[gpui::test]
++async fn recall_down_restores_an_empty_draft(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "only message", cx);
++    focus_composer(&view, cx);
++
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "only message");
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "");
++    // Browsing ended with the restore: Down is caret movement again, nothing comes back.
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "");
++}
++
++// ---------------------------------------------------------------------------
++// R1.4 -- no history, Up is caret movement
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_up_without_sent_messages_moves_the_caret(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++
++    type_draft(&view, "abc def", cx);
++    focus_composer(&view, cx);
++    set_caret(&view, 4, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "abc def",
++        "R1.4: nothing to recall"
++    );
++    assert_eq!(
++        caret(&view, cx),
++        (Point::new(0, 0), false),
++        "R1.4: Up on the first line moves the caret as it does today"
++    );
++
++    // Once a message is sent, the same key on the same line recalls it.
++    send(&view, &connection, "hello", cx);
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "hello");
++}
++
++// ---------------------------------------------------------------------------
++// R3.1 / R3.3 -- Up below the first line is caret movement; the multi-line draft survives
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_up_on_a_later_line_moves_the_caret_first(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "sent before", cx);
++
++    let draft = "line one\nline two";
++    type_draft(&view, draft, cx);
++    focus_composer(&view, cx);
++    set_caret(&view, draft.len(), cx);
++
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        draft,
++        "R3.1: no recall from line 2"
++    );
++    assert_eq!(caret(&view, cx).0.row, 0, "R3.1: the caret moved up a line");
++
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "sent before",
++        "first line: recall"
++    );
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        draft,
++        "R3.3: the multi-line draft comes back"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R2.3 -- Down while not browsing is caret movement
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_down_when_not_browsing_moves_the_caret(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "sent before", cx);
++
++    let draft = "top\nbottom";
++    type_draft(&view, draft, cx);
++    focus_composer(&view, cx);
++    set_caret(&view, 1, cx);
++
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), draft);
++    assert_eq!(caret(&view, cx).0.row, 1, "R2.3: Down moved the caret");
++    // On the last line and not browsing: still nothing but caret movement.
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        draft,
++        "R2.3: Down on the last line recalls nothing"
++    );
++
++    set_caret(&view, 0, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "sent before");
++}
++
++// ---------------------------------------------------------------------------
++// R2.1 hostile split -- a multi-line recalled message: Down is caret movement until the
++// caret reaches its last line
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_down_on_a_multiline_message_moves_the_caret_until_the_last_line(
++    cx: &mut TestAppContext,
++) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    let multiline = "alpha one\nalpha two";
++    send(&view, &connection, multiline, cx);
++    send(&view, &connection, "beta", cx);
++    focus_composer(&view, cx);
++
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "beta");
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), multiline);
++
++    set_caret(&view, 0, cx);
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        multiline,
++        "R2.1: Down on line 1 of 2 is caret movement, not a history step"
++    );
++    assert_eq!(caret(&view, cx).0.row, 1);
++
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "beta",
++        "R2.1: last line -> next newer"
++    );
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "", "R2.2: the empty draft");
++}
++
++// ---------------------------------------------------------------------------
++// R3.2 -- a selection is never hijacked
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_keys_leave_a_selection_alone(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "sent before", cx);
++
++    type_draft(&view, "draft text", cx);
++    focus_composer(&view, cx);
++
++    select_all(&view, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "draft text",
++        "R3.2: Up with a selection"
++    );
++
++    set_caret(&view, 5, cx);
++    press("shift-up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "draft text",
++        "R3.2: Shift-Up extends"
++    );
++    assert!(caret(&view, cx).1, "R3.2: Shift-Up made a selection");
++
++    set_caret(&view, 0, cx);
++    press("up", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "sent before",
++        "no selection: recall"
++    );
++
++    // Browsing; selecting is not editing, and Down with a selection is not a step.
++    select_all(&view, cx);
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "sent before",
++        "R3.2: Down with a selection does not walk"
++    );
++    set_caret(&view, "sent before".len(), cx);
++    press("down", cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        "draft text",
++        "the saved draft survives"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// R1.5 -- mentions and attachments come back as the edit-message path rebuilds them
++// ---------------------------------------------------------------------------
++
++#[gpui::test]
++async fn recall_restores_mentions_and_attachments_like_edit_message(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    let thread_view = active_thread(&view, cx);
++    let session_id =
++        thread_view.read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
++
++    let mention_uri = "file:///project/file.txt";
++    cx.update(|_, cx| {
++        for block in [
++            acp_v1::ContentBlock::Text(acp_v1::TextContent::new("Look at ".to_string())),
++            acp_v1::ContentBlock::ResourceLink(acp_v1::ResourceLink::new("file.txt", mention_uri)),
++            png_image(),
++        ] {
++            connection.send_update(
++                session_id.clone(),
++                acp_v1::SessionUpdate::UserMessageChunk(acp_v1::ContentChunk::new(block)),
++                cx,
++            );
++        }
++        connection.send_update(
++            session_id.clone(),
++            acp_v1::SessionUpdate::AgentMessageChunk(acp_v1::ContentChunk::new("Looked.".into())),
++            cx,
++        );
++    });
++    cx.run_until_parked();
++
++    let (user_ix, reference_editor) = thread_view.read_with(cx, |view, cx| {
++        let entries = view.thread.read(cx).entries();
++        let user_ixs: Vec<usize> = entries
++            .iter()
++            .enumerate()
++            .filter(|(_, entry)| matches!(entry, AgentThreadEntry::UserMessage(_)))
++            .map(|(ix, _)| ix)
++            .collect();
++        assert_eq!(user_ixs.len(), 1, "precondition: one operator message");
++        let editor = view
++            .entry_view_state
++            .read(cx)
++            .entry(user_ixs[0])
++            .and_then(|entry| entry.message_editor())
++            .cloned()
++            .expect("precondition: the edit-message editor exists for the user message");
++        (user_ixs[0], editor)
++    });
++    let _ = user_ix;
++    let expected_text = reference_editor.read_with(cx, |editor, cx| editor.text(cx));
++    let expected_blocks =
++        reference_editor.read_with(cx, |editor, cx| editor.draft_content_blocks_snapshot(cx));
++    let expected_mentions =
++        reference_editor.read_with(cx, |editor, cx| editor.mention_set().read(cx).mentions());
++
++    focus_composer(&view, cx);
++    press("up", cx);
++
++    let composer = message_editor(&view, cx);
++    assert_eq!(
++        composer_text(&view, cx),
++        expected_text,
++        "R1.5: same text as the edit-message reconstruction"
++    );
++    let blocks = composer.read_with(cx, |editor, cx| editor.draft_content_blocks_snapshot(cx));
++    assert_eq!(
++        blocks, expected_blocks,
++        "R1.5: same content blocks as edit-message"
++    );
++    assert!(
++        blocks.iter().any(|block| matches!(
++            block,
++            acp_v2::ContentBlock::ResourceLink(link) if link.uri == mention_uri
++        )),
++        "R1.5: the mention is a mention again, not plain text: {blocks:?}"
++    );
++    assert!(
++        blocks
++            .iter()
++            .any(|block| matches!(block, acp_v2::ContentBlock::Image(_))),
++        "R1.5: the attachment comes back: {blocks:?}"
++    );
++    let mentions = composer.read_with(cx, |editor, cx| editor.mention_set().read(cx).mentions());
++    assert_eq!(
++        mentions, expected_mentions,
++        "R1.5: same mention set as edit-message"
++    );
++}
++
++// ---------------------------------------------------------------------------
++// Review follow-ups (not in the authored set): the other two keymaps, and the
++// persisted draft while browsing
++// ---------------------------------------------------------------------------
++
++/// Windows has its own `AcpThread > Editor` block, and vim.json loads after the
++/// default keymaps, so without its own block vim::Up/Down would shadow recall in
++/// normal mode.
++#[gpui::test]
++fn recall_keys_are_bound_on_windows_and_in_vim(cx: &mut TestAppContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        for (keymap, context) in [
++            ("keymaps/default-windows.json", "AcpThread"),
++            ("keymaps/vim.json", "MessageEditor"),
++        ] {
++            let bindings = settings::KeymapFile::load_asset_allow_partial_failure(keymap, cx)
++                .expect("keymap loads");
++            for (key, action) in [
++                ("up", "agent::RecallOlderMessage"),
++                ("down", "agent::RecallNewerMessage"),
++            ] {
++                let bound = bindings.iter().any(|binding| {
++                    binding.action().name() == action
++                        && binding.keystrokes().len() == 1
++                        && binding.keystrokes()[0].unparse() == key
++                        && format!("{:?}", binding.predicate()).contains(context)
++                });
++                assert!(bound, "{keymap}: `{key}` must be bound to {action}");
++            }
++        }
++    });
++}
++
++/// A recalled message is shown, not written: the thread's persisted draft stays
++/// the one browsing started from, so switching away mid-browse loses nothing.
++#[gpui::test]
++async fn recall_does_not_persist_a_recalled_message_as_the_draft(cx: &mut TestAppContext) {
++    let connection = StubAgentConnection::new();
++    let (view, cx) = composer_with_stub(&connection, cx).await;
++    send(&view, &connection, "sent before", cx);
++
++    type_draft(&view, "my draft", cx);
++    let thread_view = active_thread(&view, cx);
++    let persisted = |cx: &mut VisualTestContext| {
++        thread_view.read_with(cx, |view, cx| {
++            view.thread
++                .read(cx)
++                .draft_prompt()
++                .map(|blocks| blocks.to_vec())
++        })
++    };
++    let before = persisted(cx);
++    assert!(
++        before.is_some(),
++        "precondition: the typed draft was persisted"
++    );
++
++    focus_composer(&view, cx);
++    press("up", cx);
++    assert_eq!(composer_text(&view, cx), "sent before");
++    assert_eq!(
++        persisted(cx),
++        before,
++        "the recalled message is not the draft"
++    );
++
++    press("down", cx);
++    assert_eq!(composer_text(&view, cx), "my draft");
++}
+diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
+index e9d3deb..3e769b3 100644
+--- a/crates/agent_ui/src/conversation_view/thread_view.rs
++++ b/crates/agent_ui/src/conversation_view/thread_view.rs
+@@ -1,5 +1,6 @@
+ use crate::{
+-    DEFAULT_THREAD_TITLE, SelectPermissionGranularity,
++    DEFAULT_THREAD_TITLE, RecallNewerMessage, RecallOlderMessage, SelectPermissionGranularity,
++    conversation_view::sent_history::{Recall, SentMessageHistory},
+     conversation_view::thread_search_bar::{ThreadSearchBar, ThreadSearchBarEvent},
+     open_abs_path_at_point, project_path_for_file_link,
+     thread_metadata_store::{ThreadId, ThreadMetadataStore},
+@@ -60,6 +61,11 @@ use super::*;
+ 
+ const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/articles/15425996-data-retention-practices-for-mythos-class-models";
+ 
++struct ComposerCaretRows {
++    on_first: bool,
++    on_last: bool,
++}
++
+ #[derive(Default)]
+ struct ThreadFeedbackState {
+     feedback: Option<ThreadFeedback>,
+@@ -612,6 +618,10 @@ pub struct ThreadView {
+     pub should_be_following: bool,
+     pub editing_message: Option<usize>,
+     pub message_queue: MessageQueue,
++    sent_history: SentMessageHistory,
++    /// The composer's buffer version right after the last recall, so the edit
++    /// event the recall itself causes is not taken for the operator's edit.
++    recalled_composer_version: Option<clock::Global>,
+     pub turn_fields: TurnFields,
+     pub discarded_partial_edits: HashSet<acp_v2::ToolCallId>,
+     pub is_loading_contents: bool,
+@@ -982,7 +992,9 @@ impl ThreadView {
+         }
+ 
+         subscriptions.push(cx.observe(&message_editor, |this, editor, cx| {
+-            if editor.read(cx).editor().read(cx).read_only(cx) {
++            // A recalled message is not the operator's draft: while browsing, the
++            // draft last persisted (the one browsing started from) stays saved.
++            if editor.read(cx).editor().read(cx).read_only(cx) || this.sent_history.is_browsing() {
+                 this._draft_resolve_task.take();
+                 return;
+             }
+@@ -1000,7 +1012,9 @@ impl ThreadView {
+                     None
+                 };
+                 this.update(cx, |this, cx| {
+-                    if this.message_editor.read(cx).editor().read(cx).read_only(cx) {
++                    if this.message_editor.read(cx).editor().read(cx).read_only(cx)
++                        || this.sent_history.is_browsing()
++                    {
+                         return;
+                     }
+                     this.thread.update(cx, |thread, cx| {
+@@ -1056,6 +1070,8 @@ impl ThreadView {
+             should_be_following: false,
+             editing_message: None,
+             message_queue: MessageQueue::default(),
++            sent_history: SentMessageHistory::default(),
++            recalled_composer_version: None,
+             turn_fields: TurnFields::default(),
+             discarded_partial_edits: HashSet::default(),
+             is_loading_contents: false,
+@@ -1181,7 +1197,13 @@ impl ThreadView {
+                 self.run_local_command(*command, window, cx);
+             }
+             MessageEditorEvent::InputAttempted { .. } => {}
+-            MessageEditorEvent::Edited => {}
++            MessageEditorEvent::Edited => {
++                if self.sent_history.is_browsing()
++                    && self.composer_version(cx) != self.recalled_composer_version
++                {
++                    self.sent_history.end();
++                }
++            }
+         }
+     }
+ 
+@@ -1783,6 +1805,7 @@ impl ThreadView {
+     }
+ 
+     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.sent_history.end();
+         if self.message_editor.read(cx).editor().read(cx).read_only(cx) {
+             self.handle_thread_error(
+                 anyhow!(
+@@ -2818,6 +2841,207 @@ impl ThreadView {
+         self.move_queued_message_to_main_editor(last_id, None, None, window, cx);
+     }
+ 
++    fn recall_older_message(
++        &mut self,
++        _: &RecallOlderMessage,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !self.can_recall_into_composer(cx) {
++            cx.propagate();
++            return;
++        }
++        // Up in an empty composer pulls the last queued message back first;
++        // propagating lets editor::MoveUp reach `handle_message_editor_move_up`.
++        if !self.sent_history.is_browsing()
++            && !self.message_queue.is_empty()
++            && self.message_editor.read(cx).is_empty(cx)
++        {
++            cx.propagate();
++            return;
++        }
++        if !self
++            .composer_caret_rows(cx)
++            .is_some_and(|rows| rows.on_first)
++        {
++            cx.propagate();
++            return;
++        }
++        let step = if self.sent_history.is_browsing() {
++            self.sent_history.older()
++        } else {
++            let draft = self
++                .message_editor
++                .read(cx)
++                .draft_content_blocks_snapshot(cx);
++            let step = self
++                .sent_history
++                .start(self.thread.read(cx).entries(), draft);
++            for &entry_ix in self.sent_history.skipped_entries() {
++                log::debug!(
++                    "composer history: skipped sent message without content (session {}, entry {entry_ix})",
++                    self.thread.read(cx).session_id()
++                );
++            }
++            step
++        };
++        let Some(step) = step else {
++            cx.propagate();
++            return;
++        };
++        self.show_recalled(step, true, window, cx);
++    }
++
++    fn recall_newer_message(
++        &mut self,
++        _: &RecallNewerMessage,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !self.sent_history.is_browsing()
++            || !self.can_recall_into_composer(cx)
++            || !self
++                .composer_caret_rows(cx)
++                .is_some_and(|rows| rows.on_last)
++        {
++            cx.propagate();
++            return;
++        }
++        let Some(step) = self.sent_history.newer() else {
++            cx.propagate();
++            return;
++        };
++        self.show_recalled(step, false, window, cx);
++    }
++
++    /// A read-only composer holds a draft that cannot be edited or sent (as in
++    /// `move_queued_message_to_main_editor`), and while a send resolves its
++    /// contents the composer still holds the text being sent.
++    fn can_recall_into_composer(&self, cx: &App) -> bool {
++        !self.is_loading_contents && !self.message_editor.read(cx).editor().read(cx).read_only(cx)
++    }
++
++    /// Where the composer's caret is, or `None` when Up/Down must keep their
++    /// editor meaning: a selection, several carets, or an open menu.
++    fn composer_caret_rows(&self, cx: &mut Context<Self>) -> Option<ComposerCaretRows> {
++        let editor = self.message_editor.read(cx).editor().clone();
++        editor.update(cx, |editor, cx| {
++            if editor.context_menu_visible() || editor.selections.count() != 1 {
++                return None;
++            }
++            let snapshot = editor.display_snapshot(cx);
++            let selection = editor.selections.newest_display(&snapshot);
++            if !selection.is_empty() {
++                return None;
++            }
++            // Display rows, so Up on the second visual row of a wrapped first
++            // line still moves the caret.
++            let row = selection.head().row();
++            Some(ComposerCaretRows {
++                on_first: row.0 == 0,
++                on_last: row == snapshot.max_point().row(),
++            })
++        })
++    }
++
++    /// Older steps leave the caret at the start, so the next Up keeps walking
++    /// back even through a multi-line message; newer steps and the draft leave
++    /// it at the end, for the same reason with Down.
++    fn show_recalled(
++        &mut self,
++        step: Recall,
++        caret_at_start: bool,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let (blocks, is_draft, caret_at_start) = match step {
++            Recall::Entry(entry_ix) => {
++                let blocks = self
++                    .thread
++                    .read(cx)
++                    .entries()
++                    .get(entry_ix)
++                    .and_then(|entry| entry.user_message())
++                    .filter(|message| !message.indented)
++                    .map(|message| message.content.source_blocks().to_vec());
++                let Some(blocks) = blocks else {
++                    log::warn!(
++                        "composer history: entry {entry_ix} is no longer a sent message (session {}); browsing ended",
++                        self.thread.read(cx).session_id()
++                    );
++                    self.abandon_sent_history(window, cx);
++                    return;
++                };
++                (blocks, false, caret_at_start)
++            }
++            Recall::Draft(blocks) => (blocks, true, false),
++        };
++        self.message_editor.update(cx, |editor, cx| {
++            if is_draft {
++                editor.set_message(blocks, window, cx);
++            } else {
++                editor.set_source_message(blocks, window, cx);
++            }
++            let caret = if caret_at_start {
++                0
++            } else {
++                editor.text(cx).len()
++            };
++            editor.set_cursor_offset(caret, window, cx);
++        });
++        self.recalled_composer_version = self.composer_version(cx);
++        cx.stop_propagation();
++        cx.notify();
++    }
++
++    /// Every path an operator message takes into the thread -- the composer, the
++    /// message queue, resubmitting an edited earlier message -- ends here, so
++    /// none has to remember to end browsing. The composer's own send has already
++    /// ended it before clearing the composer, so its entry finds nothing to undo.
++    pub(super) fn end_sent_history_on_new_entry(
++        &mut self,
++        entry_ix: usize,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let is_operator_message = self
++            .thread
++            .read(cx)
++            .entries()
++            .get(entry_ix)
++            .and_then(|entry| entry.user_message())
++            .is_some_and(|message| !message.indented);
++        if is_operator_message {
++            self.abandon_sent_history(window, cx);
++        }
++    }
++
++    /// Ends browsing with the composer back on the draft browsing started from:
++    /// a recalled message left there would otherwise pass for the draft.
++    fn abandon_sent_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let Some(draft) = self.sent_history.abandon() else {
++            return;
++        };
++        self.message_editor.update(cx, |editor, cx| {
++            editor.set_message(draft, window, cx);
++            let end = editor.text(cx).len();
++            editor.set_cursor_offset(end, window, cx);
++        });
++        self.recalled_composer_version = self.composer_version(cx);
++        cx.notify();
++    }
++
++    fn composer_version(&self, cx: &App) -> Option<clock::Global> {
++        self.message_editor
++            .read(cx)
++            .editor()
++            .read(cx)
++            .buffer()
++            .read(cx)
++            .as_singleton()
++            .map(|buffer| buffer.read(cx).version())
++    }
++
+     // editor methods
+ 
+     pub fn expand_message_editor(
+@@ -4992,6 +5216,8 @@ impl ThreadView {
+             .bg(editor_bg_color)
+             .justify_center()
+             .on_action(cx.listener(Self::handle_message_editor_move_up))
++            .on_action(cx.listener(Self::recall_older_message))
++            .on_action(cx.listener(Self::recall_newer_message))
+             .map(|this| {
+                 if has_messages {
+                     this.on_action(cx.listener(Self::expand_message_editor))

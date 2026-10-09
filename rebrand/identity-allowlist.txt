@@ -1,0 +1,18 @@
+crates/auto_update/src/auto_update.rs	assert_eq!(path, tmp_dir.path().join("zed"));
+crates/auto_update/src/auto_update.rs	let dest_path = tmp_dir.path().join("zed");
+crates/auto_update/src/auto_update.rs	let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
+crates/auto_update/src/auto_update.rs	let extracted = temp_dir.path().join("zed");
+crates/cli/src/main.rs	let invocation_args = ["--zed".into(), "/custom/zed-editor".into()];
+crates/install_cli/src/install_cli_binary.rs	const LINUX_PROMPT_DETAIL: &str = "If you installed Zed from our official release add ~/.local/bin to your PATH.\n\nIf you installed Zed from a different source like your package manager, then you may need to create an alias/symlink manually.\n\nDepending on your package manager, the CLI might be named zeditor, zedit, zed-editor or something else.";
+crates/release_channel/src/lib.rs	ReleaseChannel::Dev => "dev.zed.Zed-Dev",
+crates/release_channel/src/lib.rs	ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
+crates/release_channel/src/lib.rs	ReleaseChannel::Preview => "dev.zed.Zed-Preview",
+crates/release_channel/src/lib.rs	ReleaseChannel::Stable => "dev.zed.Zed",
+crates/sandbox/src/windows_wsl.rs	echo 'the downloaded zed tarball did not contain a libexec/zed-editor binary' >&2
+crates/sandbox/src/windows_wsl.rs	helper=$(find "$dest" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true)
+crates/sandbox/src/windows_wsl.rs	helper_src=$(find "$tmp/unpacked" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true)
+crates/zed/src/visual_test_runner.rs	let bar_zed = canonical_temp.join("code").join("bar").join("zed");
+crates/zed/src/visual_test_runner.rs	let baz_zed = canonical_temp.join("code").join("baz").join("zed");
+crates/zed/src/visual_test_runner.rs	let code_zed = canonical_temp.join("code").join("zed");
+crates/zed/src/visual_test_runner.rs	let foo_zed = canonical_temp.join("code").join("foo").join("zed");
+crates/zed/src/visual_test_runner.rs	let workspace2_dir = canonical_temp.join("zed");

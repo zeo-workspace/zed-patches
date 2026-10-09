@@ -1,0 +1,1509 @@
+From c9d5a29d447b6f911bdec8b336b57e08ba86a6ea Mon Sep 17 00:00:00 2001
+From: zed-patches <zed-patches@localhost>
+Date: Tue, 6 Oct 2026 20:41:59 -0300
+Subject: [PATCH] agent_ui: a slash command in an agent's code block opens a
+ new thread
+
+Agents often end a turn by recommending the next command -- `/epic:epic
+stories run 014`, say -- in a code block. The operator then copied it, opened a
+new thread and pasted it. A code block in an agent's message that holds one
+slash command now carries a second button beside Copy: it opens a new thread
+with the same agent and puts the command in that thread's composer (story 020).
+
+**Prefill, never send.** The command goes in through the existing
+`AgentInitialContent::ContentBlock { auto_submit: false }` path and waits for
+the operator to read it and press Enter. Sending on the operator's behalf was
+ruled out: a recommended command can be wrong, stale or for another thread.
+
+**Which blocks qualify.** `slash_command_in_code_block` (crate root) answers by
+shape: exactly one non-empty line whose first non-whitespace character is `/`,
+trimmed, and not a bare `/`. Two lines, a prompt prefix (`$ /help`) or an
+`echo /help` do not. It decides by shape, not by the agent's command list, so a
+lone `/usr/bin/foo` qualifies too -- the operator reviews before sending.
+
+**Code blocks only, agent messages only.** Inline code spans are left alone by
+choice. The button is drawn by a new markdown hook,
+`MarkdownElement::on_code_block_action`, which asks the caller about each code
+block and, on `Some`, renders an `IconButton` (`ThreadFromSummary`, tooltip "New
+Thread with This Command") before Copy, with Copy's visibility -- shown on
+hover with it, absent when Copy is hidden -- and an element id unique per
+markdown entity. `crates/markdown` cannot depend on `agent_ui`, hence a hook
+like `on_url_click` rather than the policy itself. In `agent_ui` only the
+assistant-message branch sets it: `render_message_content` gains
+`offers_slash_commands`, false for thinking blocks, which share that path, and
+tool output, user messages, compaction errors and the composer preview never
+reach it.
+
+**Opening the thread.** `AgentPanel::new_thread_with_prefilled_prompt(agent,
+text)` opens it through `external_thread`, focused. The click resolves the
+agent with `Agent::from(thread_view.agent_id)`. An agent that is no longer
+configured (a custom agent the project's agent-server store does not list --
+the same check `create_thread` uses) opens nothing and shows an error toast
+naming it, logged at WARN. A successful open logs one INFO line with the agent
+id, the source session and the command's length, never its text. The source
+thread is left as it was.
+
+Tests: 9 unit tests for the predicate, 6 for the markdown hook (asked with the
+block's code, declined blocks, Copy hidden, hover, per-block and per-entity
+identity), 3 for the panel method and 4 GPUI tests that sweep the agent panel
+for the button and click it (only the qualifying block, not on thinking or
+user messages, the trimmed command lands in the new composer unsent).
+
+Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
+0014 and 0026, and needs no adapter feature.
+---
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 0a61759..f501197 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2119,6 +2119,72 @@ impl AgentPanel {
+         self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+     }
+ 
++    /// Opens a new thread for `agent` with `text` in its composer -- never sent:
++    /// the operator reviews it and sends it. An agent that is no longer
++    /// configured opens nothing and says so. `source_session` is the session whose
++    /// message offered the command -- a subagent's, when the click came from one,
++    /// which the panel's active thread (always the root) would misreport.
++    pub fn new_thread_with_prefilled_prompt(
++        &mut self,
++        agent: Agent,
++        source_session: acp_v2::SessionId,
++        text: String,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let agent_id = agent.id();
++        let is_available = match &agent {
++            Agent::Custom { id } => self
++                .project
++                .read(cx)
++                .agent_server_store()
++                .read(cx)
++                .external_agents()
++                .any(|known| known == id),
++            _ => true,
++        };
++        if !is_available {
++            log::warn!(
++                "prefilled thread not opened: agent {agent_id} is not available (source session {source_session})"
++            );
++            struct PrefilledAgentUnavailableToast;
++            self.workspace
++                .update(cx, |workspace, cx| {
++                    workspace.show_toast(
++                        workspace::Toast::new(
++                            workspace::notifications::NotificationId::unique::<
++                                PrefilledAgentUnavailableToast,
++                            >(),
++                            format!(
++                                "Can't open a new thread: agent \"{agent_id}\" is not available"
++                            ),
++                        ),
++                        cx,
++                    );
++                })
++                .log_err();
++            return;
++        }
++        log::info!(
++            "opening a prefilled thread: agent {agent_id}, source session {source_session}, command length {}",
++            text.len()
++        );
++        self.external_thread(
++            Some(agent),
++            None,
++            None,
++            None,
++            Some(AgentInitialContent::ContentBlock {
++                blocks: vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(text))],
++                auto_submit: false,
++            }),
++            true,
++            AgentThreadSource::AgentPanel,
++            window,
++            cx,
++        );
++    }
++
+     fn set_selected_agent_and_persist(&mut self, agent: Agent, cx: &mut Context<Self>) {
+         if self.selected_agent != agent {
+             self.selected_agent = agent.clone();
+@@ -7402,6 +7468,12 @@ pub(crate) fn scroll_to_root_tool_call(
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    mod prefilled_prompt_tests;
++
++    mod slash_command_button_tests;
++
++    mod slash_command_contract_tests;
+     use crate::NewWorktreeBranchTarget;
+     use crate::conversation_view::tests::{StubAgentServer, init_test};
+     use crate::test_support::{
+diff --git a/crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs b/crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs
+new file mode 100644
+index 0000000..5a85d06
+--- /dev/null
++++ b/crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs
+@@ -0,0 +1,305 @@
++//! `AgentPanel::new_thread_with_prefilled_prompt` (story 020, Task 4.1; R2.1-R2.5, Q4).
++//!
++//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
++//! `mod prefilled_prompt_tests;` -- an inline module of a non-mod-rs file, so this
++//! resolves to `crates/agent_ui/src/agent_panel/tests/prefilled_prompt_tests.rs`.
++//! `slash_command_button_tests.rs` and `slash_command_contract_tests.rs` reuse the
++//! harness below and need this module declared beside them.
++//!
++//! Contract: `pub fn new_thread_with_prefilled_prompt(&mut self, agent: Agent, text: String,
++//! window: &mut Window, cx: &mut Context<Self>)`. Behaviour asserted: a new thread for that
++//! agent becomes active with `text` in its focused composer and nothing sent; the source
++//! thread is untouched and kept; an agent that is not available raises one toast and
++//! opens nothing.
++//!
++//! Not asserted here (no log capture in these tests): the INFO line of R3.1 and the WARN
++//! line of the unavailable path -- reviewed, not tested.
++
++use std::{path::Path, time::Duration};
++
++use acp_thread::{AcpThread, StubAgentConnection};
++use agent_client_protocol::schema::v1 as acp;
++use fs::FakeFs;
++use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, Workspace};
++
++use crate::conversation_view::tests::init_test;
++use crate::test_support::open_thread_with_custom_connection;
++use crate::{Agent, AgentPanel};
++
++pub(super) const COMMAND: &str = "/epic:epic stories run 014";
++
++/// A visible agent panel in a workspace window.
++pub(super) async fn setup_panel_in_workspace(
++    cx: &mut TestAppContext,
++) -> (Entity<AgentPanel>, Entity<Workspace>, VisualTestContext) {
++    init_test(cx);
++    cx.update(|cx| {
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    fs.insert_tree("/project", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
++    let multi_workspace =
++        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace
++        .read_with(cx, |multi_workspace, _cx| {
++            multi_workspace.workspace().clone()
++        })
++        .unwrap();
++    let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
++    cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
++    let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
++        let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
++        workspace.add_panel(panel.clone(), window, cx);
++        workspace.focus_panel::<AgentPanel>(window, cx);
++        panel
++    });
++    cx.run_until_parked();
++    (panel, workspace, cx)
++}
++
++/// Opens a thread on a stub connection whose agent id is `stub` (so the agent resolves to
++/// the always-available `Agent::Stub`), sends `prompt`, and lets the stub answer with
++/// `reply` (agent message chunks and/or thought chunks).
++pub(super) fn open_source_thread(
++    panel: &Entity<AgentPanel>,
++    prompt: &str,
++    reply: Vec<acp::SessionUpdate>,
++    cx: &mut VisualTestContext,
++) -> Entity<AcpThread> {
++    let connection = StubAgentConnection::new();
++    open_thread_with_custom_connection(panel, connection.clone(), cx);
++    connection.set_next_prompt_updates(reply);
++    let thread_view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
++    let message_editor = thread_view.read_with(cx, |view, _cx| view.message_editor.clone());
++    message_editor.update_in(cx, |editor, window, cx| editor.set_text(prompt, window, cx));
++    thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
++    cx.run_until_parked();
++    panel.read_with(cx, |panel, cx| panel.active_agent_thread(cx).unwrap())
++}
++
++pub(super) fn agent_says(text: &str) -> acp::SessionUpdate {
++    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(text.into()))
++}
++
++pub(super) fn agent_thinks(text: &str) -> acp::SessionUpdate {
++    acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(text.into()))
++}
++
++pub(super) fn notification_count(workspace: &Entity<Workspace>, cx: &VisualTestContext) -> usize {
++    workspace.read_with(cx, |workspace, _| workspace.notification_ids().len())
++}
++
++/// The agent id of the active conversation.
++pub(super) fn active_agent_id(
++    panel: &Entity<AgentPanel>,
++    cx: &VisualTestContext,
++) -> project::AgentId {
++    panel.read_with(cx, |panel, cx| {
++        panel
++            .active_conversation_view()
++            .expect("a conversation is active")
++            .read(cx)
++            .agent_key()
++            .id()
++    })
++}
++
++pub(super) fn entry_count(thread: &Entity<AcpThread>, cx: &VisualTestContext) -> usize {
++    thread.read_with(cx, |thread, _| thread.entries().len())
++}
++
++/// Lets any deferred work (a would-be auto-submit included) run out.
++pub(super) fn settle(cx: &mut VisualTestContext) {
++    cx.run_until_parked();
++    cx.executor().advance_clock(Duration::from_secs(5));
++    cx.run_until_parked();
++}
++
++/// Asserts the active thread is a new one, on the agent whose id is `agent_id`, holding
++/// exactly `command` in its focused composer, with nothing sent.
++pub(super) fn assert_prefilled_new_thread(
++    panel: &Entity<AgentPanel>,
++    source: &Entity<AcpThread>,
++    agent_id: &project::AgentId,
++    command: &str,
++    cx: &mut VisualTestContext,
++) {
++    let active = panel
++        .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
++        .filter(|thread| thread != source);
++    let new_thread_id = panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let conversation = panel
++        .read_with(cx, |panel, _| panel.active_conversation_view().cloned())
++        .expect("a conversation is active");
++    let source_session = source.read_with(cx, |thread, _| thread.session_id().clone());
++    assert_ne!(
++        active
++            .as_ref()
++            .map(|t| t.read_with(cx, |t, _| t.session_id().clone())),
++        Some(source_session),
++        "R2.1: a NEW thread is active, not the source"
++    );
++    assert_eq!(
++        &conversation.read_with(cx, |view, _| view.agent_key().id()),
++        agent_id,
++        "R2.1: the new thread runs the same agent"
++    );
++    assert_eq!(
++        panel.read_with(cx, |panel, cx| panel.editor_text(new_thread_id, cx)),
++        Some(command.to_string()),
++        "R2.2: the composer holds exactly the command"
++    );
++    if let Some(thread) = active {
++        assert_eq!(
++            entry_count(&thread, cx),
++            0,
++            "R2.3: nothing is sent until the operator sends it"
++        );
++    }
++    let thread_view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
++    let message_editor = thread_view.read_with(cx, |view, _| view.message_editor.clone());
++    assert!(
++        cx.update(|window, cx| message_editor.focus_handle(cx).contains_focused(window, cx)),
++        "R2.2: the composer has focus"
++    );
++}
++
++#[gpui::test]
++async fn test_prefilled_prompt_opens_a_new_thread_with_the_text_unsent(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "what next?", vec![agent_says("Run it.")], &mut cx);
++    let source_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let source_entries = entry_count(&source, &cx);
++    assert!(
++        source_entries >= 2,
++        "precondition: the source thread has a turn"
++    );
++    let toasts = notification_count(&workspace, &cx);
++
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session.clone(),
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    assert_prefilled_new_thread(&panel, &source, &Agent::Stub.id(), COMMAND, &mut cx);
++    assert_ne!(
++        panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap()),
++        source_id
++    );
++    // R2.4: the source thread is unchanged and still kept by the panel.
++    assert_eq!(
++        entry_count(&source, &cx),
++        source_entries,
++        "R2.4: source untouched"
++    );
++    assert!(
++        panel.read_with(&cx, |panel, _| panel
++            .retained_threads()
++            .contains_key(&source_id)),
++        "R2.4: the source thread is still kept"
++    );
++    // An available agent raises no error.
++    assert_eq!(
++        notification_count(&workspace, &cx),
++        toasts,
++        "no toast on success"
++    );
++}
++
++#[gpui::test]
++async fn test_prefilled_prompt_keeps_the_text_verbatim(cx: &mut TestAppContext) {
++    // The panel does not reinterpret the text: what it is given is what the composer gets
++    // (a mention-like `@`, a second slash, interior spacing).
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let text = "/review  @src/main.rs /tmp/x";
++
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session.clone(),
++            text.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    assert_prefilled_new_thread(&panel, &source, &Agent::Stub.id(), text, &mut cx);
++}
++
++#[gpui::test]
++async fn test_prefilled_prompt_for_an_unavailable_agent_toasts_and_opens_nothing(
++    cx: &mut TestAppContext,
++) {
++    let (panel, workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let source_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let source_conversation = panel
++        .read_with(&cx, |panel, _| panel.active_conversation_view().cloned())
++        .unwrap();
++    let source_entries = entry_count(&source, &cx);
++    let toasts = notification_count(&workspace, &cx);
++
++    // A custom agent the agent-server store does not know: removed from settings since
++    // the source thread was opened.
++    let retired = Agent::Custom {
++        id: "retired-agent".into(),
++    };
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.new_thread_with_prefilled_prompt(
++            retired,
++            source_session.clone(),
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    assert_eq!(
++        notification_count(&workspace, &cx),
++        toasts + 1,
++        "R2.5/Q4: exactly one error toast"
++    );
++    assert_eq!(
++        panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap()),
++        source_id,
++        "R2.5: no thread is opened -- the source stays active"
++    );
++    assert_eq!(
++        panel
++            .read_with(&cx, |panel, _| panel.active_conversation_view().cloned())
++            .map(|view| view.entity_id()),
++        Some(source_conversation.entity_id()),
++        "R2.5: no new conversation replaces the source"
++    );
++    assert!(
++        !panel
++            .read_with(&cx, |panel, cx| panel.retained_threads().values().any(
++                |view| view.read(cx).agent_key().id().as_ref() == "retired-agent"
++            )),
++        "R2.5: no thread for the unavailable agent is kept either"
++    );
++    assert_eq!(entry_count(&source, &cx), source_entries);
++    assert_eq!(
++        panel.read_with(&cx, |panel, cx| panel.editor_text(source_id, cx)),
++        None,
++        "the source composer did not receive the command"
++    );
++}
+diff --git a/crates/agent_ui/src/agent_panel/tests/slash_command_button_tests.rs b/crates/agent_ui/src/agent_panel/tests/slash_command_button_tests.rs
+new file mode 100644
+index 0000000..c08aff6
+--- /dev/null
++++ b/crates/agent_ui/src/agent_panel/tests/slash_command_button_tests.rs
+@@ -0,0 +1,180 @@
++//! The "new thread with this command" button appears only on qualifying code blocks of
++//! agent messages (story 020, Task 5.1; R1.1-R1.5, R2.1).
++//!
++//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
++//! `mod slash_command_button_tests;` beside `mod prefilled_prompt_tests;` (whose harness
++//! this reuses). Resolves to `crates/agent_ui/src/agent_panel/tests/slash_command_button_tests.rs`.
++//!
++//! How the button is found: it is a `ui::IconButton`, which paints under the debug
++//! selector `ICON-{icon:?}`. These tests pin the icon to `IconName::ThreadFromSummary`
++//! (painted nowhere else in Zed). If the implementation picks another icon, change
++//! `ACTION` -- the one audited surface pin -- and check that icon is not painted
++//! elsewhere in the panel (the precondition in `sweep` catches that).
++//!
++//! The code-block buttons show on hover, so `sweep` moves the mouse over the whole window
++//! and records every distinct bounds at which the action and the code block's Wrap button
++//! (`ICON-TextWrap`, painted only in a hovered code block's row) are painted. Copy cannot
++//! be the witness: a debug selector keeps only the last bounds painted in a frame, and the
++//! thread's own always-visible Copy button (`ICON-Copy`, below the message) paints after
++//! the code blocks, so `ICON-Copy` never reports a code block's Copy. Every test
++//! carries a qualifying control block, so each one needs the feature to pass, and asserts
++//! that the ONLY button revealed hands over the control's command.
++
++use std::collections::BTreeSet;
++
++use gpui::{Bounds, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, px};
++
++use super::prefilled_prompt_tests::*;
++
++pub(super) const ACTION: &str = "ICON-ThreadFromSummary";
++const WRAP: &str = "ICON-TextWrap";
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn key(bounds: Bounds<Pixels>) -> (i32, i32) {
++    (
++        f32::from(bounds.origin.x).round() as i32,
++        f32::from(bounds.origin.y).round() as i32,
++    )
++}
++
++pub(super) struct Sweep {
++    pub actions: Vec<Bounds<Pixels>>,
++    pub wraps: usize,
++}
++
++/// Hovers a grid over the window; returns each distinct action bounds and how many
++/// distinct code-block button rows were revealed (one Wrap button per block). Asserts
++/// R1.5's invariant on every frame: the action is painted only in a revealed row -- it
++/// follows the row's hover visibility, never shows on its own.
++pub(super) fn sweep(cx: &mut VisualTestContext) -> Sweep {
++    cx.simulate_mouse_move(Point::new(px(1.), px(1.)), None, Modifiers::none());
++    draw(cx);
++    assert!(
++        cx.debug_bounds(ACTION).is_none(),
++        "precondition: {ACTION} must not be painted with the mouse away (icon collision?)"
++    );
++    let mut seen_actions = BTreeSet::new();
++    let mut actions = Vec::new();
++    let mut wraps = BTreeSet::new();
++    for x in (60..1200).step_by(120) {
++        for y in (4..800).step_by(10) {
++            cx.simulate_mouse_move(
++                Point::new(px(x as f32), px(y as f32)),
++                None,
++                Modifiers::none(),
++            );
++            draw(cx);
++            let wrap = cx.debug_bounds(WRAP);
++            if let Some(wrap) = wrap {
++                wraps.insert(key(wrap));
++            }
++            if let Some(action) = cx.debug_bounds(ACTION) {
++                assert!(
++                    wrap.is_some(),
++                    "R1.5: the action is visible only with its code block's button row (at {x},{y})"
++                );
++                if seen_actions.insert(key(action)) {
++                    actions.push(action);
++                }
++            }
++        }
++    }
++    Sweep {
++        actions,
++        wraps: wraps.len(),
++    }
++}
++
++/// Clicks `bounds` (hovering first, so the row is revealed) and lets the panel settle.
++pub(super) fn click(bounds: Bounds<Pixels>, cx: &mut VisualTestContext) {
++    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
++    draw(cx);
++    cx.simulate_click(bounds.center(), Modifiers::none());
++    settle(cx);
++}
++
++#[gpui::test]
++async fn test_slash_command_button_only_on_the_single_slash_line_block(cx: &mut TestAppContext) {
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let reply = concat!(
++        "Two options:\n\n",
++        "```\n/epic:epic stories run 014\n/epic:epic stories run 015\n```\n\n", // R1.2
++        "A shell line:\n\n",
++        "```sh\necho /epic:epic stories run 014\n```\n\n", // R1.3
++        "Next step:\n\n",
++        "```\n  /epic:epic stories run 014  \n```\n", // R1.1 -- the control
++    );
++    let source = open_source_thread(&panel, "what next?", vec![agent_says(reply)], &mut cx);
++    draw(&mut cx);
++
++    let sweep = sweep(&mut cx);
++    assert!(
++        sweep.wraps >= 3,
++        "precondition: all three code blocks were hovered (saw {} button rows)",
++        sweep.wraps
++    );
++    assert_eq!(
++        sweep.actions.len(),
++        1,
++        "R1.1-R1.3: exactly one block -- the single slash line -- carries the button"
++    );
++
++    let source_agent = active_agent_id(&panel, &cx);
++    click(sweep.actions[0], &mut cx);
++    assert_prefilled_new_thread(&panel, &source, &source_agent, COMMAND, &mut cx);
++}
++
++#[gpui::test]
++async fn test_slash_command_button_not_on_a_thinking_block(cx: &mut TestAppContext) {
++    // R1.4: a qualifying block inside the agent's thinking gets no button; the one in the
++    // message does.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(
++        &panel,
++        "what next?",
++        vec![
++            agent_thinks("Maybe:\n\n```\n/help\n```\n"),
++            agent_says("Run:\n\n```\n/compact\n```\n"),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let sweep = sweep(&mut cx);
++    assert_eq!(
++        sweep.actions.len(),
++        1,
++        "R1.4: only the message's block carries the button, not the thinking block's"
++    );
++    let source_agent = active_agent_id(&panel, &cx);
++    click(sweep.actions[0], &mut cx);
++    assert_prefilled_new_thread(&panel, &source, &source_agent, "/compact", &mut cx);
++}
++
++#[gpui::test]
++async fn test_slash_command_button_not_on_a_user_message(cx: &mut TestAppContext) {
++    // R1.4: the operator's own message holds a qualifying block; only the agent's reply
++    // gets the button.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(
++        &panel,
++        "Should I run\n\n```\n/help\n```\n",
++        vec![agent_says("No, run:\n\n```\n/compact\n```\n")],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let sweep = sweep(&mut cx);
++    assert_eq!(
++        sweep.actions.len(),
++        1,
++        "R1.4: the user message's block carries no button"
++    );
++    let source_agent = active_agent_id(&panel, &cx);
++    click(sweep.actions[0], &mut cx);
++    assert_prefilled_new_thread(&panel, &source, &source_agent, "/compact", &mut cx);
++}
+diff --git a/crates/agent_ui/src/agent_panel/tests/slash_command_contract_tests.rs b/crates/agent_ui/src/agent_panel/tests/slash_command_contract_tests.rs
+new file mode 100644
+index 0000000..a7fa618
+--- /dev/null
++++ b/crates/agent_ui/src/agent_panel/tests/slash_command_contract_tests.rs
+@@ -0,0 +1,66 @@
++//! Contract between the button, the predicate and the panel (story 020, Task 5.2;
++//! R1.2, R2.2, R2.3, R2.4, Q11).
++//!
++//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
++//! `mod slash_command_contract_tests;` beside `mod prefilled_prompt_tests;` and
++//! `mod slash_command_button_tests;` (whose harnesses this reuses). Resolves to
++//! `crates/agent_ui/src/agent_panel/tests/slash_command_contract_tests.rs`.
++//!
++//! The string the click hands over must be exactly the predicate's trimmed command, and
++//! the new thread's composer must hold exactly that string -- end to end, through the
++//! real markdown rendering of an agent message, the real button and the real panel.
++
++use gpui::TestAppContext;
++
++use super::prefilled_prompt_tests::*;
++use super::slash_command_button_tests::{click, sweep};
++use crate::slash_command_in_code_block;
++
++#[gpui::test]
++async fn test_slash_command_contract_click_prefills_the_trimmed_command(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    // Blank lines and indentation around the command: the derived value (the trimmed
++    // command) is what must arrive, not the block's raw text.
++    let block = "\n   /epic:epic stories run 014   \n\n";
++    let reply =
++        format!("Not this one:\n\n```\n/help\nand more\n```\n\nThis one:\n\n```{block}```\n");
++    assert_eq!(
++        slash_command_in_code_block(block),
++        Some(COMMAND),
++        "precondition: the predicate's answer for the qualifying block"
++    );
++    let source = open_source_thread(&panel, "what next?", vec![agent_says(&reply)], &mut cx);
++    let source_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let source_agent = active_agent_id(&panel, &cx);
++    let source_entries = entry_count(&source, &cx);
++    let toasts = notification_count(&workspace, &cx);
++
++    let sweep = sweep(&mut cx);
++    assert_eq!(
++        sweep.actions.len(),
++        1,
++        "R1.2: the two-line block has no button; the single-command block has one"
++    );
++    click(sweep.actions[0], &mut cx);
++
++    // R2.1-R2.3: new thread, same agent, the predicate's exact output in a focused
++    // composer, nothing sent.
++    assert_prefilled_new_thread(&panel, &source, &source_agent, COMMAND, &mut cx);
++    // R2.4: the source thread is unchanged and still kept; nothing failed.
++    assert_eq!(
++        entry_count(&source, &cx),
++        source_entries,
++        "R2.4: source untouched"
++    );
++    assert!(
++        panel.read_with(&cx, |panel, _| panel
++            .retained_threads()
++            .contains_key(&source_id)),
++        "R2.4: the source thread is still kept"
++    );
++    assert_eq!(
++        notification_count(&workspace, &cx),
++        toasts,
++        "no error toast"
++    );
++}
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index a508964..1186cc7 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -1068,6 +1068,23 @@ fn update_active_language_model_from_settings(cx: &mut App) {
+     });
+ }
+ 
++/// The command in a code block that holds exactly one slash command -- one
++/// non-empty line whose first non-whitespace character is `/` -- trimmed.
++///
++/// Decided by shape, not by the agent's command list, so a lone path such as
++/// `/usr/bin/foo` qualifies too: the operator reviews the command before sending.
++pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
++    let mut lines = code.lines().map(str::trim).filter(|line| !line.is_empty());
++    let command = lines.next()?;
++    if lines.next().is_some() || !command.starts_with('/') || command == "/" {
++        return None;
++    }
++    Some(command)
++}
++
++#[cfg(test)]
++mod slash_command_in_code_block_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
+index 3e769b3..b131721 100644
+--- a/crates/agent_ui/src/conversation_view/thread_view.rs
++++ b/crates/agent_ui/src/conversation_view/thread_view.rs
+@@ -2,7 +2,7 @@ use crate::{
+     DEFAULT_THREAD_TITLE, RecallNewerMessage, RecallOlderMessage, SelectPermissionGranularity,
+     conversation_view::sent_history::{Recall, SentMessageHistory},
+     conversation_view::thread_search_bar::{ThreadSearchBar, ThreadSearchBarEvent},
+-    open_abs_path_at_point, project_path_for_file_link,
++    open_abs_path_at_point, project_path_for_file_link, slash_command_in_code_block,
+     thread_metadata_store::{ThreadId, ThreadMetadataStore},
+ };
+ use agent_client_protocol::schema::{v1 as acp_v1, v2 as acp_v2};
+@@ -7402,7 +7402,7 @@ impl ThreadView {
+                                     div()
+                                         .id(("assistant-message-chunk", chunk_ix))
+                                         .child(self.render_message_content(
+-                                            entry_ix, chunk_ix, block, window, cx,
++                                            entry_ix, chunk_ix, block, true, window, cx,
+                                         ))
+                                         .into_any_element()
+                                 })
+@@ -8839,11 +8839,15 @@ impl ThreadView {
+         cx.notify();
+     }
+ 
++    /// `offers_slash_commands` is set only for an agent's message: a code block
++    /// there holding one slash command gets a button that opens a new thread
++    /// with it. Thinking blocks share this path and must not get it.
+     fn render_message_content(
+         &self,
+         entry_ix: usize,
+         chunk_ix: usize,
+         content: &acp_thread::MessageContent,
++        offers_slash_commands: bool,
+         window: &Window,
+         cx: &Context<Self>,
+     ) -> Div {
+@@ -8853,9 +8857,19 @@ impl ThreadView {
+                 .enumerate()
+                 .filter(|(_, block)| block.visible_content(cx))
+                 .map(|(block_ix, block)| {
+-                    let content = self.render_output_content_block(
+-                        entry_ix, block_ix, block, None, false, window, cx,
+-                    );
++                    let content = match block.markdown() {
++                        Some(markdown) if offers_slash_commands => self
++                            .render_markdown(
++                                markdown.clone(),
++                                MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
++                                cx,
++                            )
++                            .on_code_block_action(self.slash_command_action(cx))
++                            .into_any(),
++                        _ => self.render_output_content_block(
++                            entry_ix, block_ix, block, None, false, window, cx,
++                        ),
++                    };
+                     div()
+                         .id(("message-content-block", block_ix))
+                         .debug_selector(move || {
+@@ -8959,11 +8973,9 @@ impl ThreadView {
+                                     this.track_scroll(&scroll_handle)
+                                 })
+                                 .overflow_hidden()
+-                                .child(
+-                                    self.render_message_content(
+-                                        entry_ix, chunk_ix, chunk, window, cx,
+-                                    ),
+-                                ),
++                                .child(self.render_message_content(
++                                    entry_ix, chunk_ix, chunk, false, window, cx,
++                                )),
+                         )
+                         .when(is_constrained, |this| {
+                             this.child(div().absolute().inset_0().size_full().bg(linear_gradient(
+@@ -13088,6 +13100,49 @@ impl ThreadView {
+         })
+     }
+ 
++    fn slash_command_action(
++        &self,
++        cx: &App,
++    ) -> impl Fn(&str) -> Option<markdown::CodeBlockAction> + 'static {
++        let workspace = self.workspace.clone();
++        let agent_id = self.agent_id.clone();
++        let session_id = self.thread.read(cx).session_id().clone();
++        move |code| {
++            slash_command_in_code_block(code)?;
++            let workspace = workspace.clone();
++            let agent_id = agent_id.clone();
++            let session_id = session_id.clone();
++            Some(markdown::CodeBlockAction {
++                icon: IconName::ThreadFromSummary,
++                tooltip: "New Thread with This Command".into(),
++                on_click: Rc::new(move |code: &str, window: &mut Window, cx: &mut App| {
++                    let Some(command) = slash_command_in_code_block(code) else {
++                        return;
++                    };
++                    let Some(panel) = workspace
++                        .upgrade()
++                        .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
++                    else {
++                        log::warn!(
++                            "slash command button: no agent panel to open a thread in (session {session_id})"
++                        );
++                        return;
++                    };
++                    let command = command.to_string();
++                    panel.update(cx, |panel, cx| {
++                        panel.new_thread_with_prefilled_prompt(
++                            Agent::from(agent_id.clone()),
++                            session_id.clone(),
++                            command,
++                            window,
++                            cx,
++                        );
++                    });
++                }),
++            })
++        }
++    }
++
+     fn create_copy_button(&self, message: impl Into<String>) -> impl IntoElement {
+         let message = message.into();
+ 
+diff --git a/crates/agent_ui/src/slash_command_in_code_block_tests.rs b/crates/agent_ui/src/slash_command_in_code_block_tests.rs
+new file mode 100644
+index 0000000..38223e7
+--- /dev/null
++++ b/crates/agent_ui/src/slash_command_in_code_block_tests.rs
+@@ -0,0 +1,143 @@
++//! Which code blocks qualify for the "new thread with this command" button (story 020,
++//! Task 2.1; R1.1, R1.2, R1.3).
++//!
++//! Wiring: in `crates/agent_ui/src/agent_ui.rs` (the crate root) declare
++//!
++//!     #[cfg(test)]
++//!     mod slash_command_in_code_block_tests;
++//!
++//! The predicate must be reachable as `crate::slash_command_in_code_block` -- if it is
++//! defined in a submodule, re-export it at the crate root with `pub(crate) use`.
++//!
++//! Contract: `fn slash_command_in_code_block(code: &str) -> Option<&str>` returns the
++//! command, trimmed, when the block holds exactly one non-empty line and that line starts
++//! with `/` once leading whitespace is ignored; otherwise `None`.
++//!
++//! Order follows the hostile-half rule: first the inputs that would make the rule
++//! wrongly COLLAPSE (distinct lines merged into one command, a non-command accepted),
++//! then the inputs that would make it wrongly SPLIT (one command, differently shaped,
++//! rejected or returned differently), then the plain case.
++
++use crate::slash_command_in_code_block;
++
++// ---------------------------------------------------------------------------
++// Hostile half 1 -- must stay apart: never one command out of several lines
++// ---------------------------------------------------------------------------
++
++#[test]
++fn test_slash_command_in_code_block_rejects_two_commands() {
++    // Two slash lines are two commands, not one (R1.2).
++    assert_eq!(
++        slash_command_in_code_block("/epic:epic stories run 014\n/epic:epic stories run 015\n"),
++        None
++    );
++    // Even when the two lines are identical.
++    assert_eq!(slash_command_in_code_block("/help\n/help"), None);
++}
++
++#[test]
++fn test_slash_command_in_code_block_rejects_a_command_with_any_other_line() {
++    // A slash line followed or preceded by any other non-empty line (R1.2).
++    assert_eq!(slash_command_in_code_block("/help\nthen press enter"), None);
++    assert_eq!(slash_command_in_code_block("run this:\n/help"), None);
++    assert_eq!(slash_command_in_code_block("/help\n\n\nmore"), None);
++    // A blank-looking line that carries text after its indentation is still a line.
++    assert_eq!(slash_command_in_code_block("/help\n    x"), None);
++}
++
++#[test]
++fn test_slash_command_in_code_block_rejects_a_line_not_starting_with_slash() {
++    // The `/` has to be the first non-whitespace character (R1.3).
++    assert_eq!(slash_command_in_code_block("echo /help"), None);
++    assert_eq!(slash_command_in_code_block("$ /help"), None);
++    assert_eq!(slash_command_in_code_block("# /help"), None);
++    assert_eq!(slash_command_in_code_block("cargo test"), None);
++    assert_eq!(slash_command_in_code_block("\\/help"), None);
++}
++
++#[test]
++fn test_slash_command_in_code_block_rejects_a_bare_slash_and_empty_blocks() {
++    // A lone `/` names no command.
++    assert_eq!(slash_command_in_code_block("/"), None);
++    assert_eq!(slash_command_in_code_block("   /   \n"), None);
++    // No non-empty line at all.
++    assert_eq!(slash_command_in_code_block(""), None);
++    assert_eq!(slash_command_in_code_block("\n\n"), None);
++    assert_eq!(slash_command_in_code_block("  \t \n   "), None);
++}
++
++// ---------------------------------------------------------------------------
++// Hostile half 2 -- must come together: one command, however it is wrapped
++// ---------------------------------------------------------------------------
++
++#[test]
++fn test_slash_command_in_code_block_ignores_surrounding_whitespace_and_blank_lines() {
++    // Every one of these is the same single command, and all must yield the SAME
++    // trimmed text -- a predicate that accepts some shapes and not others, or returns
++    // the indentation / line ending along with the command, splits one command in two.
++    let shapes = [
++        "/help",
++        "/help\n",
++        "  /help",
++        "/help   ",
++        "\t/help\t",
++        "/help\r\n",
++        "\n\n/help\n\n",
++        "   \n  /help  \n \t \n",
++    ];
++    for shape in shapes {
++        assert_eq!(
++            slash_command_in_code_block(shape),
++            Some("/help"),
++            "shape {shape:?} holds the one command `/help`"
++        );
++    }
++}
++
++#[test]
++fn test_slash_command_in_code_block_keeps_the_command_whole() {
++    // Interior spaces, colons and arguments are part of the one command: it must not be
++    // cut at the first space.
++    assert_eq!(
++        slash_command_in_code_block("  /epic:epic stories run 014  \n"),
++        Some("/epic:epic stories run 014")
++    );
++    assert_eq!(
++        slash_command_in_code_block("/compact keep the   spacing"),
++        Some("/compact keep the   spacing")
++    );
++}
++
++#[test]
++fn test_slash_command_in_code_block_takes_a_path_literally() {
++    // R1.1 read literally: a single line that starts with `/` qualifies, so a lone path
++    // such as `/usr/bin/foo` gets the button too. The story decides by shape, not by
++    // knowing the agent's command list; this test pins that decision so a later change
++    // to it is deliberate.
++    assert_eq!(
++        slash_command_in_code_block("/usr/bin/foo\n"),
++        Some("/usr/bin/foo")
++    );
++}
++
++// ---------------------------------------------------------------------------
++// The plain case
++// ---------------------------------------------------------------------------
++
++#[test]
++fn test_slash_command_in_code_block_accepts_one_command() {
++    assert_eq!(slash_command_in_code_block("/help"), Some("/help"));
++    assert_eq!(
++        slash_command_in_code_block("/epic:epic stories run 014"),
++        Some("/epic:epic stories run 014")
++    );
++}
++
++#[test]
++fn test_slash_command_in_code_block_returns_a_slice_of_its_input() {
++    // `Option<&str>` borrowed from the block: the command is the block's own text.
++    let block = String::from("\n  /review src/main.rs  \n");
++    let command = slash_command_in_code_block(&block).expect("one command");
++    let start = command.as_ptr() as usize - block.as_ptr() as usize;
++    assert_eq!(&block[start..start + command.len()], "/review src/main.rs");
++}
+diff --git a/crates/markdown/src/code_block_action_tests.rs b/crates/markdown/src/code_block_action_tests.rs
+new file mode 100644
+index 0000000..e38ceed
+--- /dev/null
++++ b/crates/markdown/src/code_block_action_tests.rs
+@@ -0,0 +1,368 @@
++//! A caller-decided action button in a code block's button row (story 020, Task 3.1;
++//! R1.1, R1.5, Q12).
++//!
++//! Wiring: in `crates/markdown/src/markdown.rs` (the crate root) declare
++//!
++//!     #[cfg(test)]
++//!     mod code_block_action_tests;
++//!
++//! Contract (from the plan's surface):
++//!   - `MarkdownElement::on_code_block_action(self, impl Fn(&str) -> Option<CodeBlockAction> + 'static) -> Self`
++//!   - `pub struct CodeBlockAction { pub icon: IconName, pub tooltip: SharedString (or any
++//!     `From<&'static str>`), pub on_click: Rc<dyn Fn(&str, &mut Window, &mut App)> }`
++//!   - the button is a `ui::IconButton`, so it paints under the debug selector
++//!     `ICON-{icon:?}` -- that is how these tests find it.
++//!
++//! Behaviour asserted: the hook is asked with the block's code; `Some` draws a button that
++//! hands that same code to `on_click`; `None` draws nothing extra; the button follows the
++//! Copy button's visibility (hidden with it, revealed on hover with it); each block's
++//! button hands over its own block's code; buttons stay distinct across two markdown
++//! entities rendering the same source.
++
++use std::{cell::RefCell, rc::Rc};
++
++use gpui::{
++    App, AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, ParentElement as _,
++    Pixels, Point, Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
++};
++use ui::IconName;
++
++use crate::{
++    CodeBlockAction, CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement,
++    MarkdownStyle, WrapButtonVisibility,
++};
++
++type Hook = Rc<dyn Fn(&str) -> Option<CodeBlockAction>>;
++
++const ACTION: &str = "ICON-ThreadFromSummary";
++const OTHER_ACTION: &str = "ICON-Plus";
++const COPY: &str = "ICON-Copy";
++
++struct ActionView {
++    markdowns: Vec<(Entity<Markdown>, Option<Hook>)>,
++    copy: CopyButtonVisibility,
++}
++
++impl Render for ActionView {
++    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++        let mut root = div().size_full().flex().flex_col();
++        for (markdown, hook) in &self.markdowns {
++            let mut element = MarkdownElement::new(markdown.clone(), MarkdownStyle::default())
++                .code_block_renderer(CodeBlockRenderer::Default {
++                    copy_button_visibility: self.copy,
++                    wrap_button_visibility: WrapButtonVisibility::Hidden,
++                    border: false,
++                });
++            if let Some(hook) = hook.clone() {
++                element = element.on_code_block_action(move |code| hook(code));
++            }
++            root = root.child(element);
++        }
++        root
++    }
++}
++
++fn ensure_theme_initialized(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        if !cx.has_global::<settings::SettingsStore>() {
++            settings::init(cx);
++        }
++        if !cx.has_global::<theme::GlobalTheme>() {
++            theme_settings::init(theme::LoadThemes::JustBase, cx);
++        }
++    });
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// A hook that records every code it is asked about and every code handed to a click,
++/// answering with `icon` for every block whose code satisfies `accept`.
++struct Recorder {
++    asked: Rc<RefCell<Vec<String>>>,
++    clicked: Rc<RefCell<Vec<String>>>,
++}
++
++fn recording_hook(icon: IconName, accept: fn(&str) -> bool) -> (Hook, Recorder) {
++    let asked = Rc::new(RefCell::new(Vec::new()));
++    let clicked = Rc::new(RefCell::new(Vec::new()));
++    let hook: Hook = {
++        let asked = asked.clone();
++        let clicked = clicked.clone();
++        Rc::new(move |code: &str| {
++            asked.borrow_mut().push(code.to_string());
++            if !accept(code) {
++                return None;
++            }
++            let clicked = clicked.clone();
++            Some(CodeBlockAction {
++                icon,
++                tooltip: "New Thread with This Command".into(),
++                on_click: Rc::new(move |code: &str, _: &mut Window, _: &mut App| {
++                    clicked.borrow_mut().push(code.to_string());
++                }),
++            })
++        })
++    };
++    (hook, Recorder { asked, clicked })
++}
++
++fn open_view<'a>(
++    sources: Vec<(&str, Option<Hook>)>,
++    copy: CopyButtonVisibility,
++    cx: &'a mut TestAppContext,
++) -> &'a mut VisualTestContext {
++    ensure_theme_initialized(cx);
++    let markdowns: Vec<(Entity<Markdown>, Option<Hook>)> = sources
++        .into_iter()
++        .map(|(source, hook)| {
++            let source = source.to_string();
++            (
++                cx.new(|cx| Markdown::new(source.into(), None, None, cx)),
++                hook,
++            )
++        })
++        .collect();
++    cx.run_until_parked();
++    let (_, cx) = cx.add_window_view(move |_, _| ActionView { markdowns, copy });
++    cx.simulate_resize(size(px(600.), px(400.)));
++    cx.simulate_mouse_move(Point::new(px(599.), px(399.)), None, Modifiers::none());
++    draw(cx);
++    cx
++}
++
++/// Moves the mouse down the view and returns the first bounds at which `selector` paints.
++fn hover_until_painted(
++    selector: &'static str,
++    cx: &mut VisualTestContext,
++) -> Option<Bounds<Pixels>> {
++    for y in (2..400).step_by(4) {
++        cx.simulate_mouse_move(Point::new(px(300.), px(y as f32)), None, Modifiers::none());
++        draw(cx);
++        if let Some(bounds) = cx.debug_bounds(selector) {
++            return Some(bounds);
++        }
++    }
++    None
++}
++
++#[gpui::test]
++fn test_code_block_action_is_asked_with_the_code_and_hands_it_to_the_click(
++    cx: &mut TestAppContext,
++) {
++    let (hook, recorder) = recording_hook(IconName::ThreadFromSummary, |_| true);
++    let cx = open_view(
++        vec![(
++            "Next:\n\n```sh\n  /epic:epic stories run 014  \n```\n",
++            Some(hook),
++        )],
++        CopyButtonVisibility::AlwaysVisible,
++        cx,
++    );
++
++    let asked = recorder.asked.borrow().clone();
++    assert!(
++        asked
++            .iter()
++            .any(|code| code.trim() == "/epic:epic stories run 014"),
++        "the hook must be asked with the block's code, got {asked:?}"
++    );
++    assert!(
++        cx.debug_bounds(COPY).is_some(),
++        "precondition: Copy is painted"
++    );
++    let button = cx
++        .debug_bounds(ACTION)
++        .expect("the hook said Some: its button must be painted beside Copy");
++
++    cx.simulate_click(button.center(), Modifiers::none());
++    cx.run_until_parked();
++
++    let clicked = recorder.clicked.borrow().clone();
++    assert_eq!(clicked.len(), 1, "one click, one call: {clicked:?}");
++    assert!(
++        asked.contains(&clicked[0]),
++        "the click hands over the same code the hook was asked with: {clicked:?} vs {asked:?}"
++    );
++}
++
++#[gpui::test]
++fn test_code_block_action_absent_when_the_hook_declines(cx: &mut TestAppContext) {
++    // Two blocks in one message: the hook accepts only the second, so the first gets
++    // only today's buttons and the second gets the action.
++    let (hook, recorder) =
++        recording_hook(IconName::ThreadFromSummary, |code| code.trim() == "/help");
++    let cx = open_view(
++        vec![("```\necho hi\n```\n\n```\n/help\n```\n", Some(hook))],
++        CopyButtonVisibility::AlwaysVisible,
++        cx,
++    );
++
++    let asked = recorder.asked.borrow().clone();
++    assert!(
++        asked.iter().any(|code| code.trim() == "echo hi")
++            && asked.iter().any(|code| code.trim() == "/help"),
++        "the hook is asked about every code block: {asked:?}"
++    );
++    let button = cx
++        .debug_bounds(ACTION)
++        .expect("the accepted block has a button");
++    cx.simulate_click(button.center(), Modifiers::none());
++    cx.run_until_parked();
++    assert_eq!(
++        recorder
++            .clicked
++            .borrow()
++            .iter()
++            .map(|code| code.trim().to_string())
++            .collect::<Vec<_>>(),
++        vec!["/help".to_string()],
++        "the only button belongs to the accepted block"
++    );
++}
++
++#[gpui::test]
++fn test_code_block_action_hidden_when_copy_is_hidden(cx: &mut TestAppContext) {
++    // Hostile half: the hook says Some, but the caller hid Copy -- the action follows it.
++    let (hook, _recorder) = recording_hook(IconName::ThreadFromSummary, |_| true);
++    let (control, control_recorder) = recording_hook(IconName::Plus, |_| true);
++    let cx = open_view(
++        vec![
++            ("```\n/help\n```\n", Some(hook)),
++            ("```\n/compact\n```\n", Some(control)),
++        ],
++        CopyButtonVisibility::Hidden,
++        cx,
++    );
++    assert!(
++        cx.debug_bounds(COPY).is_none(),
++        "precondition: Copy is hidden"
++    );
++    assert!(
++        hover_until_painted(ACTION, cx).is_none(),
++        "no action button anywhere while Copy is hidden"
++    );
++    assert!(cx.debug_bounds(OTHER_ACTION).is_none());
++    // The hook may or may not be consulted, but nothing it returns may become a click.
++    assert!(control_recorder.clicked.borrow().is_empty());
++}
++
++#[gpui::test]
++fn test_code_block_action_follows_copy_on_hover(cx: &mut TestAppContext) {
++    let (hook, recorder) = recording_hook(IconName::ThreadFromSummary, |_| true);
++    let cx = open_view(
++        vec![("```\n/help\n```\n", Some(hook))],
++        CopyButtonVisibility::VisibleOnHover,
++        cx,
++    );
++
++    // Mouse away from the block: neither Copy nor the action is painted.
++    assert!(cx.debug_bounds(COPY).is_none(), "Copy waits for hover");
++    assert!(
++        cx.debug_bounds(ACTION).is_none(),
++        "the action waits for hover, like Copy"
++    );
++
++    // Hover the block: Copy appears, and the action appears in the same frame.
++    let copy = hover_until_painted(COPY, cx).expect("hovering the block reveals Copy");
++    let action = cx
++        .debug_bounds(ACTION)
++        .expect("the action is revealed together with Copy");
++    assert!(
++        action.origin.x < copy.origin.x,
++        "the action sits before Copy in the button row: action {action:?}, copy {copy:?}"
++    );
++
++    cx.simulate_click(action.center(), Modifiers::none());
++    cx.run_until_parked();
++    assert_eq!(
++        recorder.clicked.borrow().len(),
++        1,
++        "the revealed action is clickable"
++    );
++}
++
++#[gpui::test]
++fn test_code_block_action_each_block_hands_over_its_own_code(cx: &mut TestAppContext) {
++    // Hostile half for block identity: two accepted blocks in one markdown must not
++    // collapse onto one button (e.g. a shared id or a captured first `code`). Different
++    // icons per block make each button separately findable.
++    let clicked = Rc::new(RefCell::new(Vec::<String>::new()));
++    let hook: Hook = {
++        let clicked = clicked.clone();
++        Rc::new(move |code: &str| {
++            let icon = match code.trim() {
++                "/first" => IconName::ThreadFromSummary,
++                "/second" => IconName::Plus,
++                _ => return None,
++            };
++            let clicked = clicked.clone();
++            Some(CodeBlockAction {
++                icon,
++                tooltip: "New Thread with This Command".into(),
++                on_click: Rc::new(move |code: &str, _: &mut Window, _: &mut App| {
++                    clicked.borrow_mut().push(code.trim().to_string());
++                }),
++            })
++        })
++    };
++    let cx = open_view(
++        vec![(
++            "```\n/first\n```\n\ntext\n\n```\n/second\n```\n",
++            Some(hook),
++        )],
++        CopyButtonVisibility::AlwaysVisible,
++        cx,
++    );
++
++    let second = cx
++        .debug_bounds(OTHER_ACTION)
++        .expect("second block's button");
++    cx.simulate_click(second.center(), Modifiers::none());
++    cx.run_until_parked();
++    draw(cx);
++    let first = cx.debug_bounds(ACTION).expect("first block's button");
++    cx.simulate_click(first.center(), Modifiers::none());
++    cx.run_until_parked();
++
++    assert_eq!(
++        *clicked.borrow(),
++        vec!["/second".to_string(), "/first".to_string()],
++        "each button hands over its own block's code"
++    );
++}
++
++#[gpui::test]
++fn test_code_block_action_unique_across_markdown_entities(cx: &mut TestAppContext) {
++    // Mirrors `test_code_block_controls_are_unique_across_markdown_entities`: two
++    // entities render the same source, both with the hook, beside Copy. Each entity's
++    // button must reach its own handler.
++    let (first_hook, first) = recording_hook(IconName::ThreadFromSummary, |_| true);
++    let (second_hook, second) = recording_hook(IconName::Plus, |_| true);
++    let source = "```sh\n/help\n```";
++    let cx = open_view(
++        vec![(source, Some(first_hook)), (source, Some(second_hook))],
++        CopyButtonVisibility::AlwaysVisible,
++        cx,
++    );
++
++    let a = cx.debug_bounds(ACTION).expect("first entity's button");
++    let b = cx
++        .debug_bounds(OTHER_ACTION)
++        .expect("second entity's button");
++    assert_ne!(a, b, "two entities, two buttons");
++
++    cx.simulate_click(b.center(), Modifiers::none());
++    cx.run_until_parked();
++    assert_eq!(first.clicked.borrow().len(), 0);
++    assert_eq!(second.clicked.borrow().len(), 1);
++
++    draw(cx);
++    let a = cx.debug_bounds(ACTION).expect("first entity's button");
++    cx.simulate_click(a.center(), Modifiers::none());
++    cx.run_until_parked();
++    assert_eq!(first.clicked.borrow().len(), 1);
++    assert_eq!(second.clicked.borrow().len(), 1);
++}
+diff --git a/crates/markdown/src/markdown.rs b/crates/markdown/src/markdown.rs
+index 1862eab..93c2e39 100644
+--- a/crates/markdown/src/markdown.rs
++++ b/crates/markdown/src/markdown.rs
+@@ -1724,6 +1724,16 @@ pub enum AutoscrollBehavior {
+     Controlled(ScrollHandle),
+ }
+ 
++/// An extra button a caller puts in a code block's button row, beside Copy.
++pub struct CodeBlockAction {
++    pub icon: IconName,
++    pub tooltip: SharedString,
++    /// Called with the block's code.
++    pub on_click: Rc<dyn Fn(&str, &mut Window, &mut App)>,
++}
++
++type CodeBlockActionCallback = Rc<dyn Fn(&str) -> Option<CodeBlockAction>>;
++
+ pub struct MarkdownElement {
+     markdown: Entity<Markdown>,
+     style: MarkdownStyle,
+@@ -1735,6 +1745,7 @@ pub struct MarkdownElement {
+     on_source_click: Option<SourceClickCallback>,
+     on_checkbox_toggle: Option<CheckboxToggleCallback>,
+     on_mermaid_zoom: Option<MermaidZoomCallback>,
++    code_block_action: Option<CodeBlockActionCallback>,
+     image_resolver: Option<Box<dyn Fn(&str, &App) -> Option<ImageSource>>>,
+     show_root_block_markers: bool,
+     autoscroll: AutoscrollBehavior,
+@@ -1762,6 +1773,7 @@ impl MarkdownElement {
+             on_source_click: None,
+             on_checkbox_toggle: None,
+             on_mermaid_zoom: None,
++            code_block_action: None,
+             image_resolver: None,
+             show_root_block_markers: false,
+             autoscroll: AutoscrollBehavior::Propagate,
+@@ -1825,6 +1837,16 @@ impl MarkdownElement {
+         self
+     }
+ 
++    /// Asks `action` about every code block; a block it answers `Some` for gets
++    /// that button in its button row, shown and hidden with the Copy button.
++    pub fn on_code_block_action(
++        mut self,
++        action: impl Fn(&str) -> Option<CodeBlockAction> + 'static,
++    ) -> Self {
++        self.code_block_action = Some(Rc::new(action));
++        self
++    }
++
+     pub fn on_code_span_link(
+         mut self,
+         callback: impl Fn(&str, &App) -> Option<SharedString> + 'static,
+@@ -3156,6 +3178,13 @@ impl Element for MarkdownElement {
+                         {
+                             let copy_button_visibility = *copy_button_visibility;
+                             let wrap_button_visibility = *wrap_button_visibility;
++                            let action = (copy_button_visibility != CopyButtonVisibility::Hidden)
++                                .then(|| {
++                                    self.code_block_action
++                                        .as_ref()
++                                        .and_then(|action| action(&code))
++                                })
++                                .flatten();
+                             builder.modify_current_div(|el| {
+                                 let any_hover = copy_button_visibility
+                                     == CopyButtonVisibility::VisibleOnHover
+@@ -3196,6 +3225,14 @@ impl Element for MarkdownElement {
+                                             ))
+                                         },
+                                     )
++                                    .when_some(action, |this, action| {
++                                        this.child(render_code_block_action_button(
++                                            range.end,
++                                            code.clone(),
++                                            action,
++                                            self.markdown.entity_id(),
++                                        ))
++                                    })
+                                     .when(
+                                         copy_button_visibility != CopyButtonVisibility::Hidden,
+                                         |this| {
+@@ -3565,6 +3602,24 @@ fn render_wrap_code_block_button(
+         })
+ }
+ 
++fn render_code_block_action_button(
++    id: usize,
++    code: String,
++    action: CodeBlockAction,
++    markdown_id: gpui::EntityId,
++) -> impl IntoElement {
++    let button_id = ElementId::NamedChild(
++        Arc::new(ElementId::from(("code-block-action", markdown_id))),
++        id.to_string().into(),
++    );
++    let on_click = action.on_click;
++    IconButton::new(button_id, action.icon)
++        .icon_size(IconSize::Small)
++        .icon_color(Color::Muted)
++        .tooltip(Tooltip::text(action.tooltip))
++        .on_click(move |_event, window, cx| on_click(&code, window, cx))
++}
++
+ fn render_copy_code_block_button(
+     id: usize,
+     code: String,
+@@ -5210,6 +5265,9 @@ impl InputHandler for MarkdownInputHandler {
+     }
+ }
+ 
++#[cfg(test)]
++mod code_block_action_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
