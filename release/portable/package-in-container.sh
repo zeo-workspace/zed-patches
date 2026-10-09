@@ -52,6 +52,12 @@ done
 # 3. AppImage. AppRun execs the editor binary itself, not the zeo CLI: the CLI
 # spawns the editor and exits, and an AppImage unmounts when its first process
 # exits, which would pull the files out from under the running editor.
+# The one exception is a Zeo already running -- native, or another AppImage. It
+# holds the single-instance socket, so the editor would only print "already
+# running" and quit (reported 2026-10-09). Then the bundled CLI hands the request
+# to that instance, which serves the window, so this mount may go. "Running" is
+# read from /proc/net/unix, which lists only bound sockets: a socket file left by
+# a crash is not there, and the editor -- which replaces a stale one -- starts.
 # libxkbcommon(-x11) ride along, with the libxcb-xkb the -x11 half needs, because they are the two libraries the binary
 # links that a minimal desktop install can lack; everything else it needs
 # (glibc, glib, alsa, xcb, wayland, vulkan, X11) is on any desktop, and
@@ -69,6 +75,15 @@ cat > "${appdir}/AppRun" <<'EOF'
 #!/bin/sh
 here="$(dirname "$(readlink -f "$0")")"
 export LD_LIBRARY_PATH="${here}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+case " $* " in
+*" --user-data-dir"*) ;;
+*)
+	sock="${XDG_DATA_HOME:-${HOME}/.local/share}/zeo/zed-zeo.sock"
+	if grep -qF " ${sock}" /proc/net/unix 2>/dev/null; then
+		exec "${here}/usr/bin/zeo" "$@"
+	fi
+	;;
+esac
 exec "${here}/usr/libexec/zeo-editor" "$@"
 EOF
 chmod 755 "${appdir}/AppRun"
