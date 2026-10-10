@@ -31,6 +31,22 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.4.0_p20261009] — 2026-10-10 (untagged)
+
+Same Zed snapshot as 0.3.0 (`089abd691`); a new feature, so Zeo moves to 0.4.0.
+`patches/zeo-0.3.0_p20261009/` stays as 0.3.0 shipped it.
+
+### Added
+
+- `0052` (`USE=devtools-bridge`, default on, its own group after `claude-code-ide`
+  and before `test`): the devtools bridge — crate `devtools_bridge` (unix socket,
+  NDJSON protocol, listener, setting, wiring), `MentionUri::DomElement`, and
+  `agent_ui::devtools_delivery`. It needs `claude-agent-acp-plus` (0040's router,
+  0045's new thread), which the ebuild's `REQUIRED_USE` ties to it, and not
+  `claude-code-ide`. `0050`/`0051` apply on top of it unchanged, with or without
+  it. Story 033; the browser end is the `zeo-devtools` repository. Zeo 0.4.0
+  records it.
+
 ## [0.3.0_p20261009] — 2026-10-09 (untagged)
 
 Same Zed snapshot as 0.2.3 (`089abd691`); a new feature, so Zeo moves to 0.3.0.

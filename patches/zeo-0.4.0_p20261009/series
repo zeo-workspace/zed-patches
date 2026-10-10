@@ -303,6 +303,15 @@
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
 
+# @feature: devtools-bridge
+# 0052: the Zeo end of zeo-devtools (story 033) -- a unix socket that turns an
+# element clicked in a Vite dev page into chips in the project's agent thread.
+# Its own group, applied after every adapter group and before test: it needs
+# claude-agent-acp-plus (0040's router, 0045's new thread), which the ebuild's
+# REQUIRED_USE ties to it, and not claude-code-ide. 0050/0051 apply on top of it
+# unchanged, with or without it.
+0052-devtools-bridge.patch
+
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
 # ebuild applies them under USE=test alone. They are generated on top of every
