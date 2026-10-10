@@ -4003,7 +4003,7 @@ index 0000000..4bb603c
 +#[path = "sidebar_pinned_markdown_tests.rs"]
 +mod markdown;
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index a7ed677..a4a8967 100644
+index 4f22a0e..7944252 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -51,7 +51,7 @@ fn set_max_idle_retained_threads(max_idle_retained_threads: usize, cx: &mut App)

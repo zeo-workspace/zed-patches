@@ -89,6 +89,7 @@ crates/edit_prediction/src/edit_prediction.rs	"You must update to Zed version {m
 crates/edit_prediction/src/zed_edit_prediction_delegate.rs	"Zed's Edit Predictions"
 crates/edit_prediction/src/zeta.rs	"Update Zed"
 crates/edit_prediction_ui/src/edit_prediction_button.rs	"Upgrade to Zed Pro or contact us."
+crates/edit_prediction_ui/src/edit_prediction_button.rs	"Zed AI"
 crates/edit_prediction_ui/src/edit_prediction_button.rs	"Zed's edit predictions not included in the Free plan."
 crates/editor/src/clipboard.rs	"There should always be at least one selection in Zed. This is a bug."
 crates/editor/src/editor.rs	"The remote instance of Zed does not support this yet. It must be upgraded to {}"

@@ -60,10 +60,10 @@ Tests added 2026-10-10 (story 032 v4): Background -> Completed marks a pinned ro
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 22f4e22..cd3fce4 100644
+index 929e595..3655e40 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
-@@ -3624,6 +3624,15 @@ impl AccountUsage {
+@@ -3618,6 +3618,15 @@ impl AccountUsage {
  /// forwards the SDK's `rate_limit_event` here instead of dropping it.
  const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
  
@@ -79,7 +79,7 @@ index 22f4e22..cd3fce4 100644
  pub const TOKEN_USAGE_WARNING_THRESHOLD: f32 = 0.8;
  
  impl TokenUsage {
-@@ -3721,6 +3730,7 @@ pub struct AcpThread {
+@@ -3715,6 +3724,7 @@ pub struct AcpThread {
      activity: SessionActivity,
      token_usage: Option<TokenUsage>,
      account_usage: AccountUsage,
@@ -87,7 +87,7 @@ index 22f4e22..cd3fce4 100644
      cost: Option<SessionCost>,
      prompt_capabilities: acp_v2::PromptCapabilities,
      available_commands: Vec<acp_v2::AvailableCommand>,
-@@ -3848,6 +3858,7 @@ pub enum AcpThreadEvent {
+@@ -3842,6 +3852,7 @@ pub enum AcpThreadEvent {
      NoticesUpdated,
      TokenUsageUpdated,
      AccountUsageUpdated,
@@ -95,7 +95,7 @@ index 22f4e22..cd3fce4 100644
      EntryUpdated(usize),
      EntriesRemoved(Range<usize>),
      ToolAuthorizationRequested(PermissionRequestId),
-@@ -3999,6 +4010,7 @@ impl AcpThread {
+@@ -3993,6 +4004,7 @@ impl AcpThread {
                  | AcpThreadEvent::NoticesUpdated
                  | AcpThreadEvent::TokenUsageUpdated
                  | AcpThreadEvent::AccountUsageUpdated
@@ -103,7 +103,7 @@ index 22f4e22..cd3fce4 100644
                  | AcpThreadEvent::EntryUpdated(_)
                  | AcpThreadEvent::Retry(_)
                  | AcpThreadEvent::SubagentSpawned(_)
-@@ -4059,6 +4071,7 @@ impl AcpThread {
+@@ -4053,6 +4065,7 @@ impl AcpThread {
              connection,
              token_usage: None,
              account_usage: AccountUsage::default(),
@@ -111,7 +111,7 @@ index 22f4e22..cd3fce4 100644
              cost: None,
              prompt_capabilities,
              available_commands: Vec::new(),
-@@ -4537,6 +4550,12 @@ impl AcpThread {
+@@ -4535,6 +4548,12 @@ impl AcpThread {
          (!self.account_usage.is_empty()).then_some(&self.account_usage)
      }
  
@@ -124,7 +124,7 @@ index 22f4e22..cd3fce4 100644
      pub fn cost(&self) -> Option<&SessionCost> {
          self.cost.as_ref()
      }
-@@ -4702,6 +4721,22 @@ impl AcpThread {
+@@ -4700,6 +4719,22 @@ impl AcpThread {
                  self.push_notice(notices::from_v1(notice).map_err(acp_v1::Error::from)?, cx);
              }
              acp_v1::SessionUpdate::SessionInfoUpdate(info_update) => {
@@ -147,7 +147,7 @@ index 22f4e22..cd3fce4 100644
                  self.update_session_info(session_info_update_from_v1(info_update), cx);
              }
              acp_v1::SessionUpdate::AvailableCommandsUpdate(acp_v1::AvailableCommandsUpdate {
-@@ -19790,6 +19825,136 @@ mod tests {
+@@ -20480,6 +20515,136 @@ mod tests {
          );
      }
  
@@ -297,10 +297,10 @@ index f943a3c..9727fae 100644
              | AcpThreadEvent::SubagentSpawned(_)
              | AcpThreadEvent::EntriesRemoved(_)
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 36b217b..ad2fd04 100644
+index f61692b..5a71c2d 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -339,6 +339,7 @@ impl Conversation {
+@@ -348,6 +348,7 @@ impl Conversation {
                      | AcpThreadEvent::TitleUpdated
                      | AcpThreadEvent::TokenUsageUpdated
                      | AcpThreadEvent::AccountUsageUpdated
@@ -308,7 +308,7 @@ index 36b217b..ad2fd04 100644
                      | AcpThreadEvent::EntryUpdated(_)
                      | AcpThreadEvent::EntriesRemoved(_)
                      | AcpThreadEvent::Retry(_)
-@@ -759,6 +760,7 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
+@@ -768,6 +769,7 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
          | AcpThreadEvent::Retry(_)
          | AcpThreadEvent::TokenUsageUpdated
          | AcpThreadEvent::AccountUsageUpdated
@@ -316,7 +316,7 @@ index 36b217b..ad2fd04 100644
          | AcpThreadEvent::PromptCapabilitiesUpdated
          | AcpThreadEvent::AvailableCommandsUpdated(_)
          | AcpThreadEvent::ModeUpdated(_)
-@@ -2091,6 +2093,10 @@ impl ConversationView {
+@@ -2122,6 +2124,10 @@ impl ConversationView {
                      });
                  }
              }
@@ -604,7 +604,7 @@ index 4bb603c..2c1641a 100644
 +#[path = "sidebar_pinned_background_tests.rs"]
 +mod background;
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 2f4cdb8..2d34c68 100644
+index 86fdad4..15b8a79 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -686,6 +686,7 @@ pub(super) fn visible_entries_as_strings(

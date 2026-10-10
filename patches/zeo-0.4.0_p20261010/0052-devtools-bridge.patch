@@ -1,5 +1,5 @@
 From 3a7ad77132e2d99f27ae1ded78f82cc8f58f846e Mon Sep 17 00:00:00 2001
-From: zed-patches <zed-patches@localhost>
+From: lucascouts <lucascs@protonmail.com>
 Date: Sat, 10 Oct 2026 12:06:22 -0300
 Subject: [PATCH] devtools_bridge: put the element clicked in the dev page into
  the agent thread
@@ -82,66 +82,12 @@ symlinked worktrees, insertion order, images, new thread, load errors,
 terminal-first panels, failures after the answer). The browser end has
 its own unit, integration and Playwright suites in zeo-devtools.
 ---
- Cargo.lock                                    |   27 +
- Cargo.toml                                    |    2 +
- assets/settings/default.json                  |    6 +
- crates/acp_thread/src/acp_thread.rs           |    2 +
- crates/acp_thread/src/mention.rs              |  131 +-
- .../src/mention_dom_element_tests.rs          |  154 +++
- crates/agent/src/thread.rs                    |   18 +
- crates/agent_ui/src/agent_panel.rs            |   41 +
- crates/agent_ui/src/agent_session_router.rs   |    4 +-
- crates/agent_ui/src/agent_ui.rs               |   15 +
- .../src/conversation_view/thread_view.rs      |   14 +
- crates/agent_ui/src/devtools_delivery.rs      |  965 +++++++++++++++
- .../devtools_delivery_insert_failure_tests.rs |  434 +++++++
- .../src/devtools_delivery_recency_tests.rs    |  116 ++
- .../agent_ui/src/devtools_delivery_tests.rs   |  597 +++++++++
- crates/agent_ui/src/devtools_mention_tests.rs |  215 ++++
- crates/agent_ui/src/mention_set.rs            |  271 +++-
- crates/agent_ui/src/message_editor.rs         |   92 +-
- crates/agent_ui/src/ui/mention_crease.rs      |   14 +
- crates/devtools_bridge/Cargo.toml             |   44 +
- .../src/contract_agreement_tests.rs           |  163 +++
- crates/devtools_bridge/src/devtools_bridge.rs |  131 ++
- crates/devtools_bridge/src/listener.rs        | 1090 +++++++++++++++++
- crates/devtools_bridge/src/listener_tests.rs  |  555 +++++++++
- crates/devtools_bridge/src/protocol.rs        |  951 ++++++++++++++
- crates/devtools_bridge/src/protocol_tests.rs  |  599 +++++++++
- crates/devtools_bridge/src/setting.rs         |   21 +
- crates/devtools_bridge/src/setting_tests.rs   |  145 +++
- crates/devtools_bridge/src/wiring.rs          |  286 +++++
- crates/devtools_bridge/src/wiring_tests.rs    |  242 ++++
- .../devtools_bridge/tests/relay_delivery.rs   |  179 +++
- crates/settings/src/vscode_import.rs          |    1 +
- .../settings_content/src/settings_content.rs  |   19 +-
- crates/zed/Cargo.toml                         |    1 +
- crates/zed/src/main.rs                        |    1 +
- 35 files changed, 7536 insertions(+), 10 deletions(-)
- create mode 100644 crates/acp_thread/src/mention_dom_element_tests.rs
- create mode 100644 crates/agent_ui/src/devtools_delivery.rs
- create mode 100644 crates/agent_ui/src/devtools_delivery_insert_failure_tests.rs
- create mode 100644 crates/agent_ui/src/devtools_delivery_recency_tests.rs
- create mode 100644 crates/agent_ui/src/devtools_delivery_tests.rs
- create mode 100644 crates/agent_ui/src/devtools_mention_tests.rs
- create mode 100644 crates/devtools_bridge/Cargo.toml
- create mode 100644 crates/devtools_bridge/src/contract_agreement_tests.rs
- create mode 100644 crates/devtools_bridge/src/devtools_bridge.rs
- create mode 100644 crates/devtools_bridge/src/listener.rs
- create mode 100644 crates/devtools_bridge/src/listener_tests.rs
- create mode 100644 crates/devtools_bridge/src/protocol.rs
- create mode 100644 crates/devtools_bridge/src/protocol_tests.rs
- create mode 100644 crates/devtools_bridge/src/setting.rs
- create mode 100644 crates/devtools_bridge/src/setting_tests.rs
- create mode 100644 crates/devtools_bridge/src/wiring.rs
- create mode 100644 crates/devtools_bridge/src/wiring_tests.rs
- create mode 100644 crates/devtools_bridge/tests/relay_delivery.rs
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 1b001d3..8eb08d0 100644
+index 21f1957..c986a62 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -5009,6 +5009,32 @@ dependencies = [
+@@ -5008,6 +5008,32 @@ dependencies = [
   "yaml-rust2",
  ]
  
@@ -174,7 +120,7 @@ index 1b001d3..8eb08d0 100644
  [[package]]
  name = "diagnostics"
  version = "0.1.0"
-@@ -22476,6 +22502,7 @@ dependencies = [
+@@ -22475,6 +22501,7 @@ dependencies = [
   "debugger_tools",
   "debugger_ui",
   "dev_container",
@@ -183,7 +129,7 @@ index 1b001d3..8eb08d0 100644
   "edit_prediction",
   "edit_prediction_ui",
 diff --git a/Cargo.toml b/Cargo.toml
-index 13b3054..2de7b11 100644
+index 5d1d0bb..8f4a491 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -56,6 +56,7 @@ members = [
@@ -218,7 +164,7 @@ index 882a211..d76f265 100644
 +  },
  }
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 4207b9c..c345f23 100644
+index 0bc2cbc..bf36919 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -7,6 +7,8 @@ pub mod content;
@@ -582,7 +528,7 @@ index 0000000..68fb3f2
 +    assert_eq!(restored.name(), uri.name(), "the same chip label");
 +}
 diff --git a/crates/agent/src/thread.rs b/crates/agent/src/thread.rs
-index e25f437..af3c124 100644
+index 9b38311..3cd25c3 100644
 --- a/crates/agent/src/thread.rs
 +++ b/crates/agent/src/thread.rs
 @@ -485,6 +485,24 @@ impl UserMessage {
@@ -739,10 +685,10 @@ index c2ca3b1..1b7bf7c 100644
  mod tests {
      use super::*;
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 5ffc85e..ff21f23 100644
+index 3a65bbf..a7984ce 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -14423,6 +14423,20 @@ pub(crate) fn open_link(
+@@ -14427,6 +14427,20 @@ pub(crate) fn open_link(
                  );
              }
              MentionUri::Selection { abs_path: None, .. } => {}
@@ -8162,6 +8108,3 @@ index 9db8556..b1a7977 100644
          snippet_provider::init(cx);
          edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
          let prompt_builder = PromptBuilder::load(app_state.fs.clone(), stdout_is_a_pty(), cx);
--- 
-2.56.0
-

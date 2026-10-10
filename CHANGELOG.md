@@ -31,10 +31,28 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-## [0.4.0_p20261009] — 2026-10-10 (untagged)
+## [0.4.0_p20261010] — 2026-10-10 (untagged)
 
-Same Zed snapshot as 0.3.0 (`089abd691`); a new feature, so Zeo moves to 0.4.0.
-`patches/zeo-0.3.0_p20261009/` stays as 0.3.0 shipped it.
+A new Zed snapshot, `96984225a`, and a new feature, so Zeo moves to 0.4.0. The
+autoupdate had published `zeo-0.3.0_p20261010` on that snapshot with the 0.3.0
+series, which fails `src_prepare` (`0001` rejected at 15/48); this cut replaces it.
+`patches/zeo-0.3.0_p20261009/` stays as 0.3.0 shipped it; the series was first cut
+as `0.4.0_p20261009` on `089abd691`, never published, and moved here (bump by
+cherry-pick, 2 conflicts).
+
+### Refreshed onto 96984225
+
+- `0001`: upstream stopped forcing acp-beta "off" in the compaction and
+  terminal-auth tests and no longer gates terminal auth on the flag, so the two
+  test adaptations are gone; the flag itself stays (acp_thread's per-turn token
+  count still reads it). The header says so.
+- `0043`: its question-card test helper no longer enables acp-beta, as upstream's
+  elicitation tests stopped doing (the import it used was removed upstream).
+- `0051`: `test_cancellation`'s Stop assertion follows upstream's `acp` ->
+  `acp_v2` rename.
+- Every other patch moves in context only. New upstream string "Zed AI"
+  (edit-prediction menu) triaged as their service in `zeo/docs/STRINGS.md`;
+  `rebrand/` baselines updated.
 
 ### Added
 
