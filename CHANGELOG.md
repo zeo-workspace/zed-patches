@@ -47,6 +47,23 @@ Same Zed snapshot as 0.3.0 (`089abd691`); a new feature, so Zeo moves to 0.4.0.
   it. Story 033; the browser end is the `zeo-devtools` repository. Zeo 0.4.0
   records it.
 
+### Changed
+
+- `0049` and `0029` gain pinned-row tests from story 032 v4, each in the patch it
+  needs; tests only, no behaviour change and nothing Zeo's changelog records. Each
+  header gains one line naming them.
+  - `0049`: `sidebar_pinned_markdown_tests.rs`, 4 tests, a child module of
+    `sidebar_pinned_tests.rs` -- "Open Thread as Markdown" on a pinned row whose
+    project is open only in another window opens here for a native thread, and is
+    not offered for a non-native one.
+  - `0029`: `sidebar_pinned_background_tests.rs`, 3 tests -- Background ->
+    Completed marks a pinned row that is not the active thread, and the Pinned
+    header. Its `mod background;` line rides `0029`, not `0049`, because the tests
+    need the Background status; `0049` still builds without `0029`.
+- `scripts/xvfb-proof.sh` accepts `{"rclick": [x, y]}` (xdotool button 3), for
+  context menus; `selftest.sh` covers it. `scripts/proofs/032-pinned-section/run-ui.sh`
+  proves pins made through the UI on the release build (story 032, task 11.1).
+
 ## [0.3.0_p20261009] — 2026-10-09 (untagged)
 
 Same Zed snapshot as 0.2.3 (`089abd691`); a new feature, so Zeo moves to 0.3.0.
