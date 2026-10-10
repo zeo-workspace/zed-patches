@@ -61,6 +61,23 @@
 # with the same id still wins. After 0033, whose code it changes, so UNGROUPED
 # like it (story 019).
 0046-agent-default-agents-prefer-the-system-adapter.patch
+# 0048: thread organization gets a store of its own -- pinned order, a
+# per-project Recent/Manual thread order, lists, tags and a sub-thread's parent
+# link -- in a sqlez domain beside upstream's, so upstream's migrations can
+# never collide with it. No UI: stories 0049-0055 consume it. A Zeo feature
+# with no adapter dependency, so UNGROUPED; its hook sits at the top of
+# ThreadMetadataStore::delete so 0036's hunk keeps its context (story 031).
+# Deleting a list also clears it from rows skipped at load (story 032).
+0048-agent-thread-organization-storage.patch
+# 0049: pinned threads get a section of their own in the threads sidebar --
+# "Pin Thread" in a row's context menu, a pin button on the hovered row, and
+# shift-p (agents_sidebar::TogglePinSelectedThread) -- listed after the last
+# project group, most recently pinned first, in every window, threads of
+# projects not open there included. The first consumer of 0048's store, so
+# UNGROUPED right after it; the claude-agent-acp-plus patches that also edit
+# sidebar.rs (0028-0030) and the keymaps (0035, 0043, 0044) are generated on
+# top of it (story 032).
+0049-agent-sidebar-pinned-section.patch
 
 # @feature: claude-agent-acp-plus
 0001-force-enable-claude-agent-acp-plus.patch
