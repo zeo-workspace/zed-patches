@@ -31,6 +31,35 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.3.0_p20261009] — 2026-10-09 (untagged)
+
+Same Zed snapshot as 0.2.3 (`089abd691`); a new feature, so Zeo moves to 0.3.0.
+`patches/zeo-0.2.3_p20261009/` stays as 0.2.3 shipped it.
+
+### Added
+
+- `0048` (ungrouped, unconditional): thread organization gets a store of its own,
+  `ThreadOrganizationDb` -- a sqlez domain beside upstream's, with an append-only
+  migration list, so an upstream step can never collide with it. No UI; it is what
+  `0049` and the later organization stories read and write. Written on
+  `zeo-0.2.1_p20261008` for story 031, forward-ported here (story 032).
+- `0049` (ungrouped, unconditional, right after `0048`): the threads sidebar's
+  Pinned section, `crates/sidebar/src/pinned_section.rs` and 36 tests in
+  `sidebar_pinned_tests.rs`, plus `shift-p` in the three default keymaps. Zeo
+  0.3.0 records it.
+- `scripts/proofs/032-pinned-section/run.sh`: the section's live proof, driven
+  off-desktop on `xvfb-proof.sh`.
+
+### Changed
+
+- `0025`: `prevent_root_execution` names Zeo ("Running Zeo as root or via sudo is
+  unsupported"); `ZED_ALLOW_ROOT` keeps its name. The header gains the reasoning,
+  the rest of it byte-identical.
+- `0029`: its first `sidebar.rs` hunk follows the status check into
+  `apply_live_row_state`, where `0049` moved it -- re-indented, the same change.
+- `0010`, `0027`, `0028`, `0030`, `0035`, `0036`, `0037`, `0039`, `0040`, `0043`,
+  `0044`, `0045` move in context only: generated on top of `0049`.
+
 ## [0.2.3_p20261009] — 2026-10-09 (untagged)
 
 ### Changed
