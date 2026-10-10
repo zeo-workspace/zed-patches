@@ -12,7 +12,7 @@
 #
 # Steps use live-proof.py's JSON format -- an array of one-key objects:
 #   {"type": "<text>"} | {"key": ["<keysym>", ...]} | {"chord": ["<mod>", ..., "<key>"]} |
-#   {"click": [x, y]} | {"move": [x, y]} | {"sleep": <seconds, at most 60>} |
+#   {"click": [x, y]} | {"rclick": [x, y]} | {"move": [x, y]} | {"sleep": <seconds, at most 60>} |
 #   {"shot": "<path.png>"}
 # A one-character key name that is not an ASCII letter or digit ("/", "é") is
 # sent as its keysym, as live-proof.py does, and so is each such part of an
@@ -113,20 +113,20 @@ parse_args() {
 # accepted beside "shot" because live-proof.py reads it there.
 # shellcheck disable=SC2016  # jq program, not shell
 readonly STEP_CHECK='
-def kinds: ["type", "key", "chord", "click", "move", "sleep", "shot"];
+def kinds: ["type", "key", "chord", "click", "rclick", "move", "sleep", "shot"];
 def point: type == "array" and length == 2 and all(.[]; type == "number" and . >= 0 and . == floor);
 def check($k; $v):
   if $k == "type" then ($v | type == "string" and length > 0) // false
   elif $k == "key" then ($v | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) // false
   elif $k == "chord" then ($v | type == "array" and length >= 2 and all(.[]; type == "string" and length > 0)) // false
-  elif $k == "click" or $k == "move" then ($v | point) // false
+  elif $k == "click" or $k == "rclick" or $k == "move" then ($v | point) // false
   elif $k == "sleep" then ($v | type == "number" and . > 0 and . <= 60) // false
   elif $k == "shot" then ($v | type == "string" and length > 0) // false
   else false end;
 def need($k):
   {"type": "a non-empty string", "key": "a non-empty list of keysyms",
    "chord": "modifiers then a key, at least two keysyms",
-   "click": "[x, y] in whole pixels", "move": "[x, y] in whole pixels", "sleep": "seconds, above 0 and at most 60",
+   "click": "[x, y] in whole pixels", "rclick": "[x, y] in whole pixels", "move": "[x, y] in whole pixels", "sleep": "seconds, above 0 and at most 60",
    "shot": "a file path"}[$k];
 if type != "array" then "err\t0\t-\tthe step script is not a JSON array"
 else
@@ -542,10 +542,13 @@ run_steps() {
 			)"
 			xdo_key "${n}" chord "${value}"
 			;;
-		click | move)
+		click | rclick | move)
 			read -r x y <<<"$(step_value "${i}" "${kind}")"
 			if [[ "${kind}" == click ]]; then
 				xdo mousemove "${x}" "${y}" click 1 || die 1 "step ${n} (click): xdotool failed at ${x},${y}"
+			elif [[ "${kind}" == rclick ]]; then
+				# Button 3, for a context menu; the same seat-level injection as click.
+				xdo mousemove "${x}" "${y}" click 3 || die 1 "step ${n} (rclick): xdotool failed at ${x},${y}"
 			else
 				xdo mousemove "${x}" "${y}" || die 1 "step ${n} (move): xdotool failed at ${x},${y}"
 			fi

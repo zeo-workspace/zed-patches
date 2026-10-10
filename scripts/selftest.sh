@@ -1765,6 +1765,7 @@ test_xvfb_proof_drive_sends_every_step_to_the_private_display() {
 		{\"type\": \"agent: toggle focus\"},
 		{\"key\": [\"ctrl+shift+p\", \"Return\"]},
 		{\"click\": [10, 20]},
+		{\"rclick\": [50, 60]},
 		{\"move\": [30, 40]},
 		{\"sleep\": 0.01},
 		{\"shot\": \"${tmp}/caps/panel.png\"}]")")"
@@ -1774,6 +1775,7 @@ test_xvfb_proof_drive_sends_every_step_to_the_private_display() {
 		assert_contains "${log}" "DISPLAY=:90 xdotool type --delay 20 -- agent: toggle focus" &&
 		assert_contains "${log}" "DISPLAY=:90 xdotool key -- ctrl+shift+p Return" &&
 		assert_contains "${log}" "DISPLAY=:90 xdotool mousemove 10 20 click 1" &&
+		assert_contains "${log}" "DISPLAY=:90 xdotool mousemove 50 60 click 3" &&
 		assert_contains "${log}" "DISPLAY=:90 xdotool mousemove 30 40" &&
 		assert_contains "${log}" "DISPLAY=:90 import -window root ${tmp}/caps/panel.png" &&
 		assert_not_contains "${log}" "DISPLAY=:0 xdotool" &&
