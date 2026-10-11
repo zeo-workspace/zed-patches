@@ -1,0 +1,3662 @@
+From 6ce22dec05a1c75074ccd4d002d5613f5fb8cb43 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sun, 11 Oct 2026 11:02:51 -0300
+Subject: [PATCH] agent_tasks_panel: left-aligned rows, a close button, a
+ scrollbar, a text filter and multi-select
+
+The Agent Tasks panel of 0035 (with 0039's labels, 0041's Open at Task and
+0042's Delete) read badly once it filled up: row text was centred, there
+was no scrollbar and no way to find a task by name, and acting on many
+rows meant one click per row. Story 034.
+
+Rows are drawn left-aligned. The open control is a ButtonLike given the
+full width, and a ButtonLike with a width centres whatever it holds
+(justify_center + text_center in crates/ui); the row now grows its inner
+line to that width and holds the label in a flex line of its own, so the
+text starts at the slot's left edge and only shrinks to truncate. The
+progress text keeps the right end and is capped at 40% of the row, or on
+a 320px dock it took every free pixel and the label had no slot to start
+in. The group header's title takes the same Base04 inset ButtonLike gives
+the rows, so the labels start under it. crates/ui is not touched.
+
+A top toolbar carries an X ("Close Panel") that emits PanelEvent::Close,
+which the dock honours only while it shows this panel -- the same rule as
+the git panel. The operator's decision (2026-10-10): the X closes the
+panel, not a row; there is no per-row close or dismiss. Nothing is reset
+by it: toggles, filter text and selection are as they were on reopening.
+
+The list gets a vertical scrollbar through ui::Scrollbars, settings-free
+(the panel has no settings) and always shown while there is something to
+scroll: Scrollbars::new hides the thumb a second after the pointer
+enters, which the GUI proof caught as no scrollbar at all. A track runs
+along it so a click on the track scrolls there.
+
+A one-line input ("Filter tasks...") on the toolbar narrows the list to
+rows whose label, description or thread title contains the text, case
+insensitively and each field on its own, on top of the toggles. A header
+is listed only with a listed row, counting those. A blank text is no
+filter at all; with a real one and no match the panel says "No tasks
+match the filter". Escape in the input clears it.
+
+Rows can be selected: ctrl-click (cmd on macOS) toggles, shift-click takes
+the listed rows from the anchor, neither opens the thread; a plain click
+clears the selection and opens as before. agent_tasks_panel::ToggleSelected,
+bound to shift-space in the AgentTasksPanel context of both default
+keymaps, toggles the row one of whose controls has focus; outside a row it
+propagates, so shift-space still types a space in the filter. Escape on the
+panel clears the selection. A selected row draws element_selected as a
+background -- never an extra line, which uniform_list's one-line height
+forbids -- and says ", selected" to screen readers. The selection is keyed
+by session and task id and dropped for any row that stops being listed.
+
+Zed binds Tab to menu::SelectNext rather than to a focus move, and 0035's
+panel never handled it, so its tab stops were out of the keyboard's reach
+in the real app. The panel now maps SelectNext and SelectPrevious to
+focus_next and focus_prev, as the elicitation card does.
+
+While rows are selected a toolbar shows "N selected", Clear Selection,
+Archive Selected (every selected ended, unarchived row in one batch;
+running rows stay unarchived and selected) and, under the Archived filter,
+Delete Selected through 0042's own prompt and store path: only the
+selected archived rows are counted and deleted, never a thread. A failed
+write keeps memory and logs one line naming every id, as before.
+
+No migration, no setting, no new crate, no store or database change.
+Rides claude-agent-acp-plus BY DEPENDENCY after 0042, whose panel it
+changes.
+---
+
+diff --git a/assets/keymaps/default-linux.json b/assets/keymaps/default-linux.json
+index 6e137b4..b5d3da9 100644
+--- a/assets/keymaps/default-linux.json
++++ b/assets/keymaps/default-linux.json
+@@ -965,6 +965,12 @@
+       "ctrl-enter": "project_search::SearchInNew",
+     },
+   },
++  {
++    "context": "AgentTasksPanel",
++    "bindings": {
++      "shift-space": "agent_tasks_panel::ToggleSelected",
++    },
++  },
+   {
+     "context": "OutlinePanel && not_editing",
+     "bindings": {
+diff --git a/assets/keymaps/default-macos.json b/assets/keymaps/default-macos.json
+index a281490..24560ae 100644
+--- a/assets/keymaps/default-macos.json
++++ b/assets/keymaps/default-macos.json
+@@ -1021,6 +1021,12 @@
+       "cmd-enter": "project_search::SearchInNew",
+     },
+   },
++  {
++    "context": "AgentTasksPanel",
++    "bindings": {
++      "shift-space": "agent_tasks_panel::ToggleSelected",
++    },
++  },
+   {
+     "context": "OutlinePanel && not_editing",
+     "use_key_equivalents": true,
+diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
+index dcb229b..ab9f4f0 100644
+--- a/crates/agent_tasks_panel/src/panel.rs
++++ b/crates/agent_tasks_panel/src/panel.rs
+@@ -23,13 +23,16 @@ use collections::HashMap;
+ use db::kvp::KeyValueStore;
+ use editor::{Editor, EditorEvent, actions::SelectAll};
+ use gpui::{
+-    Action, AnyElement, AnyView, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter,
+-    FocusHandle, Focusable, IntoElement, Pixels, PromptLevel, Render, SharedString, Subscription,
+-    Task, TextStyleRefinement, UniformListScrollHandle, WeakEntity, Window, actions, px,
+-    uniform_list,
++    Action, AnyElement, AnyView, App, AsyncWindowContext, ClickEvent, Context, ElementId, Entity,
++    EventEmitter, FocusHandle, Focusable, IntoElement, Pixels, PromptLevel, Render, Role,
++    SharedString, Subscription, Task, TextStyleRefinement, UniformListScrollHandle, WeakEntity,
++    Window, actions, px, uniform_list,
+ };
+ use settings::SettingsStore;
+-use ui::{Banner, ButtonLike, ButtonStyle, Severity, TintColor, Tooltip, prelude::*};
++use ui::{
++    Banner, ButtonLike, ButtonStyle, ScrollAxes, Scrollbars, Severity, TintColor, Tooltip,
++    WithScrollbar, prelude::*,
++};
+ use workspace::{
+     Workspace,
+     dock::{DockPosition, Panel, PanelEvent},
+@@ -45,7 +48,9 @@ actions!(
+     agent_tasks_panel,
+     [
+         /// Toggles focus on the Agent Tasks panel.
+-        ToggleFocus
++        ToggleFocus,
++        /// Selects the task row whose control has keyboard focus, or deselects it.
++        ToggleSelected
+     ]
+ );
+ 
+@@ -192,6 +197,8 @@ pub struct PanelRow {
+     pub can_stop: bool,
+     /// The task has ended and is not archived yet (R3.4).
+     pub can_archive: bool,
++    /// The row is in the panel's selection (story 034 R5).
++    pub selected: bool,
+     /// Why the last click on the row opened nothing (R2.7).
+     pub notice: Option<SharedString>,
+     /// The card's error for this row (a failed stop), if any.
+@@ -287,15 +294,33 @@ pub struct AgentTasksPanel {
+     workspace: WeakEntity<Workspace>,
+     store: Entity<TaskHistoryStore>,
+     filters: TaskFilters,
++    /// The text filter, as typed; matched trimmed, and no filter at all while blank (story 034
++    /// R4). Kept for the session, like the toggles.
++    filter_query: SharedString,
++    /// The one-line input on the top toolbar that edits `filter_query`.
++    filter_editor: Entity<Editor>,
+     /// One per filter toggle, in `TaskFilter::ALL` order, kept across renders so keyboard
+     /// focus survives a repaint (Q14).
+     filter_focus_handles: [FocusHandle; 4],
+     /// Delete All Archived, beside the filters while Archived is on (story 025).
+     delete_all_focus_handle: FocusHandle,
++    /// The X at the right end of the top toolbar, which closes the panel's dock (story 034).
++    close_focus_handle: FocusHandle,
++    /// The selection toolbar's controls: Clear Selection and Archive Selected.
++    clear_selection_focus_handle: FocusHandle,
++    archive_selected_focus_handle: FocusHandle,
++    /// Delete Selected, on the selection toolbar while Archived is on.
++    delete_selected_focus_handle: FocusHandle,
+     /// Per listed row and per listed group; entries of rows and groups no longer listed are
+     /// dropped on render.
+     row_focus_handles: HashMap<TaskKey, RowFocus>,
+     group_focus_handles: HashMap<acp_v2::SessionId, FocusHandle>,
++    /// The selected rows, in the order they were added, each once (story 034 R5). Keys, never
++    /// list positions, so a repaint that moves rows cannot move the selection; pruned to the
++    /// listed rows on every render (R5.6).
++    selection: Vec<TaskKey>,
++    /// Where a shift-click range starts: the row last toggled, while it is listed.
++    selection_anchor: Option<TaskKey>,
+     /// A row's message after a click that opened nothing, until a later click opens it.
+     notices: HashMap<TaskKey, SharedString>,
+     /// The open rename, if any: at most one row edits its label at a time.
+@@ -344,8 +369,29 @@ impl AgentTasksPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Self {
++        // The panel's other text is `LabelSize::Small`; the input matches it.
++        let text_size = TextSize::Small.rems(cx);
++        let filter_editor = cx.new(|cx| {
++            let mut editor = Editor::single_line(window, cx);
++            editor.set_text_style_refinement(TextStyleRefinement {
++                font_size: Some(text_size.into()),
++                ..Default::default()
++            });
++            editor.set_placeholder_text("Filter tasks…", window, cx);
++            editor
++        });
+         let subscriptions = vec![
+             cx.observe(&store, |_, _, cx| cx.notify()),
++            cx.subscribe_in(
++                &filter_editor,
++                window,
++                |panel, editor, event: &EditorEvent, _window, cx| {
++                    if let EditorEvent::BufferEdited = event {
++                        panel.filter_query = editor.read(cx).text(cx).into();
++                        cx.notify();
++                    }
++                },
++            ),
+             // GPUI runs focus-lost listeners before the blur listeners of the same frame, and
+             // the workspace's own listener has already moved focus back to the panel, so
+             // `window.focused` alone cannot tell a vanished editor from focus taken by another
+@@ -375,11 +421,19 @@ impl AgentTasksPanel {
+             workspace: workspace.downgrade(),
+             store,
+             filters: TaskFilters::default(),
++            filter_query: SharedString::default(),
++            filter_editor,
+             filter_focus_handles: std::array::from_fn(|_| control_focus_handle(cx)),
+             delete_all_focus_handle: control_focus_handle(cx),
++            close_focus_handle: control_focus_handle(cx),
++            clear_selection_focus_handle: control_focus_handle(cx),
++            archive_selected_focus_handle: control_focus_handle(cx),
++            delete_selected_focus_handle: control_focus_handle(cx),
+             row_focus_handles: HashMap::default(),
+             group_focus_handles: HashMap::default(),
+             notices: HashMap::default(),
++            selection: Vec::new(),
++            selection_anchor: None,
+             renaming: None,
+             scroll_handle: UniformListScrollHandle::new(),
+             entries: Vec::new(),
+@@ -423,12 +477,73 @@ impl AgentTasksPanel {
+                     .then(|| store.live_task(&key.0, &key.1, cx))
+                     .flatten()
+                     .map(|(_card, task)| task);
++                let selected = self.selection.contains(&key);
+                 let notice = self.notices.get(&key).cloned();
+-                panel_row(entry, live, notice, snapshot.errors.get(&key).cloned())
++                panel_row(
++                    entry,
++                    live,
++                    selected,
++                    notice,
++                    snapshot.errors.get(&key).cloned(),
++                )
+             })
+             .collect();
+         rows.sort_by(|a, b| newest_first(&a.entry, &b.entry));
+-        group_rows(rows, &snapshot.titles)
++        let mut groups = group_rows(rows, &snapshot.titles);
++        let query = self.filter_query.trim();
++        if !query.is_empty() {
++            // Matched against the title the header shows, so a header is listed exactly when
++            // one of its rows is, and counts only those (R4.3).
++            for group in &mut groups {
++                let title = group.title.clone();
++                group.rows.retain(|row| {
++                    let record = &row.entry.record;
++                    let label = row.entry.label.as_deref().unwrap_or_default();
++                    matches_query(label, &record.description, &title, query)
++                });
++            }
++            groups.retain(|group| !group.rows.is_empty());
++        }
++        groups
++    }
++
++    /// Sets the text filter (R4.2), in the input too: rows must pass the toggles and match it.
++    pub fn set_filter_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
++        if self.filter_editor.read(cx).text(cx) != query {
++            self.filter_editor
++                .update(cx, |editor, cx| editor.set_text(query, window, cx));
++        }
++        if self.filter_query.as_ref() != query {
++            self.filter_query = SharedString::from(query.to_string());
++            cx.notify();
++        }
++    }
++
++    pub fn filter_editor(&self) -> Entity<Editor> {
++        self.filter_editor.clone()
++    }
++
++    /// Escape in the filter input clears its text (R4.5); with no text it is left to the
++    /// panel, where it clears the selection.
++    fn clear_filter_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if self.filter_query.is_empty() {
++            cx.propagate();
++            return;
++        }
++        self.set_filter_query("", window, cx);
++    }
++
++    /// What the panel shows where the list would be when it lists nothing, after the last
++    /// render: a blank filter text is no filter, so the toggles are what to blame (R4.4, R4.6).
++    pub fn empty_message(&self, _cx: &App) -> Option<SharedString> {
++        if !self.entries.is_empty() {
++            return None;
++        }
++        Some(if self.filter_query.trim().is_empty() {
++            SharedString::new_static("No tasks match the selected filters")
++        } else {
++            SharedString::new_static("No tasks match the filter")
++        })
+     }
+ 
+     pub fn is_filter_enabled(&self, filter: TaskFilter) -> bool {
+@@ -443,6 +558,154 @@ impl AgentTasksPanel {
+         cx.notify();
+     }
+ 
++    /// Adds `key`'s row to the selection, or takes it out, and makes it the range anchor.
++    pub fn toggle_selected(&mut self, key: &TaskKey, cx: &mut Context<Self>) {
++        if let Some(index) = self.selection.iter().position(|selected| selected == key) {
++            self.selection.remove(index);
++        } else {
++            self.selection.push(key.clone());
++        }
++        self.selection_anchor = Some(key.clone());
++        cx.notify();
++    }
++
++    /// Selects every listed row from the anchor to `key`, both included, in list order —
++    /// across groups, skipping headers and whatever the filters hide (R5.2). Without a listed
++    /// anchor there is no range, and the row is toggled alone.
++    pub fn select_range_to(&mut self, key: &TaskKey, cx: &mut Context<Self>) {
++        let listed: Vec<TaskKey> = self.listed_rows().map(row_key).collect();
++        let anchor_index = self
++            .selection_anchor
++            .as_ref()
++            .and_then(|anchor| listed.iter().position(|listed| listed == anchor));
++        let target_index = listed.iter().position(|listed| listed == key);
++        let (Some(anchor_index), Some(target_index)) = (anchor_index, target_index) else {
++            self.toggle_selected(key, cx);
++            return;
++        };
++        let range = anchor_index.min(target_index)..=anchor_index.max(target_index);
++        for row in &listed[range] {
++            if !self.selection.contains(row) {
++                self.selection.push(row.clone());
++            }
++        }
++        cx.notify();
++    }
++
++    /// `ToggleSelected`: toggles the row one of whose controls has keyboard focus (R5.5).
++    /// Elsewhere — the filter input, a header — the key is not the panel's to take.
++    fn toggle_focused_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let focused = self.row_focus_handles.iter().find_map(|(key, focus)| {
++            [
++                &focus.open,
++                &focus.rename,
++                &focus.stop,
++                &focus.archive,
++                &focus.delete,
++            ]
++            .into_iter()
++            .any(|handle| handle.is_focused(window))
++            .then(|| key.clone())
++        });
++        match focused {
++            Some(key) => self.toggle_selected(&key, cx),
++            None => cx.propagate(),
++        }
++    }
++
++    /// Escape on the panel clears the selection (R5.8). In the filter input Escape belongs
++    /// to the input, which clears its own text first (R4.5).
++    fn cancel_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let in_filter_input = self
++            .filter_editor
++            .focus_handle(cx)
++            .contains_focused(window, cx);
++        if self.selection.is_empty() || in_filter_input {
++            cx.propagate();
++            return;
++        }
++        self.clear_selection(cx);
++    }
++
++    /// The selected rows Archive Selected acts on, read from the store now rather than from
++    /// the last render: listed, ended and not archived (R6.2, R6.3).
++    fn archivable_selection(
++        &self,
++        listed: &collections::HashSet<TaskKey>,
++        cx: &App,
++    ) -> Vec<TaskKey> {
++        let records = self.store.read(cx).records();
++        self.selection
++            .iter()
++            .filter(|key| listed.contains(key))
++            .filter(|(session_id, task_id)| {
++                records.iter().any(|entry| {
++                    entry.record.session_id == *session_id
++                        && entry.record.task_id == *task_id
++                        && !entry.archived
++                        && !entry.record.status.is_running()
++                })
++            })
++            .cloned()
++            .collect()
++    }
++
++    /// The rows of the last render, in list order. Read while rendering, after `list_entries`
++    /// has rebuilt them, so a toolbar shows what the list shows without a second pass over the
++    /// store.
++    fn listed_rows(&self) -> impl Iterator<Item = &PanelRow> {
++        self.entries.iter().filter_map(|entry| match entry {
++            ListEntry::Row(row, _) => Some(row),
++            ListEntry::Header { .. } => None,
++        })
++    }
++
++    /// The keys the filters list right now, whatever the last render drew: what a bulk action
++    /// reads when it runs (R6.2).
++    fn listed_keys(&self, cx: &App) -> collections::HashSet<TaskKey> {
++        self.groups(cx)
++            .iter()
++            .flat_map(|group| group.rows.iter().map(row_key))
++            .collect()
++    }
++
++    /// Archives every selected row that has ended, in one batch — one write, and on failure
++    /// the store's one error line naming every id (R6.4) — then clears the selection but for
++    /// the running rows, which stay selected and unarchived (R6.2, R6.3).
++    pub fn archive_selected(&mut self, cx: &mut Context<Self>) {
++        let keys = self.archivable_selection(&self.listed_keys(cx), cx);
++        if keys.is_empty() {
++            log::debug!("agent tasks panel: no selected task can be archived");
++            return;
++        }
++        self.store.update(cx, |store, cx| store.archive(&keys, cx));
++        let records = self.store.read(cx).records();
++        self.selection.retain(|(session_id, task_id)| {
++            records.iter().any(|entry| {
++                entry.record.session_id == *session_id
++                    && entry.record.task_id == *task_id
++                    && entry.record.status.is_running()
++            })
++        });
++        if self
++            .selection_anchor
++            .as_ref()
++            .is_some_and(|anchor| !self.selection.contains(anchor))
++        {
++            self.selection_anchor = None;
++        }
++        cx.notify();
++    }
++
++    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
++        if self.selection.is_empty() && self.selection_anchor.is_none() {
++            return;
++        }
++        self.selection.clear();
++        self.selection_anchor = None;
++        cx.notify();
++    }
++
+     /// Opens the thread of `key`'s task in the window that holds its project (R2.5; story
+     /// 024 R1.1), through the same router as the tray link — which brings forward a
+     /// conversation the target agent panel already holds rather than loading a second one. A
+@@ -600,7 +863,7 @@ impl AgentTasksPanel {
+             );
+             return;
+         }
+-        self.confirm_delete(vec![key.clone()], window, cx);
++        self.confirm_delete(vec![key.clone()], false, window, cx);
+     }
+ 
+     /// Deletes every archived record once the user confirms (story 025). The batch is the one
+@@ -610,10 +873,53 @@ impl AgentTasksPanel {
+         if keys.is_empty() {
+             return;
+         }
+-        self.confirm_delete(keys, window, cx);
++        self.confirm_delete(keys, false, window, cx);
++    }
++
++    /// The selected rows Delete Selected acts on: listed and archived, and only while the
++    /// Archived filter is on (R7.2, R7.3).
++    fn deletable_selection(
++        &self,
++        listed: &collections::HashSet<TaskKey>,
++        cx: &App,
++    ) -> Vec<TaskKey> {
++        if !self.filters.archived {
++            return Vec::new();
++        }
++        let records = self.store.read(cx).records();
++        self.selection
++            .iter()
++            .filter(|key| listed.contains(key))
++            .filter(|(session_id, task_id)| {
++                records.iter().any(|entry| {
++                    entry.archived
++                        && entry.record.session_id == *session_id
++                        && entry.record.task_id == *task_id
++                })
++            })
++            .cloned()
++            .collect()
++    }
++
++    /// Deletes the selected archived records once the user confirms, then clears the
++    /// selection; Cancel keeps both (R7.3–R7.5). The batch is the one the prompt counted, and
++    /// the store refuses any of it unarchived meanwhile, so nothing is deleted unasked.
++    pub fn request_delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let keys = self.deletable_selection(&self.listed_keys(cx), cx);
++        if keys.is_empty() {
++            log::debug!("agent tasks panel: no selected task record can be deleted");
++            return;
++        }
++        self.confirm_delete(keys, true, window, cx);
+     }
+ 
+-    fn confirm_delete(&mut self, keys: Vec<TaskKey>, window: &mut Window, cx: &mut Context<Self>) {
++    fn confirm_delete(
++        &mut self,
++        keys: Vec<TaskKey>,
++        clear_selection: bool,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
+         let message = match keys.len() {
+             1 => "Delete 1 task record?".to_string(),
+             count => format!("Delete {count} task records?"),
+@@ -626,12 +932,16 @@ impl AgentTasksPanel {
+             cx,
+         );
+         let store = self.store.clone();
+-        cx.spawn(async move |_, cx| {
++        cx.spawn(async move |this, cx| {
+             // Index 0 is "Delete"; `Err` is a prompt whose sender was dropped.
+             if !matches!(answer.await, Ok(0)) {
+                 return;
+             }
+             store.update(cx, |store, cx| store.delete_archived(&keys, cx));
++            if clear_selection {
++                // A panel closed meanwhile has no selection left to clear.
++                this.update(cx, |panel, cx| panel.clear_selection(cx)).ok();
++            }
+         })
+         .detach();
+     }
+@@ -765,10 +1075,9 @@ impl AgentTasksPanel {
+         let Some(renaming) = &self.renaming else {
+             return;
+         };
+-        let listed = self.entries.iter().any(|entry| match entry {
+-            ListEntry::Row(row, _) => renaming.is_for(&row.entry.record),
+-            ListEntry::Header { .. } => false,
+-        });
++        let listed = self
++            .listed_rows()
++            .any(|row| renaming.is_for(&row.entry.record));
+         if !listed {
+             self.discard_rename(window, cx);
+         }
+@@ -827,6 +1136,111 @@ impl AgentTasksPanel {
+         }
+     }
+ 
++    /// The top toolbar: room for the filter input, then the X. The X closes the panel the way
++    /// the dock's own close does — the dock acts only while it shows this panel — and resets
++    /// nothing, so the panel reopens as it was (story 034 R2.2, R2.3).
++    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
++        h_flex()
++            .p_1()
++            .gap_1()
++            .border_b_1()
++            .border_color(cx.theme().colors().border)
++            .child(
++                h_flex()
++                    .id("agent-tasks-filter")
++                    .role(Role::SearchInput)
++                    .aria_label(control_aria_label("Filter tasks".to_string()))
++                    .flex_1()
++                    .min_w_0()
++                    .px_1()
++                    .on_action(
++                        cx.listener(|panel, _: &editor::actions::Cancel, window, cx| {
++                            panel.clear_filter_query(window, cx)
++                        }),
++                    )
++                    .on_action(cx.listener(|panel, _: &menu::Cancel, window, cx| {
++                        panel.clear_filter_query(window, cx)
++                    }))
++                    .child(self.filter_editor.clone()),
++            )
++            .child(
++                div()
++                    .debug_selector(|| "agent-tasks-close-panel".to_string())
++                    .child(
++                        action_button(
++                            "agent-tasks-close-panel".into(),
++                            IconName::Close,
++                            "Close Agent Tasks panel".to_string(),
++                            "Close Panel",
++                            &self.close_focus_handle,
++                        )
++                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PanelEvent::Close))),
++                    ),
++            )
++    }
++
++    /// Under the filters while a row is selected: the count, Clear Selection and, while it
++    /// can act, Archive Selected (R5.7, R6.1, R6.5). The counts use the same eligibility as
++    /// the actions, over the rows this render lists; the actions read it again when they run.
++    fn render_selection_toolbar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
++        if self.selection.is_empty() {
++            return None;
++        }
++        let listed: collections::HashSet<TaskKey> = self.listed_rows().map(row_key).collect();
++        let archivable = self.archivable_selection(&listed, cx).len();
++        let archive_selected = (archivable > 0).then(|| {
++            action_button(
++                "agent-tasks-archive-selected".into(),
++                IconName::Archive,
++                format!("Archive selected tasks: {archivable}"),
++                "Archive Selected Tasks",
++                &self.archive_selected_focus_handle,
++            )
++            .on_click(cx.listener(|panel, _, _, cx| panel.archive_selected(cx)))
++        });
++        let deletable = self.deletable_selection(&listed, cx).len();
++        let delete_selected = (deletable > 0).then(|| {
++            action_button(
++                "agent-tasks-delete-selected".into(),
++                IconName::Trash,
++                format!("Delete selected records: {deletable}"),
++                "Delete Selected Records",
++                &self.delete_selected_focus_handle,
++            )
++            .on_click(cx.listener(|panel, _, window, cx| panel.request_delete_selected(window, cx)))
++        });
++        Some(
++            h_flex()
++                .px_2()
++                .py_1()
++                .gap_1()
++                .justify_between()
++                .border_b_1()
++                .border_color(cx.theme().colors().border)
++                .child(
++                    Label::new(format!("{} selected", self.selection.len()))
++                        .size(LabelSize::Small)
++                        .color(Color::Muted),
++                )
++                .child(
++                    h_flex()
++                        .gap_1()
++                        .children(archive_selected)
++                        .children(delete_selected)
++                        .child(
++                            action_button(
++                                "agent-tasks-clear-selection".into(),
++                                IconName::Close,
++                                "Clear selection".to_string(),
++                                "Clear Selection",
++                                &self.clear_selection_focus_handle,
++                            )
++                            .on_click(cx.listener(|panel, _, _, cx| panel.clear_selection(cx))),
++                        ),
++                ),
++        )
++    }
++
+     fn render_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
+         let has_archived = self
+             .store
+@@ -927,10 +1341,7 @@ impl AgentTasksPanel {
+                 archive_focus,
+             });
+             for row in group.rows {
+-                let key = (
+-                    row.entry.record.session_id.clone(),
+-                    row.entry.record.task_id.clone(),
+-                );
++                let key = row_key(&row);
+                 let focus = self
+                     .row_focus_handles
+                     .remove(&key)
+@@ -939,6 +1350,17 @@ impl AgentTasksPanel {
+                 entries.push(ListEntry::Row(row, focus));
+             }
+         }
++        // A selected row no longer listed is dropped, not hidden: listing it again does not
++        // select it again (R5.6).
++        self.selection
++            .retain(|key| row_focus_handles.contains_key(key));
++        if self
++            .selection_anchor
++            .as_ref()
++            .is_some_and(|anchor| !row_focus_handles.contains_key(anchor))
++        {
++            self.selection_anchor = None;
++        }
+         self.row_focus_handles = row_focus_handles;
+         self.group_focus_handles = group_focus_handles;
+         entries
+@@ -979,12 +1401,28 @@ fn render_header(
+         .gap_1()
+         .justify_between()
+         .child(
+-            div().min_w_0().flex_1().child(
+-                Label::new(title.clone())
+-                    .size(LabelSize::Small)
+-                    .color(Color::Muted)
+-                    .truncate(),
+-            ),
++            // The rows' labels sit inside a ButtonLike, which pads them by `Base04`; the title
++            // takes the same inset so the labels start under it.
++            div()
++                .min_w_0()
++                .flex_1()
++                .pl(DynamicSpacing::Base04.rems(cx))
++                .child(
++                    h_flex().w_full().min_w_0().child(
++                        div()
++                            .debug_selector({
++                                let session_id = session_id.clone();
++                                move || format!("agent-tasks-group-title-{session_id}")
++                            })
++                            .min_w_0()
++                            .child(
++                                Label::new(title.clone())
++                                    .size(LabelSize::Small)
++                                    .color(Color::Muted)
++                                    .truncate(),
++                            ),
++                    ),
++                ),
+         )
+         .child(
+             h_flex()
+@@ -1013,6 +1451,7 @@ fn render_row(
+     cx: &mut Context<AgentTasksPanel>,
+ ) -> AnyElement {
+     let record = &row.entry.record;
++    let selected = row.selected;
+     let key: TaskKey = (record.session_id.clone(), record.task_id.clone());
+     let row_id = row_element_id(&key.0, &key.1);
+     let control_id =
+@@ -1035,40 +1474,86 @@ fn render_row(
+         })
+         .min_w_0()
+         .flex_1();
+-    // Shrinks and truncates too, so a long error cannot push the row past the panel.
+-    let detail_label = div().min_w_0().flex_shrink_1().child(
+-        Label::new(detail)
+-            .size(LabelSize::XSmall)
+-            .color(detail_color)
+-            .truncate(),
+-    );
++    // Shrinks and truncates too, so a long error cannot push the row past the panel; capped so
++    // that on a narrow panel the label, not the progress text, keeps most of the row.
++    let detail_label = div()
++        .debug_selector({
++            let task_id = task_id.clone();
++            move || format!("agent-tasks-row-detail-{task_id}")
++        })
++        .min_w_0()
++        .max_w(relative(0.4))
++        .flex_shrink_1()
++        .child(
++            Label::new(detail)
++                .size(LabelSize::XSmall)
++                .color(detail_color)
++                .truncate(),
++        );
+ 
+     let open_or_rename = match rename_editor {
+         Some(editor) => render_rename_editor(label_slot.child(editor), detail_label, cx),
+         None => ButtonLike::new(control_id("open"))
+             .full_width()
+             .child(
++                // `ButtonLike` centres whatever it holds once given a width; growing to fill it
++                // and setting the alignment here keeps the row's text at its left edge.
+                 h_flex()
++                    .flex_1()
+                     .w_full()
+                     .min_w_0()
+                     .gap_2()
+                     .justify_between()
++                    .text_left()
+                     .child(
++                        // A flex line, so the text is as wide as itself and starts at the slot's
++                        // left edge, shrinking only to truncate.
+                         label_slot.child(
+-                            Label::new(shown_label.clone())
+-                                .size(LabelSize::Small)
+-                                .single_line()
+-                                .truncate(),
++                            h_flex().w_full().min_w_0().child(
++                                div()
++                                    .debug_selector({
++                                        let task_id = task_id.clone();
++                                        move || format!("agent-tasks-row-label-text-{task_id}")
++                                    })
++                                    .min_w_0()
++                                    .child(
++                                        Label::new(shown_label.clone())
++                                            .size(LabelSize::Small)
++                                            .single_line()
++                                            .truncate(),
++                                    ),
++                            ),
+                         ),
+                     )
+                     .child(detail_label),
+             )
+-            .aria_label(control_aria_label(format!("Open thread: {shown_label}")))
++            .aria_label(control_aria_label(if selected {
++                format!("Open thread: {shown_label}, selected")
++            } else {
++                format!("Open thread: {shown_label}")
++            }))
+             .tooltip(open_thread_tooltip(task_id, full_label))
+             .track_focus(&focus.open)
+             .on_click(cx.listener({
+                 let key = key.clone();
+-                move |panel, _, window, cx| panel.open_task(&key, window, cx)
++                let open_focus = focus.open.clone();
++                // A modifier click selects and opens nothing (R5.1, R5.2); a plain click
++                // drops the selection and opens the thread, as before (R5.3). A button takes
++                // no focus on mouse down, so the selecting click focuses the row itself, or
++                // Escape would still go to whatever had focus before (R5.8).
++                move |panel, event: &ClickEvent, window, cx| {
++                    let modifiers = event.modifiers();
++                    if modifiers.secondary() {
++                        window.focus(&open_focus, cx);
++                        panel.toggle_selected(&key, cx);
++                    } else if modifiers.shift {
++                        window.focus(&open_focus, cx);
++                        panel.select_range_to(&key, cx);
++                    } else {
++                        panel.clear_selection(cx);
++                        panel.open_task(&key, window, cx);
++                    }
++                }
+             }))
+             .into_any_element(),
+     };
+@@ -1151,10 +1636,12 @@ fn render_row(
+     // `uniform_list` lays each line out against the list's width, but a line with no width of
+     // its own shrinks to its content — and a one-line editor has none, so its slot would get
+     // no room at all while renaming.
++    // A background, never an extra line: the row keeps the one-line height.
+     h_flex()
+         .id(row_id)
+         .w_full()
+         .h_7()
++        .when(selected, |row| row.bg(cx.theme().colors().element_selected))
+         .pl_2()
+         .pr_2()
+         .gap_1()
+@@ -1346,6 +1833,7 @@ fn status_color(status: AgentTaskStatus) -> Color {
+ fn panel_row(
+     entry: &HistoryEntry,
+     live: Option<AgentTask>,
++    selected: bool,
+     notice: Option<SharedString>,
+     error: Option<SharedString>,
+ ) -> PanelRow {
+@@ -1361,12 +1849,30 @@ fn panel_row(
+     PanelRow {
+         can_stop,
+         can_archive: !entry.archived && !entry.record.status.is_running(),
++        selected,
+         notice,
+         error,
+         entry,
+     }
+ }
+ 
++/// Whether a row matches `query` (already trimmed, not empty): its label, its description or
++/// its thread's title contains it, ignoring case. Each field is matched on its own, so a
++/// query never matches across two of them; the status and progress text are not matched.
++fn matches_query(label: &str, description: &str, thread_title: &str, query: &str) -> bool {
++    let query = query.to_lowercase();
++    [label, description, thread_title]
++        .into_iter()
++        .any(|field| field.to_lowercase().contains(&query))
++}
++
++fn row_key(row: &PanelRow) -> TaskKey {
++    (
++        row.entry.record.session_id.clone(),
++        row.entry.record.task_id.clone(),
++    )
++}
++
+ /// The keys of every archived record, in the store's order.
+ fn archived_keys(records: &[HistoryEntry]) -> Vec<TaskKey> {
+     records
+@@ -1459,9 +1965,23 @@ impl Render for AgentTasksPanel {
+         v_flex()
+             .key_context("AgentTasksPanel")
+             .track_focus(&self.focus_handle)
++            .on_action(cx.listener(|panel, _: &ToggleSelected, window, cx| {
++                panel.toggle_focused_row(window, cx)
++            }))
++            .on_action(
++                cx.listener(|panel, _: &menu::Cancel, window, cx| {
++                    panel.cancel_selection(window, cx)
++                }),
++            )
++            // Zed binds Tab to `menu::SelectNext`, not to a focus move, so without these the
++            // panel's tab stops are out of the keyboard's reach (R2.1, R5.5).
++            .on_action(|_: &menu::SelectNext, window, cx| window.focus_next(cx))
++            .on_action(|_: &menu::SelectPrevious, window, cx| window.focus_prev(cx))
+             .size_full()
+             .bg(cx.theme().colors().panel_background)
++            .child(self.render_toolbar(cx))
+             .child(self.render_filters(cx))
++            .children(self.render_selection_toolbar(cx))
+             .when_some(self.status_message(cx), |panel, message| {
+                 panel.child(
+                     div().p_1().child(
+@@ -1480,23 +2000,45 @@ impl Render for AgentTasksPanel {
+                             .items_center()
+                             .justify_center()
+                             .p_4()
+-                            .child(
+-                                Label::new("No tasks match the selected filters")
++                            .children(self.empty_message(cx).map(|message| {
++                                Label::new(message)
+                                     .size(LabelSize::Small)
+-                                    .color(Color::Muted),
+-                            ),
++                                    .color(Color::Muted)
++                            })),
+                     )
+                 } else {
+                     panel.child(
+-                        uniform_list(
+-                            "agent-tasks-list",
+-                            entry_count,
+-                            cx.processor(|panel, range: Range<usize>, _window, cx| {
+-                                panel.render_entries(range, cx)
+-                            }),
+-                        )
+-                        .flex_1()
+-                        .track_scroll(&self.scroll_handle),
++                        v_flex()
++                            .debug_selector(|| "agent-tasks-list".to_string())
++                            .flex_1()
++                            .min_h_0()
++                            .overflow_hidden()
++                            .child(
++                                uniform_list(
++                                    "agent-tasks-list",
++                                    entry_count,
++                                    cx.processor(|panel, range: Range<usize>, _window, cx| {
++                                        panel.render_entries(range, cx)
++                                    }),
++                                )
++                                .flex_1()
++                                .size_full()
++                                .track_scroll(&self.scroll_handle),
++                            )
++                            // Settings-free, since the panel has none, and always shown while
++                            // there is something to scroll (R3.1): the default auto-hides it a
++                            // second after the pointer enters. The track makes a click on it
++                            // scroll there (R3.2); the thumb alone ignores such a click.
++                            .custom_scrollbars(
++                                Scrollbars::always_visible(ScrollAxes::Vertical)
++                                    .tracked_scroll_handle(&self.scroll_handle)
++                                    .with_track_along(
++                                        ScrollAxes::Vertical,
++                                        cx.theme().colors().panel_background,
++                                    ),
++                                window,
++                                cx,
++                            ),
+                     )
+                 }
+             })
+@@ -1623,3 +2165,39 @@ mod tool_call_id_contract;
+ #[cfg(test)]
+ #[path = "panel/delete_action_tests.rs"]
+ mod delete_action;
++
++#[cfg(test)]
++#[path = "panel/row_alignment_tests.rs"]
++mod row_alignment;
++
++#[cfg(test)]
++#[path = "panel/close_button_tests.rs"]
++mod close_button;
++
++#[cfg(test)]
++#[path = "panel/scrollbar_tests.rs"]
++mod scrollbar;
++
++#[cfg(test)]
++#[path = "panel/text_filter_tests.rs"]
++mod text_filter;
++
++#[cfg(test)]
++#[path = "panel/filter_input_tests.rs"]
++mod filter_input;
++
++#[cfg(test)]
++#[path = "panel/selection_state_tests.rs"]
++mod selection_state;
++
++#[cfg(test)]
++#[path = "panel/selection_gesture_tests.rs"]
++mod selection_gesture;
++
++#[cfg(test)]
++#[path = "panel/bulk_archive_tests.rs"]
++mod bulk_archive;
++
++#[cfg(test)]
++#[path = "panel/delete_selected_tests.rs"]
++mod delete_selected;
+diff --git a/crates/agent_tasks_panel/src/panel/bulk_archive_tests.rs b/crates/agent_tasks_panel/src/panel/bulk_archive_tests.rs
+new file mode 100644
+index 0000000..43b8699
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/bulk_archive_tests.rs
+@@ -0,0 +1,354 @@
++// Story 034, task 4.3 — the selection toolbar and Archive Selected (R5.7, R6.1, R6.2, R6.3,
++// R6.4, R6.5). Module path: `panel::bulk_archive`. Every test name starts with `bulk_archive_`,
++// the task's validation filter. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/bulk_archive_tests.rs"]
++//     mod bulk_archive;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - `AgentTasksPanel::archive_selected(&mut self, cx)` is what Archive Selected does;
++//   - the toolbar's controls are announced through `control_aria_label`: Clear Selection with a
++//     label containing "clear selection", Archive Selected with one containing
++//     "archive selected" (case-insensitive);
++//   - `toggle_selected(&TaskKey, cx)`, the `selection` field, `set_filter_query` (tasks 3-4).
++// Not covered: the "N selected" text (a plain label, not announced) — GUI proof (task 7.1).
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++async fn seed(
++    db: &AgentTaskHistoryDb,
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++    archived: bool,
++) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, status, at))
++        .await
++        .unwrap();
++    if archived {
++        db.set_archived(&[key(session, task)], true).await.unwrap();
++    }
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn select(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.toggle_selected(&target, cx)
++    });
++    draw(&mut panels.cx);
++}
++
++fn archive_selected(panels: &mut Panels) {
++    panels
++        .tasks_panel
++        .update(&mut panels.cx, |panel, cx| panel.archive_selected(cx));
++    panels.cx.run_until_parked();
++    draw(&mut panels.cx);
++}
++
++fn selection(panels: &mut Panels) -> Vec<(String, String)> {
++    draw(&mut panels.cx);
++    let mut keys: Vec<_> = panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        panel
++            .selection
++            .iter()
++            .map(|(session, task)| (session.to_string(), task.to_string()))
++            .collect()
++    });
++    keys.sort();
++    keys
++}
++
++fn archived(cx: &mut VisualTestContext, session: &str, task: &str) -> bool {
++    cx.update(|_, cx| {
++        let records = TaskHistoryStore::global(cx).read(cx).records().to_vec();
++        find(&records, session, task)
++            .unwrap_or_else(|| panic!("{session}/{task} is recorded"))
++            .archived
++    })
++}
++
++fn offers(panels: &mut Panels, needle: &str) -> bool {
++    draw(&mut panels.cx);
++    super::RENDERED_ARIA_LABELS.with_borrow(|labels| {
++        labels
++            .iter()
++            .any(|label| label.to_lowercase().contains(needle))
++    })
++}
++
++fn only(panels: &mut Panels, on: &[TaskFilter]) {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        for filter in TaskFilter::ALL {
++            panel.set_filter(filter, on.contains(&filter), cx);
++        }
++    });
++    draw(&mut panels.cx);
++}
++
++/// A live thread holding `run` (running) and `done` (completed); returns its session.
++fn live_thread(panels: &mut Panels) -> String {
++    let thread = open_live_thread(panels, "Live");
++    send_tasks(
++        &thread,
++        vec![
++            wire_task("done", "running", 900, None),
++            wire_task("run", "running", 1_000, None),
++        ],
++        &mut panels.cx,
++    );
++    send_tasks(
++        &thread,
++        vec![
++            wire_task("done", "completed", 900, Some((10, 1))),
++            wire_task("run", "running", 1_000, None),
++        ],
++        &mut panels.cx,
++    );
++    session_of(&thread, &panels.cx).to_string()
++}
++
++// Hostile (R6.3): a running selected row is left unarchived AND selected; the rest of the
++// batch is archived regardless.
++#[gpui::test]
++async fn bulk_archive_leaves_a_running_selected_row_unarchived_and_selected(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(&db, "old", "past", AgentTaskStatus::Failed, 500, false).await;
++    let mut panels = open_panels(cx).await;
++    only(
++        &mut panels,
++        &[TaskFilter::Active, TaskFilter::Finished, TaskFilter::Failed],
++    );
++    let session = live_thread(&mut panels);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, &session, "run");
++    select(&mut panels, &session, "done");
++    select(&mut panels, "old", "past");
++
++    archive_selected(&mut panels);
++
++    assert!(
++        !archived(&mut panels.cx, &session, "run"),
++        "running: not archived"
++    );
++    assert!(archived(&mut panels.cx, &session, "done"));
++    assert!(archived(&mut panels.cx, "old", "past"));
++    assert_eq!(
++        selection(&mut panels),
++        vec![(session.clone(), "run".to_string())],
++        "only the running row stays selected"
++    );
++}
++
++// Hostile (R5.6, R6.2): a selected row hidden by the text filter is dropped, not archived.
++#[gpui::test]
++async fn bulk_archive_never_acts_on_a_row_the_filter_hid(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(
++        &db,
++        "s1",
++        "keep-me",
++        AgentTaskStatus::Completed,
++        1_000,
++        false,
++    )
++    .await;
++    seed(
++        &db,
++        "s1",
++        "file-me",
++        AgentTaskStatus::Completed,
++        1_100,
++        false,
++    )
++    .await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "s1", "keep-me");
++    select(&mut panels, "s1", "file-me");
++
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.set_filter_query("file-me", window, cx)
++        });
++    draw(&mut panels.cx);
++    archive_selected(&mut panels);
++
++    assert!(archived(&mut panels.cx, "s1", "file-me"));
++    assert!(
++        !archived(&mut panels.cx, "s1", "keep-me"),
++        "the row the filter hid is not archived"
++    );
++}
++
++// Hostile (R6.2): a mixed selection under Archived + Finished archives the unarchived row and
++// never toggles the already-archived one back.
++#[gpui::test]
++async fn bulk_archive_never_unarchives_an_archived_selected_row(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "z", AgentTaskStatus::Completed, 1_000, true).await;
++    seed(&db, "s1", "y", AgentTaskStatus::Completed, 1_100, false).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Archived]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "s1", "z");
++    select(&mut panels, "s1", "y");
++
++    archive_selected(&mut panels);
++
++    assert!(archived(&mut panels.cx, "s1", "y"));
++    assert!(archived(&mut panels.cx, "s1", "z"), "still archived");
++    assert!(
++        selection(&mut panels).is_empty(),
++        "the selection is cleared"
++    );
++}
++
++// R5.7, R6.1, R6.5: the toolbar shows only with a selection; Archive Selected only while a
++// selected row has ended unarchived.
++#[gpui::test]
++async fn bulk_archive_toolbar_and_icon_show_only_when_they_can_act(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "arch", AgentTaskStatus::Completed, 500, true).await;
++    let mut panels = open_panels(cx).await;
++    let session = live_thread(&mut panels);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    assert!(
++        !offers(&mut panels, "clear selection"),
++        "no selection, no toolbar"
++    );
++    assert!(!offers(&mut panels, "archive selected"));
++
++    select(&mut panels, &session, "run");
++    assert!(offers(&mut panels, "clear selection"), "the toolbar shows");
++    assert!(
++        !offers(&mut panels, "archive selected"),
++        "only a running row selected: nothing to archive"
++    );
++
++    select(&mut panels, &session, "done");
++    assert!(
++        offers(&mut panels, "archive selected"),
++        "an ended row is selected"
++    );
++
++    panels
++        .tasks_panel
++        .update(&mut panels.cx, |panel, cx| panel.clear_selection(cx));
++    only(&mut panels, &[TaskFilter::Archived]);
++    select(&mut panels, "s1", "arch");
++    assert!(offers(&mut panels, "clear selection"));
++    assert!(
++        !offers(&mut panels, "archive selected"),
++        "only an archived row selected: nothing to archive"
++    );
++}
++
++// R6.2: eligibility is read when Archive Selected runs — a row that ended after it was selected
++// is archived.
++#[gpui::test]
++async fn bulk_archive_reads_eligibility_when_it_runs(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "running", 1_000, None)],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, &session, "t");
++
++    send_tasks(
++        &thread,
++        vec![wire_task("t", "completed", 1_000, Some((5, 1)))],
++        &mut panels.cx,
++    );
++    archive_selected(&mut panels);
++    assert!(archived(&mut panels.cx, &session, "t"));
++}
++
++// R6.4, Q4: the batch is one write; when it fails the rows stay archived in memory and ONE error
++// line names every session and task id.
++#[gpui::test]
++async fn bulk_archive_failed_write_keeps_memory_and_logs_one_line_with_the_ids(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(
++        &db,
++        "session-b1",
++        "task-b1",
++        AgentTaskStatus::Completed,
++        1_000,
++        false,
++    )
++    .await;
++    seed(
++        &db,
++        "session-b2",
++        "task-b2",
++        AgentTaskStatus::Completed,
++        1_100,
++        false,
++    )
++    .await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "session-b1", "task-b1");
++    select(&mut panels, "session-b2", "task-b2");
++    drop_history_table(&db).await;
++    capture_logs();
++
++    archive_selected(&mut panels);
++
++    assert!(
++        archived(&mut panels.cx, "session-b1", "task-b1"),
++        "kept in memory"
++    );
++    assert!(
++        archived(&mut panels.cx, "session-b2", "task-b2"),
++        "kept in memory"
++    );
++    assert!(
++        visible_keys(&mut panels).is_empty(),
++        "hidden by the defaults this session"
++    );
++    let lines: Vec<String> = error_lines()
++        .into_iter()
++        .filter(|line| line.contains("archiv"))
++        .collect();
++    assert_eq!(lines.len(), 1, "one batch, one line: {lines:?}");
++    for id in ["session-b1", "task-b1", "session-b2", "task-b2"] {
++        assert!(lines[0].contains(id), "the line names {id}: {lines:?}");
++    }
++}
+diff --git a/crates/agent_tasks_panel/src/panel/close_button_tests.rs b/crates/agent_tasks_panel/src/panel/close_button_tests.rs
+new file mode 100644
+index 0000000..23a601e
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/close_button_tests.rs
+@@ -0,0 +1,220 @@
++// Story 034, task 2.2 — an X on the panel's top toolbar closes the panel (R2.1, R2.2, R2.3,
++// R2.4). Module path: `panel::close_button`. Every test name starts with `close_button_`, the
++// task's validation filter. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/close_button_tests.rs"]
++//     mod close_button;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - the X carries debug selector `agent-tasks-close-panel` and the screen-reader label
++//     "Close Agent Tasks panel" (recorded through `control_aria_label`);
++//   - the X emits `PanelEvent::Close`; the dock decides whether to close (dock.rs:772-778);
++//   - no row control is labelled as a close or dismiss action (v2: no whitelist;
++//     story 041 adds "Open Log").
++// Not covered here: Tab reaching the X (R2.1) — no focus-order probe in the rig; the GUI proof
++// (task 7.1) covers it.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
++use workspace::{
++    Workspace,
++    dock::{DockPosition, PanelEvent, test::TestPanel},
++};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++async fn seed(db: &AgentTaskHistoryDb, session: &str, task: &str, at: i64, archived: bool) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, AgentTaskStatus::Completed, at))
++        .await
++        .unwrap();
++    if archived {
++        db.set_archived(&[key(session, task)], true).await.unwrap();
++    }
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn tasks_panel_shown(panels: &Panels) -> bool {
++    let id = panels.tasks_panel.entity_id();
++    panels.workspace.read_with(&panels.cx, |workspace, cx| {
++        let dock = workspace.bottom_dock().read(cx);
++        dock.is_open() && dock.visible_panel().map(|panel| panel.panel_id()) == Some(id)
++    })
++}
++
++fn left_dock_open(panels: &Panels) -> bool {
++    panels.workspace.read_with(&panels.cx, |workspace, cx| {
++        workspace.left_dock().read(cx).is_open()
++    })
++}
++
++fn bottom_dock_open(panels: &Panels) -> bool {
++    panels.workspace.read_with(&panels.cx, |workspace, cx| {
++        workspace.bottom_dock().read(cx).is_open()
++    })
++}
++
++fn click_close(panels: &mut Panels) {
++    draw(&mut panels.cx);
++    let bounds = panels
++        .cx
++        .debug_bounds("agent-tasks-close-panel")
++        .expect("the X is painted on the panel's toolbar");
++    panels.cx.simulate_click(bounds.center(), Modifiers::none());
++    panels.cx.run_until_parked();
++}
++
++fn stored(cx: &mut VisualTestContext) -> Vec<(String, String, bool, Option<String>)> {
++    cx.update(|_, cx| {
++        TaskHistoryStore::global(cx)
++            .read(cx)
++            .records()
++            .iter()
++            .map(|entry| {
++                let (session, task) = key_of(entry);
++                (
++                    session,
++                    task,
++                    entry.archived,
++                    entry.label.as_ref().map(ToString::to_string),
++                )
++            })
++            .collect()
++    })
++}
++
++fn painted_labels(panels: &mut Panels) -> Vec<String> {
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    super::RENDERED_ARIA_LABELS
++        .with_borrow(|labels| labels.iter().map(ToString::to_string).collect())
++}
++
++// Hostile (R2.2, R2.3): the X closes the dock showing the panel and nothing else — the agent
++// panel's dock stays open, no record changes, and the toggles are as they were on reopening.
++#[gpui::test]
++async fn close_button_closes_only_this_dock_and_changes_no_record_or_toggle(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(&db, "s1", "kept", 1_000, false).await;
++    seed(&db, "s1", "old", 1_100, true).await;
++    let mut panels = open_panels(cx).await;
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Active, false, cx);
++        panel.set_filter(TaskFilter::Failed, true, cx);
++        panel.set_filter(TaskFilter::Archived, true, cx);
++    });
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    assert!(tasks_panel_shown(&panels));
++    assert!(
++        left_dock_open(&panels),
++        "the agent panel's dock starts open"
++    );
++    let before = stored(&mut panels.cx);
++
++    click_close(&mut panels);
++
++    assert!(!bottom_dock_open(&panels), "the X closes the panel's dock");
++    assert!(left_dock_open(&panels), "another dock is not closed");
++    assert_eq!(stored(&mut panels.cx), before, "no record changed");
++
++    panels.cx.dispatch_action(crate::ToggleFocus);
++    panels.cx.run_until_parked();
++    assert!(tasks_panel_shown(&panels), "ToggleFocus reopens the panel");
++    panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        assert!(!panel.is_filter_enabled(TaskFilter::Active));
++        assert!(panel.is_filter_enabled(TaskFilter::Finished));
++        assert!(panel.is_filter_enabled(TaskFilter::Failed));
++        assert!(panel.is_filter_enabled(TaskFilter::Archived));
++    });
++    assert_eq!(stored(&mut panels.cx), before);
++}
++
++// Hostile (R2.2): a close from this panel never closes its dock while the dock shows another
++// panel. The X emits `PanelEvent::Close`, which the dock honours only for its visible panel.
++#[gpui::test]
++async fn close_button_close_is_ignored_while_another_panel_is_shown_in_the_dock(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let other = panels
++        .workspace
++        .update_in(&mut panels.cx, |workspace, window, cx| {
++            let other = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 50, cx));
++            workspace.add_panel(other.clone(), window, cx);
++            workspace.focus_panel::<TestPanel>(window, cx);
++            other
++        });
++    panels.cx.run_until_parked();
++    assert!(bottom_dock_open(&panels));
++    assert!(
++        !tasks_panel_shown(&panels),
++        "the other panel is the one shown"
++    );
++
++    panels
++        .tasks_panel
++        .update(&mut panels.cx, |_, cx| cx.emit(PanelEvent::Close));
++    panels.cx.run_until_parked();
++    assert!(
++        bottom_dock_open(&panels),
++        "the dock showing another panel stays open"
++    );
++
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    click_close(&mut panels);
++    assert!(
++        !bottom_dock_open(&panels),
++        "the X closes it once it is shown"
++    );
++    drop(other);
++}
++
++// R2.1, R2.4: the X is announced once, and no row carries a close or dismiss control. (v2: the
++// row-control whitelist was dropped — story 041 adds "Open Log" to history rows, and the
++// operator asked only that rows carry no close/dismiss control.)
++#[gpui::test]
++async fn close_button_is_announced_and_rows_carry_no_close_control(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "done", 1_000, false).await;
++    seed(&db, "s1", "old", 1_100, true).await;
++    let mut panels = open_panels(cx).await;
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Archived, true, cx);
++    });
++
++    let labels = painted_labels(&mut panels);
++    assert_eq!(
++        labels
++            .iter()
++            .filter(|label| label.as_str() == "Close Agent Tasks panel")
++            .count(),
++        1,
++        "the X carries its label once: {labels:?}"
++    );
++    for label in labels.iter().filter(|label| label.contains("Task ")) {
++        let lower = label.to_lowercase();
++        assert!(
++            !lower.starts_with("close") && !lower.starts_with("dismiss"),
++            "no per-row close or dismiss: {label:?}"
++        );
++    }
++}
+diff --git a/crates/agent_tasks_panel/src/panel/delete_selected_tests.rs b/crates/agent_tasks_panel/src/panel/delete_selected_tests.rs
+new file mode 100644
+index 0000000..fce87f7
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/delete_selected_tests.rs
+@@ -0,0 +1,284 @@
++// Story 034, task 4.4 — Delete Selected under the Archived filter (R7.2, R7.3, R7.4, R7.5,
++// R7.6). Module path: `panel::delete_selected`. Every test name starts with `delete_selected_`,
++// the task's validation filter. Hostile fixtures come before benign ones. R7.1 (per-row Delete
++// and Delete All Archived unchanged) stays proved by the `panel::delete_action` suite.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/delete_selected_tests.rs"]
++//     mod delete_selected;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - `AgentTasksPanel::request_delete_selected(&mut self, window, cx)` is what Delete Selected
++//     does; it asks through 0042's prompt ("Delete N task records?", "The threads are not
++//     affected.", Delete / Cancel) and does nothing without an archived selected row while the
++//     Archived filter is on;
++//   - Delete Selected is announced with a label containing "delete selected"
++//     (case-insensitive);
++//   - `toggle_selected(&TaskKey, cx)` and the `selection` field (task 4.1).
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++async fn seed(db: &AgentTaskHistoryDb, session: &str, task: &str, at: i64, archived: bool) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, AgentTaskStatus::Completed, at))
++        .await
++        .unwrap();
++    if archived {
++        db.set_archived(&[key(session, task)], true).await.unwrap();
++    }
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn only(panels: &mut Panels, on: &[TaskFilter]) {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        for filter in TaskFilter::ALL {
++            panel.set_filter(filter, on.contains(&filter), cx);
++        }
++    });
++    draw(&mut panels.cx);
++}
++
++fn select(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.toggle_selected(&target, cx)
++    });
++    draw(&mut panels.cx);
++}
++
++fn request(panels: &mut Panels) {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.request_delete_selected(window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++fn answer(panels: &mut Panels, button: &str) {
++    panels.cx.simulate_prompt_answer(button);
++    panels.cx.run_until_parked();
++    draw(&mut panels.cx);
++}
++
++fn selection_len(panels: &mut Panels) -> usize {
++    draw(&mut panels.cx);
++    panels
++        .tasks_panel
++        .read_with(&panels.cx, |panel, _| panel.selection.len())
++}
++
++fn in_memory(cx: &mut VisualTestContext) -> Vec<crate::HistoryEntry> {
++    cx.update(|_, cx| TaskHistoryStore::global(cx).read(cx).records().to_vec())
++}
++
++fn offers_delete_selected(panels: &mut Panels) -> bool {
++    draw(&mut panels.cx);
++    super::RENDERED_ARIA_LABELS.with_borrow(|labels| {
++        labels
++            .iter()
++            .any(|label| label.to_lowercase().contains("delete selected"))
++    })
++}
++
++// Hostile (R7.3, R7.4): with a mixed selection, the prompt counts only the selected ARCHIVED
++// rows, and confirming deletes exactly those — not the selected unarchived row, not an
++// archived row that was not selected — in memory and on disk; then the selection is cleared.
++#[gpui::test]
++async fn delete_selected_counts_and_deletes_only_the_selected_archived_rows(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(&db, "s1", "a1", 1_000, true).await;
++    seed(&db, "s1", "a2", 1_100, true).await;
++    seed(&db, "s1", "a3", 1_200, true).await;
++    seed(&db, "s2", "f", 1_300, false).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Archived]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "s1", "a1");
++    select(&mut panels, "s1", "a2");
++    select(&mut panels, "s2", "f");
++
++    request(&mut panels);
++    let (message, detail) = panels
++        .cx
++        .pending_prompt()
++        .expect("Delete Selected asks first");
++    assert_eq!(message, "Delete 2 task records?");
++    assert_eq!(detail, "The threads are not affected.");
++    answer(&mut panels, "Delete");
++
++    let memory = in_memory(&mut panels.cx);
++    assert!(find(&memory, "s1", "a1").is_none());
++    assert!(find(&memory, "s1", "a2").is_none());
++    assert!(
++        find(&memory, "s1", "a3").is_some(),
++        "an unselected archived row stays"
++    );
++    assert!(
++        find(&memory, "s2", "f").is_some(),
++        "a selected unarchived row stays"
++    );
++    let mut stored: Vec<_> = load(&db).await.iter().map(key_of).collect();
++    stored.sort();
++    assert_eq!(
++        stored,
++        vec![
++            ("s1".to_string(), "a3".to_string()),
++            ("s2".to_string(), "f".to_string()),
++        ]
++    );
++    assert_eq!(selection_len(&mut panels), 0, "the selection is cleared");
++}
++
++// Hostile (R7.4, race): what the prompt counted is the batch. A counted row unarchived while it
++// is open is not deleted, and a selected row archived after it opened is not deleted either.
++#[gpui::test]
++async fn delete_selected_deletes_only_the_counted_rows_still_archived(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "kept-archived", 1_000, true).await;
++    seed(&db, "s1", "unarchived-meanwhile", 1_100, true).await;
++    seed(&db, "s2", "archived-meanwhile", 1_200, false).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Archived]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "s1", "kept-archived");
++    select(&mut panels, "s1", "unarchived-meanwhile");
++    select(&mut panels, "s2", "archived-meanwhile");
++
++    request(&mut panels);
++    let (message, _) = panels.cx.pending_prompt().unwrap();
++    assert_eq!(message, "Delete 2 task records?");
++    let unarchive = key("s1", "unarchived-meanwhile");
++    let archive = key("s2", "archived-meanwhile");
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.unarchive(&unarchive, cx);
++        panel.archive(&archive, cx);
++    });
++    panels.cx.run_until_parked();
++    answer(&mut panels, "Delete");
++
++    let memory = in_memory(&mut panels.cx);
++    assert!(find(&memory, "s1", "kept-archived").is_none());
++    let unarchived = find(&memory, "s1", "unarchived-meanwhile").expect("not deleted");
++    assert!(!unarchived.archived);
++    let late = find(&memory, "s2", "archived-meanwhile").expect("not deleted");
++    assert!(late.archived, "archived after the count: not in the batch");
++    let rows = load(&db).await;
++    assert!(find(&rows, "s1", "unarchived-meanwhile").is_some());
++    assert!(find(&rows, "s2", "archived-meanwhile").is_some());
++}
++
++// Hostile (R7.2): offered — and acted on — only under Archived with an archived row selected.
++#[gpui::test]
++async fn delete_selected_is_offered_only_under_archived_with_an_archived_row_selected(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(&db, "s1", "arch", 1_000, true).await;
++    seed(&db, "s1", "fin", 1_100, false).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    select(&mut panels, "s1", "fin");
++    assert!(!offers_delete_selected(&mut panels), "Archived is off");
++    request(&mut panels);
++    assert!(!panels.cx.has_pending_prompt(), "nothing to delete");
++
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Archived]);
++    assert!(
++        !offers_delete_selected(&mut panels),
++        "Archived on, but only an unarchived row is selected"
++    );
++    request(&mut panels);
++    assert!(!panels.cx.has_pending_prompt());
++    assert_eq!(load(&db).await.len(), 2);
++
++    select(&mut panels, "s1", "arch");
++    assert!(offers_delete_selected(&mut panels));
++}
++
++// R7.5: Cancel deletes nothing and keeps the selection.
++#[gpui::test]
++async fn delete_selected_cancel_deletes_nothing_and_keeps_the_selection(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "a1", 1_000, true).await;
++    seed(&db, "s1", "a2", 1_100, true).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Archived]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "s1", "a1");
++    select(&mut panels, "s1", "a2");
++
++    request(&mut panels);
++    answer(&mut panels, "Cancel");
++
++    assert_eq!(in_memory(&mut panels.cx).len(), 2);
++    assert_eq!(load(&db).await.len(), 2);
++    assert_eq!(selection_len(&mut panels), 2, "the selection is kept");
++}
++
++// R7.6, Q4: a failed delete keeps the records gone from memory and logs ONE line naming every id.
++#[gpui::test]
++async fn delete_selected_failed_write_keeps_records_gone_and_logs_one_line(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed(&db, "session-d1", "task-d1", 1_000, true).await;
++    seed(&db, "session-d2", "task-d2", 1_100, true).await;
++    seed(&db, "session-d3", "task-d3", 1_200, true).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Archived]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "session-d1", "task-d1");
++    select(&mut panels, "session-d2", "task-d2");
++    drop_history_table(&db).await;
++    capture_logs();
++
++    request(&mut panels);
++    answer(&mut panels, "Delete");
++
++    let memory = in_memory(&mut panels.cx);
++    assert!(
++        find(&memory, "session-d1", "task-d1").is_none(),
++        "gone this session"
++    );
++    assert!(
++        find(&memory, "session-d2", "task-d2").is_none(),
++        "gone this session"
++    );
++    assert!(find(&memory, "session-d3", "task-d3").is_some());
++    let lines: Vec<String> = error_lines()
++        .into_iter()
++        .filter(|line| line.contains("delet"))
++        .collect();
++    assert_eq!(lines.len(), 1, "one batch, one line: {lines:?}");
++    for id in ["session-d1", "task-d1", "session-d2", "task-d2"] {
++        assert!(lines[0].contains(id), "the line names {id}: {lines:?}");
++    }
++    assert!(
++        !lines[0].contains("task-d3"),
++        "an unselected record is not named"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/filter_input_tests.rs b/crates/agent_tasks_panel/src/panel/filter_input_tests.rs
+new file mode 100644
+index 0000000..c4572b6
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/filter_input_tests.rs
+@@ -0,0 +1,264 @@
++// Story 034, task 3.2 — the filter input, its empty state and Escape (R4.1, R4.4, R4.5, R2.3).
++// Module path: `panel::filter_input`. Every test name starts with `filter_input_`, the task's
++// validation filter. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/filter_input_tests.rs"]
++//     mod filter_input;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - `AgentTasksPanel::filter_editor(&self) -> Entity<Editor>`, the one-line input, and the
++//     `filter_query` it keeps current on every edit;
++//   - `AgentTasksPanel::empty_message(&self, cx: &App) -> Option<SharedString>`: the text the
++//     panel shows where the list would be, `None` while a line is listed (render uses it, as it
++//     uses `status_message`);
++//   - Escape in the input is `editor::Cancel` (the default keymap's binding in an `Editor`);
++//   - the input's screen-reader label starts with "Filter tasks";
++//   - the X carries debug selector `agent-tasks-close-panel` (task 2.2);
++//   - row label slots carry `agent-tasks-row-label-{task_id}` (0039).
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, Focusable as _, KeyBinding, Modifiers, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter};
++
++async fn seed(
++    db: &AgentTaskHistoryDb,
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, status, at))
++        .await
++        .unwrap();
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn bind_escape(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        cx.bind_keys([
++            KeyBinding::new("escape", editor::actions::Cancel, Some("Editor")),
++            KeyBinding::new("escape", menu::Cancel, None),
++        ])
++    });
++}
++
++fn focus_input(panels: &mut Panels) {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.filter_editor().focus_handle(cx).focus(window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++fn type_in_input(panels: &mut Panels, text: &str) {
++    focus_input(panels);
++    panels.cx.simulate_input(text);
++    panels.cx.run_until_parked();
++}
++
++fn input_text(panels: &mut Panels) -> String {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.filter_editor().read(cx).text(cx)
++    })
++}
++
++fn empty_message(panels: &mut Panels) -> Option<String> {
++    panels.tasks_panel.read_with(&panels.cx, |panel, cx| {
++        panel.empty_message(cx).map(|message| message.to_string())
++    })
++}
++
++fn tasks_panel_shown(panels: &Panels) -> bool {
++    let id = panels.tasks_panel.entity_id();
++    panels.workspace.read_with(&panels.cx, |workspace, cx| {
++        let dock = workspace.bottom_dock().read(cx);
++        dock.is_open() && dock.visible_panel().map(|panel| panel.panel_id()) == Some(id)
++    })
++}
++
++fn sorted(mut keys: Vec<(String, String)>) -> Vec<(String, String)> {
++    keys.sort();
++    keys
++}
++
++async fn seed_fixture(db: &AgentTaskHistoryDb) {
++    seed(db, "s1", "alpha", AgentTaskStatus::Completed, 1_000).await;
++    seed(db, "s1", "beta", AgentTaskStatus::Completed, 1_100).await;
++    seed(db, "s2", "gamma", AgentTaskStatus::Failed, 1_200).await;
++}
++
++// Hostile (R4.4, R4.6): the no-match message is the filter's only while the text is non-blank;
++// a blank text with no row keeps the toggles' message, and nothing of the list is painted.
++#[gpui::test]
++async fn filter_input_says_no_match_only_for_a_real_query(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    assert_eq!(empty_message(&mut panels), None, "rows are listed");
++
++    type_in_input(&mut panels, "nothing-matches-this");
++    draw(&mut panels.cx);
++    assert_eq!(
++        empty_message(&mut panels).as_deref(),
++        Some("No tasks match the filter")
++    );
++    assert!(
++        panels
++            .cx
++            .debug_bounds("agent-tasks-row-label-alpha")
++            .is_none(),
++        "no row is painted"
++    );
++
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.set_filter_query("   ", window, cx);
++            for filter in TaskFilter::ALL {
++                panel.set_filter(filter, false, cx);
++            }
++        });
++    draw(&mut panels.cx);
++    assert_eq!(
++        empty_message(&mut panels).as_deref(),
++        Some("No tasks match the selected filters"),
++        "a blank text is no filter"
++    );
++}
++
++// Hostile (R4.5): Escape with text clears the text — and only the text: toggles stay, and
++// every row the toggles allow comes back.
++#[gpui::test]
++async fn filter_input_escape_clears_the_text_and_keeps_the_toggles(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Failed, true, cx)
++    });
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    bind_escape(&mut panels.cx);
++    let all = sorted(visible_keys(&mut panels));
++    assert_eq!(all.len(), 3);
++
++    type_in_input(&mut panels, "beta");
++    assert_eq!(
++        visible_keys(&mut panels),
++        vec![("s1".to_string(), "beta".to_string())]
++    );
++    panels.cx.simulate_keystrokes("escape");
++    panels.cx.run_until_parked();
++
++    assert_eq!(input_text(&mut panels), "", "Escape clears the text");
++    assert_eq!(
++        sorted(visible_keys(&mut panels)),
++        all,
++        "every allowed row is back"
++    );
++    panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        assert!(
++            panel.is_filter_enabled(TaskFilter::Failed),
++            "toggles are untouched"
++        );
++        assert!(panel.is_filter_enabled(TaskFilter::Finished));
++    });
++}
++
++// Success metric: among 200 records, typing 4 characters of one task's description leaves
++// that row and no other.
++#[gpui::test]
++async fn filter_input_four_characters_find_one_task_among_two_hundred(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    for index in 0..199 {
++        seed(
++            &db,
++            &format!("s{}", index % 7),
++            &format!("t{index:03}"),
++            AgentTaskStatus::Completed,
++            1_000 + index as i64,
++        )
++        .await;
++    }
++    seed(&db, "s3", "zq7x-target", AgentTaskStatus::Completed, 5_000).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    assert_eq!(visible_keys(&mut panels).len(), 200);
++
++    type_in_input(&mut panels, "zq7x");
++    assert_eq!(
++        visible_keys(&mut panels),
++        vec![("s3".to_string(), "zq7x-target".to_string())]
++    );
++}
++
++// R4.1, Q13: placeholder "Filter tasks…" and a screen-reader label.
++#[gpui::test]
++async fn filter_input_shows_its_placeholder_and_label(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    let placeholder = panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel
++            .filter_editor()
++            .update(cx, |editor, cx| editor.placeholder_text(cx))
++    });
++    assert_eq!(placeholder.as_deref(), Some("Filter tasks…"));
++    let labels: Vec<String> = super::RENDERED_ARIA_LABELS
++        .with_borrow(|labels| labels.iter().map(ToString::to_string).collect());
++    assert!(
++        labels.iter().any(|label| label.starts_with("Filter tasks")),
++        "the input carries a screen-reader label: {labels:?}"
++    );
++}
++
++// R2.3: the filter text survives closing the panel with its X and reopening it.
++#[gpui::test]
++async fn filter_input_text_survives_the_x_and_reopening(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    type_in_input(&mut panels, "alpha");
++    draw(&mut panels.cx);
++
++    let close = panels
++        .cx
++        .debug_bounds("agent-tasks-close-panel")
++        .expect("the X is painted");
++    panels.cx.simulate_click(close.center(), Modifiers::none());
++    panels.cx.run_until_parked();
++    assert!(!tasks_panel_shown(&panels));
++
++    panels.cx.dispatch_action(crate::ToggleFocus);
++    panels.cx.run_until_parked();
++    assert!(tasks_panel_shown(&panels));
++    assert_eq!(input_text(&mut panels), "alpha");
++    assert_eq!(
++        visible_keys(&mut panels),
++        vec![("s1".to_string(), "alpha".to_string())]
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs b/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs
+new file mode 100644
+index 0000000..9cd1b4e
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs
+@@ -0,0 +1,187 @@
++// Story 034, task 2.1 — row text is left-aligned (R1.1, R1.2, R1.3). Module path:
++// `panel::row_alignment`. Every test name starts with `row_alignment_`, the task's validation
++// filter. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/row_alignment_tests.rs"]
++//     mod row_alignment;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - `agent-tasks-row-label-{task_id}` (0039) still marks the row's label SLOT;
++//   - `agent-tasks-row-label-text-{task_id}` marks the element holding the shown label text,
++//     as wide as that text (content-sized, never stretched to the slot), so its left edge is
++//     where the text starts;
++//   - `agent-tasks-row-detail-{task_id}` marks the element holding the progress/outcome text,
++//     content-sized the same way;
++//   - `agent-tasks-rename-{task_id}` (0039) marks the row's Rename control.
++// R1.3's tooltip (whole text kept) is 0039's and stays covered by `panel::list_label`.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, px, size};
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel};
++
++const LONG_LABEL: &str = "A very long user label that cannot possibly fit in a narrow panel \
++                          because it keeps going well past any width a dock gives a row";
++
++async fn seed_finished(db: &AgentTaskHistoryDb, session: &str, task: &str, at: i64) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, AgentTaskStatus::Completed, at))
++        .await
++        .unwrap();
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++/// Closes the left dock (the agent panel), opens the Agent Tasks panel in the bottom dock and
++/// makes the window `width` wide, so the panel is about that wide.
++fn show_at_width(panels: &mut Panels, width: f32) {
++    let workspace = panels.workspace.clone();
++    workspace.update_in(&mut panels.cx, |workspace, window, cx| {
++        workspace
++            .left_dock()
++            .update(cx, |dock, cx| dock.set_open(false, window, cx));
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    panels.cx.simulate_resize(size(px(width), px(900.)));
++    draw(&mut panels.cx);
++}
++
++fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
++    cx.debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"))
++}
++
++// Hostile (R1.1): a SHORT label is where centring shows — the text box is narrower than its
++// slot, so a centred text starts well right of the slot's left edge. At both widths the text
++// must start at the slot's left edge.
++#[gpui::test]
++async fn row_alignment_short_label_starts_at_the_left_edge_of_its_slot(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_finished(&db, "s1", "short", 1_000).await;
++    let mut panels = open_panels(cx).await;
++
++    for width in [320., 600.] {
++        show_at_width(&mut panels, width);
++        let slot = bounds(&mut panels.cx, "agent-tasks-row-label-short");
++        let text = bounds(&mut panels.cx, "agent-tasks-row-label-text-short");
++        assert!(
++            text.size.width < slot.size.width,
++            "at {width}px the text element hugs the text ({:?}) inside a wider slot ({:?})",
++            text.size.width,
++            slot.size.width
++        );
++        assert!(
++            (text.origin.x - slot.origin.x).abs() <= px(1.),
++            "at {width}px the label starts at its slot's left edge: text {:?}, slot {:?}",
++            text.origin.x,
++            slot.origin.x
++        );
++    }
++}
++
++// Hostile (R1.2, R1.3): a label longer than its slot is truncated at its right end and never
++// pushes the detail or the row's buttons out of the panel, at the narrowest width.
++#[gpui::test]
++async fn row_alignment_long_label_truncates_and_keeps_detail_and_buttons_inside(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed_finished(&db, "s1", "long", 1_000).await;
++    db.set_label(&key("s1", "long"), Some(LONG_LABEL))
++        .await
++        .unwrap();
++    let mut panels = open_panels(cx).await;
++
++    for width in [320., 600.] {
++        show_at_width(&mut panels, width);
++        let slot = bounds(&mut panels.cx, "agent-tasks-row-label-long");
++        let text = bounds(&mut panels.cx, "agent-tasks-row-label-text-long");
++        let detail = bounds(&mut panels.cx, "agent-tasks-row-detail-long");
++        let rename = bounds(&mut panels.cx, "agent-tasks-rename-long");
++
++        assert!(
++            (text.origin.x - slot.origin.x).abs() <= px(1.),
++            "at {width}px a truncated label still starts at the slot's left edge"
++        );
++        assert!(
++            text.right() <= slot.right() + px(1.),
++            "at {width}px the label is cut at the slot's right end: text {:?}, slot {:?}",
++            text.right(),
++            slot.right()
++        );
++        assert!(
++            detail.origin.x >= slot.right() - px(1.),
++            "at {width}px the detail sits right of the label slot"
++        );
++        assert!(
++            detail.right() <= rename.origin.x + px(1.),
++            "at {width}px the detail ends before the row's buttons"
++        );
++        assert!(
++            rename.right() <= px(width) + px(1.),
++            "at {width}px the row's buttons stay inside the panel: rename ends at {:?}",
++            rename.right()
++        );
++    }
++}
++
++// Benign (R1.1, R1.2): two rows of different label lengths start their labels at the same x,
++// and each detail is drawn at the right end of its row.
++#[gpui::test]
++async fn row_alignment_labels_of_different_lengths_share_one_left_edge(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_finished(&db, "s1", "short", 1_000).await;
++    seed_finished(&db, "s1", "long", 1_100).await;
++    db.set_label(&key("s1", "long"), Some("A medium length label"))
++        .await
++        .unwrap();
++    let mut panels = open_panels(cx).await;
++
++    for width in [320., 600.] {
++        show_at_width(&mut panels, width);
++        let short = bounds(&mut panels.cx, "agent-tasks-row-label-text-short");
++        let long = bounds(&mut panels.cx, "agent-tasks-row-label-text-long");
++        assert!(
++            (short.origin.x - long.origin.x).abs() <= px(1.),
++            "at {width}px both labels start at one x: {:?} vs {:?}",
++            short.origin.x,
++            long.origin.x
++        );
++        let short_detail = bounds(&mut panels.cx, "agent-tasks-row-detail-short");
++        let short_rename = bounds(&mut panels.cx, "agent-tasks-rename-short");
++        assert!(
++            short_rename.origin.x - short_detail.right() <= px(24.),
++            "at {width}px the detail sits at the right end of the row, next to its buttons"
++        );
++    }
++}
++
++// Success metric (found by the GUI proof, task 7.1): a row's label starts where its group
++// header's title starts, within 1 px, so the column reads as one list under its header.
++#[gpui::test]
++async fn row_alignment_row_labels_start_under_the_group_title(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_finished(&db, "s1", "short", 1_000).await;
++    let mut panels = open_panels(cx).await;
++
++    for width in [320., 600.] {
++        show_at_width(&mut panels, width);
++        let title = bounds(&mut panels.cx, "agent-tasks-group-title-s1");
++        let label = bounds(&mut panels.cx, "agent-tasks-row-label-text-short");
++        assert!(
++            (title.origin.x - label.origin.x).abs() <= px(1.),
++            "at {width}px the row label starts under the group title: label {:?}, title {:?}",
++            label.origin.x,
++            title.origin.x
++        );
++    }
++}
+diff --git a/crates/agent_tasks_panel/src/panel/scrollbar_tests.rs b/crates/agent_tasks_panel/src/panel/scrollbar_tests.rs
+new file mode 100644
+index 0000000..398ec39
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/scrollbar_tests.rs
+@@ -0,0 +1,220 @@
++// Story 034, task 2.3 — a vertical scrollbar on the list (R3.1, R3.2, R3.3). Module path:
++// `panel::scrollbar`. Every test name starts with `scrollbar_`, the task's validation filter.
++// Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/scrollbar_tests.rs"]
++//     mod scrollbar;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - the scrollable list's wrapper (the element the scrollbar is drawn over) carries debug
++//     selector `agent-tasks-list`; the vertical track runs along its right edge;
++//   - the list scrolls through the panel's `scroll_handle: UniformListScrollHandle` field
++//     (read here through `ui::ScrollableHandle`);
++//   - R3.2 asks a click on the TRACK to scroll. `ui::Scrollbars::new` reserves only the thumb
++//     (`ReservedSpace::Thumb`), which ignores a click beside the thumb; the track needs
++//     `with_track_along(ScrollAxes::Vertical, ..)` or equivalent. The track-click tests pin that.
++// Not covered: the thumb's pixels (no scene probe in the rig) — the GUI proof (task 7.1).
++
++use acp_thread::AgentTaskStatus;
++use gpui::{
++    Bounds, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext, VisualTestContext, px,
++};
++use ui::ScrollableHandle as _;
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskHistoryStore};
++
++async fn seed_many(db: &AgentTaskHistoryDb, count: usize) {
++    for index in 0..count {
++        let task = format!("t{index:03}");
++        let at = 1_000 + index as i64 * 10;
++        db.insert_started(&record("s1", &task, AgentTaskStatus::Running, at))
++            .await
++            .unwrap();
++        db.update_ended(&record("s1", &task, AgentTaskStatus::Completed, at))
++            .await
++            .unwrap();
++    }
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn list_bounds(cx: &mut VisualTestContext) -> Bounds<Pixels> {
++    cx.debug_bounds("agent-tasks-list")
++        .expect("the list is painted")
++}
++
++/// (offset scrolled, maximum offset), both as positive pixels.
++fn scroll_state(panels: &mut Panels) -> (Pixels, Pixels) {
++    panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        (
++            panel.scroll_handle.offset().y.abs(),
++            panel.scroll_handle.max_offset().y.abs(),
++        )
++    })
++}
++
++fn archived_count(cx: &mut VisualTestContext) -> usize {
++    cx.update(|_, cx| {
++        TaskHistoryStore::global(cx)
++            .read(cx)
++            .records()
++            .iter()
++            .filter(|entry| entry.archived)
++            .count()
++    })
++}
++
++/// Hovers the list (which reveals an auto-hidden scrollbar), then returns its bounds.
++fn hover_list(panels: &mut Panels) -> Bounds<Pixels> {
++    let list = list_bounds(&mut panels.cx);
++    panels
++        .cx
++        .simulate_mouse_move(list.center(), None, Modifiers::none());
++    draw(&mut panels.cx);
++    list
++}
++
++/// The middle of the thumb's lane: `ui::Scrollbars` reserves 14px on the right and draws the
++/// 6px thumb lane 4px in from the edge, so `right - 4px` is the lane's outer border, not in it.
++fn track_point(list: Bounds<Pixels>, y: Pixels) -> Point<Pixels> {
++    Point::new(list.right() - px(7.), y)
++}
++
++// Hostile (R3.3): with every line fitting, there is nothing to scroll, and a drag down the
++// list's right edge neither scrolls nor acts on a row.
++#[gpui::test]
++async fn scrollbar_shows_no_thumb_and_scrolls_nothing_while_every_line_fits(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed_many(&db, 2).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    let (offset, max) = scroll_state(&mut panels);
++    assert_eq!(max, px(0.), "three lines fit: nothing to scroll");
++    assert_eq!(offset, px(0.));
++
++    let list = hover_list(&mut panels);
++    let top = track_point(list, list.top() + px(4.));
++    let bottom = track_point(list, list.bottom() - px(2.));
++    panels
++        .cx
++        .simulate_mouse_down(top, MouseButton::Left, Modifiers::none());
++    panels
++        .cx
++        .simulate_mouse_move(bottom, Some(MouseButton::Left), Modifiers::none());
++    panels
++        .cx
++        .simulate_mouse_up(bottom, MouseButton::Left, Modifiers::none());
++    panels.cx.run_until_parked();
++    assert_eq!(scroll_state(&mut panels).0, px(0.), "no thumb to drag");
++    assert_eq!(archived_count(&mut panels.cx), 0, "no row acted on");
++}
++
++// Hostile (R3.1, R3.2): a click on the track BELOW the thumb (not on the thumb) scrolls the
++// list down, and is the scrollbar's alone — no row control under it acts.
++#[gpui::test]
++async fn scrollbar_track_click_below_the_thumb_scrolls_down(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_many(&db, 60).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    let (offset, max) = scroll_state(&mut panels);
++    assert!(max > px(0.), "sixty rows overflow the dock");
++    assert_eq!(offset, px(0.));
++
++    let list = hover_list(&mut panels);
++    panels
++        .cx
++        .simulate_click(track_point(list, list.bottom() - px(6.)), Modifiers::none());
++    panels.cx.run_until_parked();
++    draw(&mut panels.cx);
++
++    let (offset, max) = scroll_state(&mut panels);
++    assert!(
++        offset > max / 2.,
++        "a click near the track's bottom scrolls near the end: {offset:?} of {max:?}"
++    );
++    assert_eq!(
++        archived_count(&mut panels.cx),
++        0,
++        "the click reached no row"
++    );
++}
++
++// R3.1: the thumb tracks the scroll position — scrolled to the end, the thumb is at the
++// bottom, so a click at the track's TOP is a track click and scrolls back up.
++#[gpui::test]
++async fn scrollbar_thumb_follows_the_list_scroll_position(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_many(&db, 60).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        panel
++            .scroll_handle
++            .scroll_to_item(60, gpui::ScrollStrategy::Top)
++    });
++    draw(&mut panels.cx);
++    let (scrolled, max) = scroll_state(&mut panels);
++    assert!(scrolled > max / 2., "the list was scrolled to its end");
++
++    let list = hover_list(&mut panels);
++    panels
++        .cx
++        .simulate_click(track_point(list, list.top() + px(6.)), Modifiers::none());
++    panels.cx.run_until_parked();
++    draw(&mut panels.cx);
++    assert!(
++        scroll_state(&mut panels).0 < scrolled / 2.,
++        "a click above the (bottom) thumb scrolls back up"
++    );
++}
++
++// Benign (R3.2): dragging the thumb from the top to the bottom of the track scrolls to the end.
++#[gpui::test]
++async fn scrollbar_thumb_drag_scrolls_to_the_end(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_many(&db, 60).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    let list = hover_list(&mut panels);
++    let start = track_point(list, list.top() + px(6.));
++    let end = track_point(list, list.bottom() + px(40.));
++    panels
++        .cx
++        .simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
++    panels
++        .cx
++        .simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
++    panels
++        .cx
++        .simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
++    panels.cx.run_until_parked();
++    draw(&mut panels.cx);
++
++    let (offset, max) = scroll_state(&mut panels);
++    assert!(
++        offset >= max * 0.9,
++        "the drag reaches the end of the list: {offset:?} of {max:?}"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/selection_gesture_tests.rs b/crates/agent_tasks_panel/src/panel/selection_gesture_tests.rs
+new file mode 100644
+index 0000000..83420dc
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/selection_gesture_tests.rs
+@@ -0,0 +1,424 @@
++// Story 034, task 4.2 — selection gestures, rendering and the keyboard (R5.1, R5.3, R5.4, R5.5,
++// R5.8, and R2.3 for the selection). Module path: `panel::selection_gesture`. Every test name
++// starts with `selection_gesture_`, the task's validation filter. Hostile fixtures come before
++// benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/selection_gesture_tests.rs"]
++//     mod selection_gesture;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - a click on the row's label slot (`agent-tasks-row-label-{task_id}`, 0039) is a click on
++//     its open control; `Modifiers::secondary_key()` toggles, `Modifiers::shift()` selects the
++//     range, no modifier clears and opens;
++//   - a selected row's open control is announced "Open thread: {label}, selected";
++//   - the action `ToggleSelected` (`agent_tasks_panel::ToggleSelected`) is defined in the panel
++//     module; both default keymaps bind it to `shift-space` in the `AgentTasksPanel` context;
++//   - Escape on the panel is `menu::Cancel`; in the filter input `editor::Cancel`;
++//   - fields `selection`, `row_focus_handles` (each `RowFocus { open, .. }`), and
++//     `filter_editor()`, `set_filter_query` (task 3); the X's selector `agent-tasks-close-panel`.
++// Not covered: the selected background colour (`element_selected`) — no paint probe in the rig;
++// the GUI proof (task 7.1) shows it.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, Focusable as _, KeyBinding, Modifiers, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use super::ToggleSelected;
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel};
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn click_row(panels: &mut Panels, selector: &'static str, modifiers: Modifiers) {
++    draw(&mut panels.cx);
++    let bounds = panels
++        .cx
++        .debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} is painted"));
++    panels.cx.simulate_click(bounds.center(), modifiers);
++    panels.cx.run_until_parked();
++}
++
++fn selected_tasks(panels: &mut Panels) -> Vec<String> {
++    draw(&mut panels.cx);
++    let mut tasks: Vec<String> = panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        panel
++            .selection
++            .iter()
++            .map(|(_, task)| task.to_string())
++            .collect()
++    });
++    tasks.sort();
++    tasks
++}
++
++fn active(panels: &Panels) -> Option<String> {
++    active_session(panels).map(|session| session.to_string())
++}
++
++fn labels(panels: &mut Panels) -> Vec<String> {
++    draw(&mut panels.cx);
++    super::RENDERED_ARIA_LABELS
++        .with_borrow(|labels| labels.iter().map(ToString::to_string).collect())
++}
++
++/// Three live threads A, B, C holding running tasks ta, tb, tc; C is the active thread.
++async fn three_threads(cx: &mut TestAppContext) -> (Panels, String, String, String) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let connection = StopConnection::new();
++    let mut sessions = Vec::new();
++    for (title, task, at) in [("A", "ta", 3_000), ("B", "tb", 2_000), ("C", "tc", 1_000)] {
++        let thread = open_thread_on(
++            &panels.agent_panel,
++            connection.clone(),
++            title,
++            &mut panels.cx,
++        );
++        send_tasks(
++            &thread,
++            vec![wire_task(task, "running", at, None)],
++            &mut panels.cx,
++        );
++        sessions.push(session_of(&thread, &panels.cx).to_string());
++    }
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    let c = sessions.pop().unwrap();
++    let b = sessions.pop().unwrap();
++    let a = sessions.pop().unwrap();
++    assert_eq!(active(&panels), Some(c.clone()), "C is the active thread");
++    (panels, a, b, c)
++}
++
++// Hostile (R5.1): a secondary-modifier click toggles the row and opens NOTHING — the active
++// thread stays, and a row whose thread is gone gets no "no longer exists" notice.
++#[gpui::test]
++async fn selection_gesture_secondary_click_selects_without_opening(cx: &mut TestAppContext) {
++    let (mut panels, _a, _b, c) = three_threads(cx).await;
++
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-ta",
++        Modifiers::secondary_key(),
++    );
++    assert_eq!(selected_tasks(&mut panels), vec!["ta"]);
++    assert_eq!(active(&panels), Some(c.clone()), "thread A is not opened");
++
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-ta",
++        Modifiers::secondary_key(),
++    );
++    assert!(
++        selected_tasks(&mut panels).is_empty(),
++        "a second one deselects"
++    );
++    assert_eq!(active(&panels), Some(c));
++}
++
++#[gpui::test]
++async fn selection_gesture_modifier_click_on_a_vanished_thread_sets_no_notice(
++    cx: &mut TestAppContext,
++) {
++    let db: AgentTaskHistoryDb = init_base(cx);
++    db.insert_started(&record("gone", "tg", AgentTaskStatus::Running, 1_000))
++        .await
++        .unwrap();
++    db.update_ended(&record("gone", "tg", AgentTaskStatus::Completed, 1_000))
++        .await
++        .unwrap();
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-tg",
++        Modifiers::secondary_key(),
++    );
++    click_row(&mut panels, "agent-tasks-row-label-tg", Modifiers::shift());
++    assert_eq!(
++        find_row(&mut panels, "gone", "tg").unwrap().notice,
++        None,
++        "no open was attempted"
++    );
++    click_row(&mut panels, "agent-tasks-row-label-tg", Modifiers::none());
++    assert!(
++        find_row(&mut panels, "gone", "tg")
++            .unwrap()
++            .notice
++            .is_some_and(|notice| notice.contains("Thread no longer exists")),
++        "a plain click still tries to open"
++    );
++}
++
++// Hostile (R5.2): a shift-click selects the range from the anchor and opens nothing.
++#[gpui::test]
++async fn selection_gesture_shift_click_selects_the_range_without_opening(cx: &mut TestAppContext) {
++    let (mut panels, _a, _b, c) = three_threads(cx).await;
++
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-ta",
++        Modifiers::secondary_key(),
++    );
++    click_row(&mut panels, "agent-tasks-row-label-tc", Modifiers::shift());
++    assert_eq!(selected_tasks(&mut panels), vec!["ta", "tb", "tc"]);
++    assert_eq!(active(&panels), Some(c), "no thread opened");
++}
++
++// Hostile (R5.3): a plain click BOTH clears the selection and opens the row's thread.
++#[gpui::test]
++async fn selection_gesture_plain_click_clears_the_selection_and_opens(cx: &mut TestAppContext) {
++    let (mut panels, a, _b, _c) = three_threads(cx).await;
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-ta",
++        Modifiers::secondary_key(),
++    );
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-tb",
++        Modifiers::secondary_key(),
++    );
++    assert_eq!(selected_tasks(&mut panels), vec!["ta", "tb"]);
++
++    click_row(&mut panels, "agent-tasks-row-label-ta", Modifiers::none());
++    assert!(
++        selected_tasks(&mut panels).is_empty(),
++        "the selection is cleared"
++    );
++    assert_eq!(active(&panels), Some(a), "and thread A is opened");
++}
++
++// R5.4: a selected row says so to screen readers; an unselected one does not.
++#[gpui::test]
++async fn selection_gesture_selected_row_is_announced(cx: &mut TestAppContext) {
++    let (mut panels, _a, _b, _c) = three_threads(cx).await;
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-tb",
++        Modifiers::secondary_key(),
++    );
++
++    let labels = labels(&mut panels);
++    assert!(
++        labels
++            .iter()
++            .any(|label| label == "Open thread: Task tb, selected"),
++        "{labels:?}"
++    );
++    assert!(
++        labels.iter().any(|label| label == "Open thread: Task ta"),
++        "{labels:?}"
++    );
++    assert!(
++        !labels
++            .iter()
++            .any(|label| label == "Open thread: Task ta, selected"),
++        "{labels:?}"
++    );
++}
++
++// Hostile (R5.5): ToggleSelected toggles the row whose control has focus — that row only.
++#[gpui::test]
++async fn selection_gesture_toggle_selected_acts_on_the_focused_row_only(cx: &mut TestAppContext) {
++    let (mut panels, a, b, _c) = three_threads(cx).await;
++    let focus_open = |panels: &mut Panels, session: &str, task: &str| {
++        let target = key(session, task);
++        panels
++            .tasks_panel
++            .update_in(&mut panels.cx, |panel, window, cx| {
++                let handle = panel
++                    .row_focus_handles
++                    .get(&target)
++                    .expect("the row is listed")
++                    .open
++                    .clone();
++                window.focus(&handle, cx);
++            });
++        panels.cx.run_until_parked();
++    };
++
++    focus_open(&mut panels, &b, "tb");
++    panels.cx.dispatch_action(ToggleSelected);
++    panels.cx.run_until_parked();
++    assert_eq!(selected_tasks(&mut panels), vec!["tb"]);
++
++    focus_open(&mut panels, &a, "ta");
++    panels.cx.dispatch_action(ToggleSelected);
++    panels.cx.run_until_parked();
++    assert_eq!(selected_tasks(&mut panels), vec!["ta", "tb"]);
++
++    panels.cx.dispatch_action(ToggleSelected);
++    panels.cx.run_until_parked();
++    assert_eq!(selected_tasks(&mut panels), vec!["tb"], "toggled off again");
++}
++
++// R5.5: both default keymaps bind shift-space to ToggleSelected in the panel's context.
++#[test]
++fn selection_gesture_toggle_selected_is_bound_to_shift_space_in_both_keymaps() {
++    for keymap in ["default-linux.json", "default-macos.json"] {
++        let path = format!(
++            "{}/../../assets/keymaps/{keymap}",
++            env!("CARGO_MANIFEST_DIR")
++        );
++        let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
++        let blocks: Vec<serde_json::Value> =
++            settings::parse_json_with_comments(&text).expect("the keymap parses");
++        let bound = blocks.iter().any(|block| {
++            block["context"] == "AgentTasksPanel"
++                && block["bindings"]["shift-space"] == "agent_tasks_panel::ToggleSelected"
++        });
++        assert!(
++            bound,
++            "{keymap}: shift-space → ToggleSelected in AgentTasksPanel"
++        );
++    }
++}
++
++// Hostile (R5.8, R4.5): Escape in the filter input clears its text and keeps the selection;
++// Escape elsewhere in the panel clears the selection.
++#[gpui::test]
++async fn selection_gesture_escape_clears_the_selection_outside_the_filter_input_only(
++    cx: &mut TestAppContext,
++) {
++    let (mut panels, _a, b, _c) = three_threads(cx).await;
++    panels.cx.update(|_, cx| {
++        cx.bind_keys([
++            KeyBinding::new("escape", editor::actions::Cancel, Some("Editor")),
++            KeyBinding::new("escape", menu::Cancel, None),
++        ])
++    });
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-ta",
++        Modifiers::secondary_key(),
++    );
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-tb",
++        Modifiers::secondary_key(),
++    );
++
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.filter_editor().focus_handle(cx).focus(window, cx)
++        });
++    panels.cx.simulate_input("Task");
++    panels.cx.run_until_parked();
++    panels.cx.simulate_keystrokes("escape");
++    panels.cx.run_until_parked();
++    let text = panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.filter_editor().read(cx).text(cx)
++    });
++    assert_eq!(text, "", "Escape in the input clears its text");
++    assert_eq!(
++        selected_tasks(&mut panels),
++        vec!["ta", "tb"],
++        "and keeps the selection"
++    );
++
++    let target = key(&b, "tb");
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            let handle = panel.row_focus_handles.get(&target).unwrap().open.clone();
++            window.focus(&handle, cx);
++        });
++    panels.cx.run_until_parked();
++    panels.cx.simulate_keystrokes("escape");
++    panels.cx.run_until_parked();
++    assert!(
++        selected_tasks(&mut panels).is_empty(),
++        "Escape on a row clears it"
++    );
++}
++
++// R2.3: the selection survives the X and reopening.
++#[gpui::test]
++async fn selection_gesture_selection_survives_the_x_and_reopening(cx: &mut TestAppContext) {
++    let (mut panels, _a, _b, _c) = three_threads(cx).await;
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-ta",
++        Modifiers::secondary_key(),
++    );
++    click_row(
++        &mut panels,
++        "agent-tasks-row-label-tc",
++        Modifiers::secondary_key(),
++    );
++
++    draw(&mut panels.cx);
++    let close = panels
++        .cx
++        .debug_bounds("agent-tasks-close-panel")
++        .expect("the X is painted");
++    panels.cx.simulate_click(close.center(), Modifiers::none());
++    panels.cx.run_until_parked();
++    panels.cx.dispatch_action(crate::ToggleFocus);
++    panels.cx.run_until_parked();
++
++    assert_eq!(selected_tasks(&mut panels), vec!["ta", "tc"]);
++}
++
++// R2.1, R5.5, Q13 (found by the GUI proof, task 7.1): in Zed `tab` is `menu::SelectNext`, not a
++// built-in focus move, so the panel's controls are reachable from the keyboard only when the panel
++// turns it into one. From the panel, Tab walks to a row, and shift-space then selects that row.
++#[gpui::test]
++async fn selection_gesture_tab_reaches_a_row_and_shift_space_selects_it(cx: &mut TestAppContext) {
++    let (mut panels, _a, _b, _c) = three_threads(cx).await;
++    panels.cx.update(|_, cx| {
++        cx.bind_keys([
++            KeyBinding::new("tab", menu::SelectNext, None),
++            KeyBinding::new("shift-tab", menu::SelectPrevious, None),
++            KeyBinding::new("shift-space", ToggleSelected, Some("AgentTasksPanel")),
++        ])
++    });
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.focus_handle(cx).focus(window, cx)
++        });
++    panels.cx.run_until_parked();
++
++    let mut on_row = false;
++    for _ in 0..12 {
++        panels.cx.simulate_keystrokes("tab");
++        panels.cx.run_until_parked();
++        on_row = panels
++            .tasks_panel
++            .update_in(&mut panels.cx, |panel, window, _| {
++                panel
++                    .row_focus_handles
++                    .values()
++                    .any(|focus| focus.open.is_focused(window))
++            });
++        if on_row {
++            break;
++        }
++    }
++    assert!(on_row, "Tab from the panel reaches a row's open control");
++
++    panels.cx.simulate_keystrokes("shift-space");
++    panels.cx.run_until_parked();
++    assert_eq!(
++        selected_tasks(&mut panels).len(),
++        1,
++        "shift-space selects the row Tab reached"
++    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/selection_state_tests.rs b/crates/agent_tasks_panel/src/panel/selection_state_tests.rs
+new file mode 100644
+index 0000000..f702786
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/selection_state_tests.rs
+@@ -0,0 +1,327 @@
++// Story 034, task 4.1 — selection state: toggle, range, pruning (R5.2, R5.6). Module path:
++// `panel::selection_state`. Every test name starts with `selection_state_`, the task's
++// validation filter. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/selection_state_tests.rs"]
++//     mod selection_state;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - fields `selection: Vec<TaskKey>` (ordered, no duplicates) and
++//     `selection_anchor: Option<TaskKey>` on `AgentTasksPanel` (read directly: child module);
++//   - `toggle_selected(&mut self, key: &TaskKey, cx)`, `select_range_to(&mut self, key:
++//     &TaskKey, cx)` over the listed rows in list order, `clear_selection(&mut self, cx)`;
++//   - pruning to the listed rows runs on every render (`list_entries`), so tests draw the panel;
++//   - `set_filter_query(&mut self, query: &str, window, cx)` (task 3.1).
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++async fn seed(
++    db: &AgentTaskHistoryDb,
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++    archived: bool,
++) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, status, at))
++        .await
++        .unwrap();
++    if archived {
++        db.set_archived(&[key(session, task)], true).await.unwrap();
++    }
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn toggle(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.toggle_selected(&target, cx)
++    });
++    draw(&mut panels.cx);
++}
++
++fn range_to(panels: &mut Panels, session: &str, task: &str) {
++    let target = key(session, task);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.select_range_to(&target, cx)
++    });
++    draw(&mut panels.cx);
++}
++
++fn clear(panels: &mut Panels) {
++    panels
++        .tasks_panel
++        .update(&mut panels.cx, |panel, cx| panel.clear_selection(cx));
++    draw(&mut panels.cx);
++}
++
++fn selection(panels: &mut Panels) -> Vec<(String, String)> {
++    draw(&mut panels.cx);
++    panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        panel
++            .selection
++            .iter()
++            .map(|(session, task)| (session.to_string(), task.to_string()))
++            .collect()
++    })
++}
++
++fn set(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
++    let mut keys: Vec<_> = pairs
++        .iter()
++        .map(|(session, task)| (session.to_string(), task.to_string()))
++        .collect();
++    keys.sort();
++    keys
++}
++
++fn sorted(mut keys: Vec<(String, String)>) -> Vec<(String, String)> {
++    keys.sort();
++    keys
++}
++
++fn assert_no_duplicates(keys: &[(String, String)]) {
++    let mut seen = keys.to_vec();
++    seen.sort();
++    seen.dedup();
++    assert_eq!(seen.len(), keys.len(), "no key twice: {keys:?}");
++}
++
++/// List order: s1 header, a(5000), b(4000); s2 header, c(3000), [d(2500) failed, hidden],
++/// e(2000).
++async fn seed_order(db: &AgentTaskHistoryDb) {
++    seed(db, "s1", "a", AgentTaskStatus::Completed, 5_000, false).await;
++    seed(db, "s1", "b", AgentTaskStatus::Completed, 4_000, false).await;
++    seed(db, "s2", "c", AgentTaskStatus::Completed, 3_000, false).await;
++    seed(db, "s2", "d", AgentTaskStatus::Failed, 2_500, false).await;
++    seed(db, "s2", "e", AgentTaskStatus::Completed, 2_000, false).await;
++}
++
++// Hostile (wrong collapse): one task id in two sessions is two rows; selecting one never
++// selects the other.
++#[gpui::test]
++async fn selection_state_same_task_id_in_two_sessions_is_two_rows(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "t", AgentTaskStatus::Completed, 1_000, false).await;
++    seed(&db, "s2", "t", AgentTaskStatus::Completed, 1_100, false).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    toggle(&mut panels, "s1", "t");
++    assert_eq!(selection(&mut panels), set(&[("s1", "t")]));
++    toggle(&mut panels, "s2", "t");
++    assert_eq!(
++        sorted(selection(&mut panels)),
++        set(&[("s1", "t"), ("s2", "t")])
++    );
++    toggle(&mut panels, "s1", "t");
++    assert_eq!(
++        selection(&mut panels),
++        set(&[("s2", "t")]),
++        "toggling again deselects"
++    );
++}
++
++// Hostile (wrong split): a selected row stays the one selected row when newer rows push it
++// down the list and when it is renamed — the selection follows the task, not a position.
++#[gpui::test]
++async fn selection_state_follows_the_task_when_rows_shift_or_it_is_renamed(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![wire_task("t1", "completed", 1_000, Some((5, 1)))],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    toggle(&mut panels, &session, "t1");
++
++    send_tasks(
++        &thread,
++        vec![
++            wire_task("t1", "completed", 1_000, Some((5, 1))),
++            wire_task("t2", "completed", 2_000, Some((5, 1))),
++            wire_task("t3", "completed", 3_000, Some((5, 1))),
++        ],
++        &mut panels.cx,
++    );
++    assert_eq!(
++        selection(&mut panels),
++        set(&[(session.as_str(), "t1")]),
++        "two newer rows above it do not move the selection"
++    );
++
++    let target = key(&session, "t1");
++    panels.cx.update(|_, cx| {
++        TaskHistoryStore::global(cx).update(cx, |store, cx| store.rename(target, "Renamed", cx))
++    });
++    panels.cx.run_until_parked();
++    assert_eq!(
++        selection(&mut panels),
++        set(&[(session.as_str(), "t1")]),
++        "a new label is the same task"
++    );
++}
++
++// Hostile (R5.2): a range walks the LISTED rows in list order — across groups, skipping
++// headers and a row the toggles hide — in either direction, without duplicates.
++#[gpui::test]
++async fn selection_state_range_covers_listed_rows_only_in_list_order(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_order(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    toggle(&mut panels, "s1", "a");
++    range_to(&mut panels, "s2", "e");
++    let selected = selection(&mut panels);
++    assert_no_duplicates(&selected);
++    assert_eq!(
++        sorted(selected.clone()),
++        set(&[("s1", "a"), ("s1", "b"), ("s2", "c"), ("s2", "e")]),
++        "the hidden failed row d is not selected"
++    );
++    assert_eq!(
++        selected,
++        vec![
++            ("s1".to_string(), "a".to_string()),
++            ("s1".to_string(), "b".to_string()),
++            ("s2".to_string(), "c".to_string()),
++            ("s2".to_string(), "e".to_string()),
++        ],
++        "kept in list order"
++    );
++
++    range_to(&mut panels, "s2", "e");
++    assert_no_duplicates(&selection(&mut panels));
++
++    clear(&mut panels);
++    assert!(selection(&mut panels).is_empty());
++    toggle(&mut panels, "s2", "e");
++    range_to(&mut panels, "s1", "b");
++    assert_eq!(
++        sorted(selection(&mut panels)),
++        set(&[("s1", "b"), ("s2", "c"), ("s2", "e")]),
++        "upwards from the anchor"
++    );
++}
++
++// R5.2: with no anchor, or an anchor no longer listed, a range selects only the clicked row.
++#[gpui::test]
++async fn selection_state_range_without_a_listed_anchor_selects_one_row(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_order(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    range_to(&mut panels, "s1", "b");
++    assert_eq!(selection(&mut panels), set(&[("s1", "b")]), "no anchor yet");
++
++    clear(&mut panels);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Failed, true, cx)
++    });
++    draw(&mut panels.cx);
++    toggle(&mut panels, "s2", "d");
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Failed, false, cx)
++    });
++    draw(&mut panels.cx);
++    let anchor = panels
++        .tasks_panel
++        .read_with(&panels.cx, |panel, _| panel.selection_anchor.clone());
++    assert_eq!(anchor, None, "a hidden anchor is dropped");
++
++    range_to(&mut panels, "s1", "a");
++    assert_eq!(selection(&mut panels), set(&[("s1", "a")]));
++}
++
++// Hostile (R5.6): a selected row that stops being listed — text filter, toggle, archiving,
++// deletion — is DROPPED, not hidden: listing it again does not bring the selection back.
++#[gpui::test]
++async fn selection_state_drops_rows_that_stop_being_listed(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_order(&db).await;
++    seed(&db, "s3", "z", AgentTaskStatus::Completed, 1_000, true).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    for (session, task) in [("s1", "a"), ("s1", "b"), ("s2", "c"), ("s2", "e")] {
++        toggle(&mut panels, session, task);
++    }
++
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.set_filter_query("task b", window, cx)
++        });
++    draw(&mut panels.cx);
++    assert_eq!(selection(&mut panels), set(&[("s1", "b")]), "text filter");
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.set_filter_query("", window, cx)
++        });
++    draw(&mut panels.cx);
++    assert_eq!(
++        selection(&mut panels),
++        set(&[("s1", "b")]),
++        "clearing the text does not reselect what was dropped"
++    );
++
++    toggle(&mut panels, "s2", "c");
++    let target = key("s2", "c");
++    panels
++        .tasks_panel
++        .update(&mut panels.cx, |panel, cx| panel.archive(&target, cx));
++    panels.cx.run_until_parked();
++    assert_eq!(
++        selection(&mut panels),
++        set(&[("s1", "b")]),
++        "archived out of view"
++    );
++
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Finished, false, cx);
++        panel.set_filter(TaskFilter::Archived, true, cx);
++    });
++    draw(&mut panels.cx);
++    assert!(selection(&mut panels).is_empty(), "toggle");
++
++    toggle(&mut panels, "s3", "z");
++    let doomed = key("s3", "z");
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.request_delete(&doomed, window, cx)
++        });
++    panels.cx.run_until_parked();
++    panels.cx.simulate_prompt_answer("Delete");
++    panels.cx.run_until_parked();
++    assert!(selection(&mut panels).is_empty(), "deletion");
++}
+diff --git a/crates/agent_tasks_panel/src/panel/text_filter_tests.rs b/crates/agent_tasks_panel/src/panel/text_filter_tests.rs
+new file mode 100644
+index 0000000..c39ad2e
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/text_filter_tests.rs
+@@ -0,0 +1,308 @@
++// Story 034, task 3.1 — matching rows against the filter text (R4.2, R4.3, R4.6). Module path:
++// `panel::text_filter`. Every test name starts with `text_filter_`, the task's validation
++// filter. Hostile fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/text_filter_tests.rs"]
++//     mod text_filter;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - `fn matches_query(label: &str, description: &str, thread_title: &str, query: &str) -> bool`
++//     in the panel module (private is fine: this is a child module), with `query` already
++//     trimmed and non-empty; each field is matched on its own;
++//   - `AgentTasksPanel::set_filter_query(&mut self, query: &str, window, cx)` sets the filter
++//     text (what the input does on every edit; task 3.2 makes it set the input's text too) and
++//     `groups(cx)` applies it on top of the toggles;
++//   - the header's count is `ListEntry::Header { task_count, .. }` in `self.entries`, built on
++//     render.
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use super::{ListEntry, matches_query};
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter};
++
++async fn seed(
++    db: &AgentTaskHistoryDb,
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++    archived: bool,
++) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, status, at))
++        .await
++        .unwrap();
++    if archived {
++        db.set_archived(&[key(session, task)], true).await.unwrap();
++    }
++}
++
++fn set_query(panels: &mut Panels, query: &str) {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.set_filter_query(query, window, cx)
++        });
++    panels.cx.run_until_parked();
++}
++
++/// Every group as (session, title, row keys), the shape a header and its rows show.
++fn shape(panels: &mut Panels) -> Vec<(String, String, Vec<(String, String)>)> {
++    groups(panels)
++        .into_iter()
++        .map(|group| {
++            (
++                group.session_id.to_string(),
++                group.title.to_string(),
++                group.rows.iter().map(|row| key_of(&row.entry)).collect(),
++            )
++        })
++        .collect()
++}
++
++fn keys(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
++    pairs
++        .iter()
++        .map(|(session, task)| (session.to_string(), task.to_string()))
++        .collect()
++}
++
++fn sorted(mut keys: Vec<(String, String)>) -> Vec<(String, String)> {
++    keys.sort();
++    keys
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++/// north: alpha (labelled "Deploy Pipeline"), beta, gamma; south: delta, epsilon (failed),
++/// zeta (archived). Titles are "Thread north" / "Thread south".
++async fn seed_fixture(db: &AgentTaskHistoryDb) {
++    seed(
++        db,
++        "north",
++        "alpha",
++        AgentTaskStatus::Completed,
++        1_000,
++        false,
++    )
++    .await;
++    seed(
++        db,
++        "north",
++        "beta",
++        AgentTaskStatus::Completed,
++        1_100,
++        false,
++    )
++    .await;
++    seed(db, "north", "gamma", AgentTaskStatus::Stopped, 1_200, false).await;
++    seed(
++        db,
++        "south",
++        "delta",
++        AgentTaskStatus::Completed,
++        1_300,
++        false,
++    )
++    .await;
++    seed(
++        db,
++        "south",
++        "epsilon",
++        AgentTaskStatus::Failed,
++        1_400,
++        false,
++    )
++    .await;
++    seed(db, "south", "zeta", AgentTaskStatus::Completed, 1_500, true).await;
++    db.set_label(&key("north", "alpha"), Some("Deploy Pipeline"))
++        .await
++        .unwrap();
++}
++
++// ── matches_query (Unit) ─────────────────────────────────────────────────────
++
++// Hostile (wrong collapse): text that only exists ACROSS two fields — label's end + the
++// description's start — matches nothing; neither does a query whose inner space the field lacks.
++#[test]
++fn text_filter_matches_query_never_matches_across_field_boundaries() {
++    assert!(!matches_query("Build ab", "cd step", "Thread", "abcd"));
++    assert!(!matches_query("Build ab", "cd step", "Thread", "ab cd"));
++    assert!(!matches_query(
++        "Label",
++        "Description",
++        "Title",
++        "labeldescription"
++    ));
++    assert!(!matches_query("foo", "bar", "baz", "fo o"));
++}
++
++// Hostile (wrong split): differently-cased spellings of one text are one match, Unicode
++// included; each field matches on its own.
++#[test]
++fn text_filter_matches_query_is_case_insensitive_per_field() {
++    assert!(matches_query(
++        "Deploy Pipeline",
++        "Task a",
++        "Thread",
++        "pipeline"
++    ));
++    assert!(matches_query("x", "Run CARGO tests", "Thread", "cargo"));
++    assert!(matches_query("x", "y", "Release Notes", "RELEASE"));
++    assert!(matches_query("Écrire le résumé", "y", "z", "ÉCRIRE"));
++    assert!(matches_query("ÉTÉ", "y", "z", "été"));
++    assert!(!matches_query("Deploy", "Task", "Thread", "deployment"));
++}
++
++// ── groups() with a filter text (model, through the rig) ─────────────────────
++
++// Hostile (R4.6): an empty or whitespace-only text lists exactly today's rows — same groups,
++// same titles, same rows in the same order.
++#[gpui::test]
++async fn text_filter_whitespace_only_query_lists_exactly_todays_rows(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++    let today = shape(&mut panels);
++    assert!(!today.is_empty());
++
++    for query in ["   ", "\t", " \n ", ""] {
++        set_query(&mut panels, query);
++        assert_eq!(shape(&mut panels), today, "query {query:?} changes nothing");
++    }
++}
++
++// Hostile (R4.2): the text never bypasses the toggles, and never matches status text.
++#[gpui::test]
++async fn text_filter_never_bypasses_toggles_nor_matches_status_text(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++
++    set_query(&mut panels, "zeta");
++    assert!(
++        visible_keys(&mut panels).is_empty(),
++        "an archived match stays hidden while Archived is off"
++    );
++    set_query(&mut panels, "epsilon");
++    assert!(
++        visible_keys(&mut panels).is_empty(),
++        "a failed match stays hidden while Failed is off"
++    );
++    set_query(&mut panels, "Completed");
++    assert!(
++        visible_keys(&mut panels).is_empty(),
++        "status text is not matched"
++    );
++    set_query(&mut panels, "tokens");
++    assert!(
++        visible_keys(&mut panels).is_empty(),
++        "progress text is not matched"
++    );
++
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.set_filter(TaskFilter::Archived, true, cx)
++    });
++    set_query(&mut panels, "zeta");
++    assert_eq!(visible_keys(&mut panels), keys(&[("south", "zeta")]));
++}
++
++// R4.2: label, description or thread title, trimmed, case-insensitive. A labelled row still
++// matches its description.
++#[gpui::test]
++async fn text_filter_matches_label_description_or_thread_title(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++
++    set_query(&mut panels, "  deploy  ");
++    assert_eq!(
++        visible_keys(&mut panels),
++        keys(&[("north", "alpha")]),
++        "label"
++    );
++    set_query(&mut panels, "TASK ALPHA");
++    assert_eq!(
++        visible_keys(&mut panels),
++        keys(&[("north", "alpha")]),
++        "a labelled row still matches its description"
++    );
++    set_query(&mut panels, "task beta");
++    assert_eq!(
++        visible_keys(&mut panels),
++        keys(&[("north", "beta")]),
++        "description"
++    );
++    set_query(&mut panels, "thread SOUTH");
++    assert_eq!(
++        sorted(visible_keys(&mut panels)),
++        keys(&[("south", "delta")]),
++        "thread title, toggles still applied (epsilon failed, zeta archived)"
++    );
++    set_query(&mut panels, "north");
++    assert_eq!(
++        sorted(visible_keys(&mut panels)),
++        keys(&[("north", "alpha"), ("north", "beta"), ("north", "gamma")])
++    );
++}
++
++// R4.3: a header is listed only with a listed row, and its count is the rows listed — not the
++// thread's total.
++#[gpui::test]
++async fn text_filter_lists_a_header_only_with_its_listed_rows_and_counts_them(
++    cx: &mut TestAppContext,
++) {
++    let db = init_base(cx);
++    seed_fixture(&db).await;
++    let mut panels = open_panels(cx).await;
++    set_query(&mut panels, "gamma");
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++
++    let shape = shape(&mut panels);
++    assert_eq!(
++        shape,
++        vec![(
++            "north".to_string(),
++            "Thread north".to_string(),
++            keys(&[("north", "gamma")])
++        )],
++        "south has no match, so no south header"
++    );
++    let headers: Vec<(String, usize)> = panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        panel
++            .entries
++            .iter()
++            .filter_map(|entry| match entry {
++                ListEntry::Header {
++                    session_id,
++                    task_count,
++                    ..
++                } => Some((session_id.to_string(), *task_count)),
++                ListEntry::Row(..) => None,
++            })
++            .collect()
++    });
++    assert_eq!(
++        headers,
++        vec![("north".to_string(), 1)],
++        "the count is the rows listed"
++    );
++}

@@ -283,7 +283,7 @@
 # Selected and, under Archived, Delete Selected through 0042's prompt. No
 # migration, no store change. After 0042, whose panel and delete path it
 # changes, so it rides this flag BY DEPENDENCY (story 034).
-# 0053-agent-tasks-panel-polish.patch -- held out of -r1: story 034 still in progress
+0053-agent-tasks-panel-polish.patch
 # 0043: while the agent waits on an answer to its question (0027's card,
 # 0030's pending state), Enter and the send chords do nothing in the
 # composer -- no send, no newline -- under the new question_pending key
