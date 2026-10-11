@@ -1,0 +1,2012 @@
+From 53878b37b2156e8884f3fb8baf720eade9ae755a Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sun, 11 Oct 2026 15:19:58 -0300
+Subject: [PATCH] agent_ui: a Run button sends a recommended slash command in a
+ new thread
+
+0045 put a New Thread button beside Copy on a code block that holds one slash
+command: it opens a new thread with the same agent and the command in the
+composer, unsent. Most of the time the command is exactly what the operator
+wants, and the click is followed by Enter. A Run button now sits left of it
+and does both at once: it opens the thread and sends the command (story 035,
+R1). New Thread keeps its prefill-only behaviour.
+
+**Run sends only what the clicked block shows.** On click, Run re-reads
+`slash_command_in_code_block` from the code the click hands over, never from
+the message, so with two qualifying blocks each Run sends its own block's
+trimmed command. Run exists only where New Thread does -- an agent message,
+one non-empty line starting with `/` -- with Copy's visibility, and never on
+thinking blocks, tool output, user messages or the composer preview.
+
+**Several actions per code block.** `MarkdownElement::on_code_block_action`
+now takes `impl Fn(&str) -> Vec<CodeBlockAction>`: every returned action is
+drawn in list order before Copy, and an empty list draws nothing, as `None`
+did. Each button's element id carries the action's index
+(`("code-block-action", markdown_id)` / `"<range.end>-<index>"`), so two
+actions of one block and the actions of neighbouring blocks never share an
+id. `slash_command_action` returns `[Run, New Thread]`; the row reads
+[Run] [New Thread] [Copy]. Run is a focusable `IconButton`
+(`IconName::PlayOutlined`, tooltip "Run in New Thread").
+
+**Opening and sending.** `AgentPanel::run_prompt_in_new_thread(agent,
+source_session, text)` sits above `new_thread_with_prefilled_prompt`, and both
+share `ensure_agent_available`: an agent that is no longer configured opens
+nothing, sends nothing and shows 0045's toast, logged at WARN with the agent
+id and the source session. A successful Run logs one INFO line, `action=run`,
+with the agent id, the source session and the command's length -- never its
+text. The source thread is left unchanged and still listed.
+
+**Run's first message skips the slash-command check, and nothing else does.**
+`MessageEditor::contents` refuses a leading `/name` that is not in the agent's
+advertised commands or skills. A brand-new thread has advertised none: the
+adapter sends `available_commands_update` only after `newSession` returns. So
+reusing `ContentBlock { auto_submit: true }` refused every Run ("not a
+recognized command ... Available commands: none"). Run therefore opens the
+thread with a new `AgentInitialContent::RunCommand { blocks }`, which
+`ThreadView::new` auto-submits with `MessageEditor::skip_slash_command_check`
+set around that single `send()` and cleared right after. The composer, the
+new-thread button's prefill once sent, the git panel's review and conflict
+actions, the `create_thread` tool and the `?prompt=` deep link (which never
+auto-submits) keep the check; `validate_slash_commands` is unchanged.
+
+Tests: 8 markdown tests for the list-shaped hook (replacing 0045's 6), 4
+panel tests for Run (same agent, sent once, verbatim, unavailable agent, the
+prefill path still unsent), 8 for the one-shot skip (Run sends an unadvertised
+command; the composer, a prefilled send, another auto-submit, the URL deep
+link, a second command after Run and threads opened after Run are all still
+refused) and 5 GPUI tests that sweep the panel for Run and click it.
+
+Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
+0043 and 0045, and needs no adapter feature.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 762e993..1f81991 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2119,6 +2119,87 @@ impl AgentPanel {
+         self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+     }
+ 
++    /// Whether `agent` can still open a thread. An agent that is no longer
++    /// configured is logged and shown to the operator as a toast, so the
++    /// caller only has to stop. `action` names the caller in the log line.
++    fn ensure_agent_available(
++        &self,
++        agent: &Agent,
++        source_session: &acp_v2::SessionId,
++        action: &str,
++        cx: &mut Context<Self>,
++    ) -> bool {
++        let is_available = match agent {
++            Agent::Custom { id } => self
++                .project
++                .read(cx)
++                .agent_server_store()
++                .read(cx)
++                .external_agents()
++                .any(|known| known == id),
++            _ => true,
++        };
++        if is_available {
++            return true;
++        }
++        let agent_id = agent.id();
++        log::warn!(
++            "thread not opened: agent {agent_id} is not available (action {action}, source session {source_session})"
++        );
++        struct PrefilledAgentUnavailableToast;
++        self.workspace
++            .update(cx, |workspace, cx| {
++                workspace.show_toast(
++                    workspace::Toast::new(
++                        workspace::notifications::NotificationId::unique::<
++                            PrefilledAgentUnavailableToast,
++                        >(),
++                        format!("Can't open a new thread: agent \"{agent_id}\" is not available"),
++                    ),
++                    cx,
++                );
++            })
++            .log_err();
++        false
++    }
++
++    /// Opens a focused new thread for `agent` and sends `text` as its first
++    /// message, through the same send-on-open path as the git panel's prompts.
++    /// An agent that is no longer configured opens nothing and sends nothing.
++    /// `source_session` is the session whose message offered the command, as in
++    /// [`Self::new_thread_with_prefilled_prompt`].
++    pub fn run_prompt_in_new_thread(
++        &mut self,
++        agent: Agent,
++        source_session: acp_v2::SessionId,
++        text: String,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !self.ensure_agent_available(&agent, &source_session, "run", cx) {
++            return;
++        }
++        // The text is the operator's command and may carry paths or secrets: log its length only.
++        log::info!(
++            "action=run agent={} source_session={source_session} command_length={}",
++            agent.id(),
++            text.len()
++        );
++        self.external_thread(
++            Some(agent),
++            None,
++            None,
++            None,
++            Some(AgentInitialContent::RunCommand {
++                blocks: vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(text))],
++            }),
++            true,
++            AgentThreadSource::AgentPanel,
++            window,
++            cx,
++        );
++    }
++
+     /// Opens a new thread for `agent` with `text` in its composer -- never sent:
+     /// the operator reviews it and sends it. An agent that is no longer
+     /// configured opens nothing and says so. `source_session` is the session whose
+@@ -2132,39 +2213,10 @@ impl AgentPanel {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        let agent_id = agent.id();
+-        let is_available = match &agent {
+-            Agent::Custom { id } => self
+-                .project
+-                .read(cx)
+-                .agent_server_store()
+-                .read(cx)
+-                .external_agents()
+-                .any(|known| known == id),
+-            _ => true,
+-        };
+-        if !is_available {
+-            log::warn!(
+-                "prefilled thread not opened: agent {agent_id} is not available (source session {source_session})"
+-            );
+-            struct PrefilledAgentUnavailableToast;
+-            self.workspace
+-                .update(cx, |workspace, cx| {
+-                    workspace.show_toast(
+-                        workspace::Toast::new(
+-                            workspace::notifications::NotificationId::unique::<
+-                                PrefilledAgentUnavailableToast,
+-                            >(),
+-                            format!(
+-                                "Can't open a new thread: agent \"{agent_id}\" is not available"
+-                            ),
+-                        ),
+-                        cx,
+-                    );
+-                })
+-                .log_err();
++        if !self.ensure_agent_available(&agent, &source_session, "prefill", cx) {
+             return;
+         }
++        let agent_id = agent.id();
+         log::info!(
+             "opening a prefilled thread: agent {agent_id}, source session {source_session}, command length {}",
+             text.len()
+@@ -7474,6 +7526,12 @@ mod tests {
+     mod slash_command_button_tests;
+ 
+     mod slash_command_contract_tests;
++
++    mod run_prompt_tests;
++
++    mod run_prompt_validation_tests;
++
++    mod slash_command_run_tests;
+     use crate::NewWorktreeBranchTarget;
+     use crate::conversation_view::tests::{StubAgentServer, init_test};
+     use crate::test_support::{
+diff --git a/crates/agent_ui/src/agent_panel/tests/run_prompt_tests.rs b/crates/agent_ui/src/agent_panel/tests/run_prompt_tests.rs
+new file mode 100644
+index 0000000..b448a4a
+--- /dev/null
++++ b/crates/agent_ui/src/agent_panel/tests/run_prompt_tests.rs
+@@ -0,0 +1,249 @@
++//! `AgentPanel::run_prompt_in_new_thread` (story 035, Task 2.2; R1.3, R1.5, R1.6, R1.7, Q4).
++//!
++//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
++//! `mod run_prompt_tests;` beside story 020's `mod prefilled_prompt_tests;` (whose harness this
++//! reuses). Resolves to `crates/agent_ui/src/agent_panel/tests/run_prompt_tests.rs`.
++//! `slash_command_run_tests.rs` reuses `assert_sent_new_thread` below.
++//!
++//! Contract (Task 2.2 Objective): `pub fn run_prompt_in_new_thread(&mut self, agent: Agent,
++//! source_session: acp_v2::SessionId, text: String, window: &mut Window, cx: &mut Context<Self>)`
++//! opens a focused new thread for `agent` and SENDS `text` as its first message;
++//! `new_thread_with_prefilled_prompt` keeps its signature and stays unsent.
++//!
++//! Behaviour asserted: a new thread, same agent, exactly one user message equal to the text,
++//! the composer emptied by the send; the source thread unchanged and still kept; an unavailable
++//! agent raises one toast and opens and sends nothing. Converse (hostile half of R1.5): the
++//! prefill path, called beside the new one, still sends nothing.
++//!
++//! Not asserted (no log capture in these harnesses): R1.9's INFO line -- reviewed, not tested.
++//! The `Agent::Stub` server answers every prompt with "Default response", so a sent thread holds
++//! a user message followed by the agent's reply.
++
++use acp_thread::{AcpThread, AgentThreadEntry};
++use gpui::{Entity, TestAppContext, VisualTestContext};
++
++use super::prefilled_prompt_tests::*;
++use crate::{Agent, AgentPanel};
++
++/// The user messages of `thread`, as text.
++pub(super) fn user_messages(thread: &Entity<AcpThread>, cx: &VisualTestContext) -> Vec<String> {
++    thread.read_with(cx, |thread, cx| {
++        thread
++            .entries()
++            .iter()
++            .filter_map(|entry| match entry {
++                AgentThreadEntry::UserMessage(message) => {
++                    Some(message.content.to_markdown(cx).trim().to_string())
++                }
++                _ => None,
++            })
++            .collect()
++    })
++}
++
++/// Asserts the active thread is a NEW one on `agent_id` whose only user message is exactly
++/// `command`, sent: the composer no longer holds it.
++pub(super) fn assert_sent_new_thread(
++    panel: &Entity<AgentPanel>,
++    source: &Entity<AcpThread>,
++    agent_id: &project::AgentId,
++    command: &str,
++    cx: &mut VisualTestContext,
++) {
++    let active = panel
++        .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
++        .expect("a thread is active");
++    assert_ne!(
++        active.read_with(cx, |t, _| t.session_id().clone()),
++        source.read_with(cx, |t, _| t.session_id().clone()),
++        "R1.3: a NEW thread is active, not the source"
++    );
++    let conversation = panel
++        .read_with(cx, |panel, _| panel.active_conversation_view().cloned())
++        .expect("a conversation is active");
++    assert_eq!(
++        &conversation.read_with(cx, |view, _| view.agent_key().id()),
++        agent_id,
++        "R1.3: the new thread runs the same agent"
++    );
++    assert_eq!(
++        user_messages(&active, cx),
++        vec![command.to_string()],
++        "R1.3/R1.4: the command is the thread's first and only message, sent exactly once"
++    );
++    let new_thread_id = panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    assert!(
++        panel
++            .read_with(cx, |panel, cx| panel.editor_text(new_thread_id, cx))
++            .unwrap_or_default()
++            .trim()
++            .is_empty(),
++        "R1.3: sending emptied the composer -- the command is not left waiting in it"
++    );
++}
++
++#[gpui::test]
++async fn test_run_prompt_opens_a_new_thread_and_sends_the_command(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "what next?", vec![agent_says("Run it.")], &mut cx);
++    let source_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let source_entries = entry_count(&source, &cx);
++    let source_messages = user_messages(&source, &cx);
++    let toasts = notification_count(&workspace, &cx);
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.run_prompt_in_new_thread(
++            Agent::Stub,
++            source_session.clone(),
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    assert_sent_new_thread(&panel, &source, &Agent::Stub.id(), COMMAND, &mut cx);
++    assert_ne!(
++        panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap()),
++        source_id
++    );
++    // R1.7: the source thread is unchanged and still kept.
++    assert_eq!(
++        entry_count(&source, &cx),
++        source_entries,
++        "R1.7: source untouched"
++    );
++    assert_eq!(
++        user_messages(&source, &cx),
++        source_messages,
++        "R1.7: the command was not sent to the source thread"
++    );
++    assert!(
++        panel.read_with(&cx, |panel, _| panel
++            .retained_threads()
++            .contains_key(&source_id)),
++        "R1.7: the source thread is still kept"
++    );
++    assert_eq!(
++        notification_count(&workspace, &cx),
++        toasts,
++        "no toast on success"
++    );
++}
++
++#[gpui::test]
++async fn test_run_prompt_sends_the_text_verbatim(cx: &mut TestAppContext) {
++    // The panel does not reinterpret the text it is given.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let text = "/review  @src/main.rs /tmp/x";
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.run_prompt_in_new_thread(Agent::Stub, source_session, text.to_string(), window, cx);
++    });
++    settle(&mut cx);
++
++    assert_sent_new_thread(&panel, &source, &Agent::Stub.id(), text, &mut cx);
++}
++
++#[gpui::test]
++async fn test_run_prompt_for_an_unavailable_agent_toasts_and_opens_nothing(
++    cx: &mut TestAppContext,
++) {
++    // R1.6/Q4: the same toast 0045 shows; no thread opened; nothing sent anywhere.
++    let (panel, workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let source_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let source_conversation = panel
++        .read_with(&cx, |panel, _| panel.active_conversation_view().cloned())
++        .unwrap();
++    let source_entries = entry_count(&source, &cx);
++    let toasts = notification_count(&workspace, &cx);
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.run_prompt_in_new_thread(
++            Agent::Custom {
++                id: "retired-agent".into(),
++            },
++            source_session,
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    assert_eq!(
++        notification_count(&workspace, &cx),
++        toasts + 1,
++        "R1.6/Q4: exactly one error toast"
++    );
++    assert_eq!(
++        panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap()),
++        source_id,
++        "R1.6: no thread is opened -- the source stays active"
++    );
++    assert_eq!(
++        panel
++            .read_with(&cx, |panel, _| panel.active_conversation_view().cloned())
++            .map(|view| view.entity_id()),
++        Some(source_conversation.entity_id()),
++    );
++    assert!(
++        !panel
++            .read_with(&cx, |panel, cx| panel.retained_threads().values().any(
++                |view| view.read(cx).agent_key().id().as_ref() == "retired-agent"
++            )),
++        "R1.6: no thread for the unavailable agent is kept"
++    );
++    assert_eq!(
++        entry_count(&source, &cx),
++        source_entries,
++        "R1.6: nothing was sent to the source thread either"
++    );
++}
++
++#[gpui::test]
++async fn test_run_prompt_leaves_the_prefill_path_unsent(cx: &mut TestAppContext) {
++    // Hostile half of R1.5: once both paths exist, the prefill path must not start sending
++    // (e.g. a shared helper defaulting to auto-submit). Run once, then prefill: the prefilled
++    // thread holds the command in its composer with nothing sent.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.run_prompt_in_new_thread(
++            Agent::Stub,
++            source_session.clone(),
++            "/compact".to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++    let run_thread = panel
++        .read_with(&cx, |panel, cx| panel.active_agent_thread(cx))
++        .expect("the Run thread is active");
++
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session,
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    assert_prefilled_new_thread(&panel, &run_thread, &Agent::Stub.id(), COMMAND, &mut cx);
++    assert_eq!(
++        user_messages(&run_thread, &cx),
++        vec!["/compact".to_string()],
++        "the Run thread received its own command once, and not the prefilled one"
++    );
++}
+diff --git a/crates/agent_ui/src/agent_panel/tests/run_prompt_validation_tests.rs b/crates/agent_ui/src/agent_panel/tests/run_prompt_validation_tests.rs
+new file mode 100644
+index 0000000..a7da70c
+--- /dev/null
++++ b/crates/agent_ui/src/agent_panel/tests/run_prompt_validation_tests.rs
+@@ -0,0 +1,386 @@
++//! Run's first message skips the slash-command check; nothing else does (story 035, Task 2.4;
++//! R1.10, R1.11, R1.3, Q4).
++//!
++//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
++//! `mod run_prompt_validation_tests;` beside `mod run_prompt_tests;`. It reuses story 020's
++//! harness (`prefilled_prompt_tests`) and Task 2.2's `assert_sent_new_thread`/`user_messages`
++//! (`run_prompt_tests`), so both modules must stay declared.
++//!
++//! Every agent here advertises no commands and no skills: `StubAgentConnection` never sends
++//! `available_commands_update`, which is exactly a brand-new adapter session before
++//! `newSession` returns. So any leading `/name` fails the advertised-commands check.
++//!
++//! Observation: what reached the agent is read from the thread's user messages (`AcpThread`
++//! records a user message only when it sends the prompt to the connection), as in
++//! `run_prompt_tests.rs`. A refused send also leaves its text in the composer and shows a
++//! thread error -- both observed through public panel/conversation accessors.
++//!
++//! Order follows the hostile-half rule. First the sends that must NOT be treated as Run
++//! (wrong collapse): the composer, the prefill once sent, another `auto_submit` caller, the
++//! URL deep link, a second command in Run's own thread, and a thread opened after a Run.
++//! Then the send that must not be treated as an ordinary one (wrong split): Run itself, and a
++//! second Run (the third element: the skip belongs to each Run, not to the first one only).
++//!
++//! Red before Task 2.4: the two Run tests at the bottom (nothing is sent). Every other test is
++//! a regression guard and passes before the change.
++
++use acp_thread::AcpThread;
++use agent_client_protocol::schema::v2 as acp_v2;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++
++use super::prefilled_prompt_tests::*;
++use super::run_prompt_tests::{assert_sent_new_thread, user_messages};
++use crate::{Agent, AgentInitialContent, AgentPanel, AgentThreadSource, ExternalSourcePrompt};
++
++/// A second leading command no agent advertised, distinct from `COMMAND`.
++const SECOND_COMMAND: &str = "/not-advertised again";
++/// Text without a leading slash: never subject to the command check.
++const PLAIN: &str = "plain words, no command";
++
++/// The text in the active thread's composer, trimmed.
++fn active_composer_text(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Option<String> {
++    panel.read_with(cx, |panel, cx| {
++        let thread_id = panel.active_thread_id(cx)?;
++        panel
++            .editor_text(thread_id, cx)
++            .map(|text| text.trim().to_string())
++    })
++}
++
++/// Whether the active conversation shows a thread error (the refused send's message).
++fn shows_thread_error(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> bool {
++    panel.read_with(cx, |panel, cx| {
++        panel
++            .active_conversation_view()
++            .and_then(|view| {
++                view.read(cx)
++                    .as_connected()
++                    .map(|connected| connected.has_thread_error(cx))
++            })
++            .unwrap_or(false)
++    })
++}
++
++fn active_thread(panel: &Entity<AgentPanel>, cx: &VisualTestContext) -> Entity<AcpThread> {
++    panel
++        .read_with(cx, |panel, cx| panel.active_agent_thread(cx))
++        .expect("a thread is active")
++}
++
++/// Types `text` into the active thread's composer and sends it the normal way.
++fn send_from_composer(panel: &Entity<AgentPanel>, text: &str, cx: &mut VisualTestContext) {
++    let thread_view = panel
++        .read_with(cx, |panel, cx| panel.active_thread_view(cx))
++        .expect("a thread view is active");
++    let message_editor = thread_view.read_with(cx, |view, _| view.message_editor.clone());
++    message_editor.update_in(cx, |editor, window, cx| editor.set_text(text, window, cx));
++    thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
++    settle(cx);
++}
++
++/// The initial content every non-Run `auto_submit` caller builds today: the git panel's
++/// review/conflict actions and the `create_thread` tool. If Task 2.4 adds a field to
++/// `ContentBlock`, set it here to the value every non-Run constructor uses.
++fn auto_submit_text(text: &str) -> AgentInitialContent {
++    AgentInitialContent::ContentBlock {
++        blocks: vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
++            text.to_string(),
++        ))],
++        auto_submit: true,
++    }
++}
++
++/// Opens a focused new `Agent::Stub` thread through the panel's private `external_thread`
++/// funnel -- the one `run_prompt_in_new_thread`, the prefill and every `auto_submit` caller
++/// share (reachable here because this module descends from `agent_panel`). The source is
++/// `AgentPanel`, the same as Run's, so only "is this Run" tells the two apart.
++fn open_thread_with_content(
++    panel: &Entity<AgentPanel>,
++    content: AgentInitialContent,
++    cx: &mut VisualTestContext,
++) -> Entity<AcpThread> {
++    panel.update_in(cx, |panel, window, cx| {
++        panel.external_thread(
++            Some(Agent::Stub),
++            None,
++            None,
++            None,
++            Some(content),
++            true,
++            AgentThreadSource::AgentPanel,
++            window,
++            cx,
++        );
++    });
++    settle(cx);
++    active_thread(panel, cx)
++}
++
++fn run(
++    panel: &Entity<AgentPanel>,
++    source: &Entity<AcpThread>,
++    text: &str,
++    cx: &mut VisualTestContext,
++) -> Entity<AcpThread> {
++    let source_session = source.read_with(cx, |thread, _| thread.session_id().clone());
++    panel.update_in(cx, |panel, window, cx| {
++        panel.run_prompt_in_new_thread(Agent::Stub, source_session, text.to_string(), window, cx);
++    });
++    settle(cx);
++    active_thread(panel, cx)
++}
++
++/// Asserts a refused send: nothing new reached the agent, the text is still in the composer,
++/// and the thread shows an error.
++fn assert_refused(
++    panel: &Entity<AgentPanel>,
++    thread: &Entity<AcpThread>,
++    messages_before: &[String],
++    text: &str,
++    cx: &VisualTestContext,
++    why: &str,
++) {
++    assert_eq!(
++        user_messages(thread, cx),
++        messages_before.to_vec(),
++        "{why}: the command must not reach the agent"
++    );
++    assert_eq!(
++        active_composer_text(panel, cx).as_deref(),
++        Some(text),
++        "{why}: a refused send leaves the text in the composer"
++    );
++    assert!(
++        shows_thread_error(panel, cx),
++        "{why}: the refusal is shown as a thread error"
++    );
++}
++
++#[gpui::test]
++async fn test_composer_send_of_an_unadvertised_command_is_refused(cx: &mut TestAppContext) {
++    // R1.11: the composer keeps the check.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let thread = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let before = user_messages(&thread, &cx);
++
++    send_from_composer(&panel, COMMAND, &mut cx);
++    assert_refused(
++        &panel,
++        &thread,
++        &before,
++        COMMAND,
++        &cx,
++        "R1.11 composer send",
++    );
++
++    // Control: the same composer sends text without a leading command, so the refusal above
++    // is the command check and not a thread that cannot send.
++    send_from_composer(&panel, PLAIN, &mut cx);
++    let mut expected = before;
++    expected.push(PLAIN.to_string());
++    assert_eq!(user_messages(&thread, &cx), expected);
++}
++
++#[gpui::test]
++async fn test_prefilled_command_sent_from_the_composer_is_refused(cx: &mut TestAppContext) {
++    // R1.11: the new-thread button's prefill, once sent, keeps the check -- even though it is
++    // a new thread's first message on the same agent, exactly like Run's.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session,
++            COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++    let prefilled = active_thread(&panel, &cx);
++    assert_ne!(prefilled, source, "precondition: a new thread is active");
++
++    send_from_composer(&panel, COMMAND, &mut cx);
++    assert_refused(
++        &panel,
++        &prefilled,
++        &[],
++        COMMAND,
++        &cx,
++        "R1.11 prefill once sent",
++    );
++
++    send_from_composer(&panel, PLAIN, &mut cx);
++    assert_eq!(user_messages(&prefilled, &cx), vec![PLAIN.to_string()]);
++}
++
++#[gpui::test]
++async fn test_auto_submit_thread_opened_another_way_is_refused(cx: &mut TestAppContext) {
++    // R1.11: another `auto_submit` caller -- same agent, same panel source, same content
++    // shape as Run -- keeps the check. The deep-link shape of the refined Tests field.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++
++    let refused = open_thread_with_content(&panel, auto_submit_text(COMMAND), &mut cx);
++    assert_refused(
++        &panel,
++        &refused,
++        &[],
++        COMMAND,
++        &cx,
++        "R1.11 other auto_submit caller",
++    );
++
++    // Control: the same path auto-submits text without a leading command, so the refusal
++    // above is the command check and not an auto-submit that never fires.
++    let sent = open_thread_with_content(&panel, auto_submit_text(PLAIN), &mut cx);
++    assert_ne!(sent, refused, "precondition: a second new thread is active");
++    assert_eq!(user_messages(&sent, &cx), vec![PLAIN.to_string()]);
++    assert_eq!(
++        user_messages(&refused, &cx),
++        Vec::<String>::new(),
++        "opening another thread did not release the refused command"
++    );
++}
++
++#[gpui::test]
++async fn test_url_prompt_deep_link_sends_nothing(cx: &mut TestAppContext) {
++    // R1.11: the `?prompt=` URL deep link builds `AgentInitialContent::FromExternalSource`
++    // (open_listener.rs -> `new_agent_thread_with_external_source_prompt`), which is never
++    // auto-submitted. That public method takes no agent, so the same content goes through the
++    // same `external_thread` funnel with `Agent::Stub`. Run's skip must not start sending it.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let prompt = ExternalSourcePrompt::new(COMMAND).expect("a valid deep-link prompt");
++
++    let thread = open_thread_with_content(
++        &panel,
++        AgentInitialContent::FromExternalSource(prompt),
++        &mut cx,
++    );
++
++    assert_eq!(
++        user_messages(&thread, &cx),
++        Vec::<String>::new(),
++        "R1.11: the deep link's text is not sent"
++    );
++    assert_eq!(
++        active_composer_text(&panel, &cx).as_deref(),
++        Some(COMMAND),
++        "the deep link's text waits in the composer"
++    );
++}
++
++#[gpui::test]
++async fn test_second_unknown_command_after_run_is_refused(cx: &mut TestAppContext) {
++    // R1.10/R1.11: the skip is one-shot. After Run's first message, a command typed in that
++    // same thread is checked again.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let run_thread = run(&panel, &source, COMMAND, &mut cx);
++    let after_run = user_messages(&run_thread, &cx);
++
++    send_from_composer(&panel, SECOND_COMMAND, &mut cx);
++    assert_refused(
++        &panel,
++        &run_thread,
++        &after_run,
++        SECOND_COMMAND,
++        &cx,
++        "R1.11 second command in Run's thread",
++    );
++
++    send_from_composer(&panel, PLAIN, &mut cx);
++    let mut expected = after_run;
++    expected.push(PLAIN.to_string());
++    assert_eq!(user_messages(&run_thread, &cx), expected);
++}
++
++#[gpui::test]
++async fn test_threads_opened_after_run_are_still_checked(cx: &mut TestAppContext) {
++    // R1.11: Run's skip does not linger in the panel for the next thread, whether that thread
++    // auto-submits or is prefilled and then sent.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++    let run_thread = run(&panel, &source, COMMAND, &mut cx);
++    let run_messages = user_messages(&run_thread, &cx);
++
++    let auto_submitted =
++        open_thread_with_content(&panel, auto_submit_text(SECOND_COMMAND), &mut cx);
++    assert_ne!(auto_submitted, run_thread, "precondition: a new thread");
++    assert_refused(
++        &panel,
++        &auto_submitted,
++        &[],
++        SECOND_COMMAND,
++        &cx,
++        "R1.11 auto_submit after Run",
++    );
++
++    let source_session = source.read_with(&cx, |thread, _| thread.session_id().clone());
++    panel.update_in(&mut cx, |panel, window, cx| {
++        panel.new_thread_with_prefilled_prompt(
++            Agent::Stub,
++            source_session,
++            SECOND_COMMAND.to_string(),
++            window,
++            cx,
++        );
++    });
++    settle(&mut cx);
++    let prefilled = active_thread(&panel, &cx);
++    send_from_composer(&panel, SECOND_COMMAND, &mut cx);
++    assert_refused(
++        &panel,
++        &prefilled,
++        &[],
++        SECOND_COMMAND,
++        &cx,
++        "R1.11 prefill sent after Run",
++    );
++
++    assert_eq!(
++        user_messages(&run_thread, &cx),
++        run_messages,
++        "the Run thread received nothing more"
++    );
++}
++
++#[gpui::test]
++async fn test_run_sends_an_unadvertised_command_as_the_first_message(cx: &mut TestAppContext) {
++    // R1.10/R1.3: Run sends a command the agent never advertised, exactly once, as the new
++    // thread's first message, and the composer is emptied. RED before Task 2.4: the check
++    // refuses it, the command stays in the composer and nothing is sent.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++
++    run(&panel, &source, COMMAND, &mut cx);
++
++    assert_sent_new_thread(&panel, &source, &Agent::Stub.id(), COMMAND, &mut cx);
++    assert!(
++        !shows_thread_error(&panel, &cx),
++        "R1.10: Run's command is not refused as an unrecognized command"
++    );
++}
++
++#[gpui::test]
++async fn test_each_run_sends_its_own_command(cx: &mut TestAppContext) {
++    // R1.10, third element: the skip belongs to each Run, not to the panel's first one.
++    // Two Runs in a row each send their own unadvertised command in their own new thread.
++    // RED before Task 2.4.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(&panel, "hi", vec![agent_says("ok")], &mut cx);
++
++    let first = run(&panel, &source, COMMAND, &mut cx);
++    assert_sent_new_thread(&panel, &source, &Agent::Stub.id(), COMMAND, &mut cx);
++
++    run(&panel, &source, SECOND_COMMAND, &mut cx);
++    assert_sent_new_thread(&panel, &first, &Agent::Stub.id(), SECOND_COMMAND, &mut cx);
++    assert!(!shows_thread_error(&panel, &cx));
++    assert_eq!(
++        user_messages(&first, &cx),
++        vec![COMMAND.to_string()],
++        "the first Run thread did not receive the second command"
++    );
++}
+diff --git a/crates/agent_ui/src/agent_panel/tests/slash_command_run_tests.rs b/crates/agent_ui/src/agent_panel/tests/slash_command_run_tests.rs
+new file mode 100644
+index 0000000..d99f46a
+--- /dev/null
++++ b/crates/agent_ui/src/agent_panel/tests/slash_command_run_tests.rs
+@@ -0,0 +1,253 @@
++//! The Run button beside story 020's new-thread button, end to end through a real agent message
++//! (story 035, Task 2.3; R1.1, R1.2, R1.3, R1.4, R1.5, R1.8, Q11, Q12).
++//!
++//! Wiring: inside `crates/agent_ui/src/agent_panel.rs`'s `mod tests { .. }`, declare
++//! `mod slash_command_run_tests;` beside `mod prefilled_prompt_tests;`,
++//! `mod slash_command_button_tests;` and `mod run_prompt_tests;` (whose harnesses this reuses).
++//! Resolves to `crates/agent_ui/src/agent_panel/tests/slash_command_run_tests.rs`.
++//!
++//! How the buttons are found: both are `ui::IconButton`s, painted under `ICON-{icon:?}`. Run is
++//! `IconName::PlayOutlined` (story assumption A4, painted nowhere else in agent_ui at the series
++//! tip); New Thread stays `IconName::ThreadFromSummary` (0045). The code-block row shows on
++//! hover, so `sweep_both` hovers a grid and records every distinct bounds of each, asserting on
++//! every frame that the two appear and disappear together (same row, Copy's visibility, R1.1).
++//!
++//! Every test carries a qualifying control block, so it needs the feature to pass.
++//! Not asserted: the tooltip text "Run in New Thread" (R1.8) and focusability by keyboard
++//! (Q12) -- tooltips need a hover delay these sweeps do not model; reviewed and GUI-captured.
++
++use std::collections::BTreeSet;
++
++use gpui::{Bounds, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, px};
++
++use super::prefilled_prompt_tests::*;
++use super::run_prompt_tests::{assert_sent_new_thread, user_messages};
++use super::slash_command_button_tests::{ACTION, click};
++
++const RUN: &str = "ICON-PlayOutlined";
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn key(bounds: Bounds<Pixels>) -> (i32, i32) {
++    (
++        f32::from(bounds.origin.x).round() as i32,
++        f32::from(bounds.origin.y).round() as i32,
++    )
++}
++
++struct Pair {
++    runs: Vec<Bounds<Pixels>>,
++    news: Vec<Bounds<Pixels>>,
++}
++
++fn sweep_both(cx: &mut VisualTestContext) -> Pair {
++    cx.simulate_mouse_move(Point::new(px(1.), px(1.)), None, Modifiers::none());
++    draw(cx);
++    assert!(
++        cx.debug_bounds(RUN).is_none(),
++        "precondition: {RUN} must not be painted with the mouse away (icon collision?)"
++    );
++    let (mut seen_runs, mut seen_news) = (BTreeSet::new(), BTreeSet::new());
++    let (mut runs, mut news) = (Vec::new(), Vec::new());
++    for x in (60..1200).step_by(120) {
++        for y in (4..800).step_by(10) {
++            cx.simulate_mouse_move(
++                Point::new(px(x as f32), px(y as f32)),
++                None,
++                Modifiers::none(),
++            );
++            draw(cx);
++            let run = cx.debug_bounds(RUN);
++            let new = cx.debug_bounds(ACTION);
++            assert_eq!(
++                run.is_some(),
++                new.is_some(),
++                "R1.1: Run shows exactly when the new-thread button does (at {x},{y})"
++            );
++            if let (Some(run), Some(new)) = (run, new) {
++                assert!(
++                    run.origin.x < new.origin.x
++                        && (f32::from(run.origin.y) - f32::from(new.origin.y)).abs() < 1.,
++                    "A4: Run sits left of New Thread in the same row: run {run:?}, new {new:?}"
++                );
++                if seen_runs.insert(key(run)) {
++                    runs.push(run);
++                }
++                if seen_news.insert(key(new)) {
++                    news.push(new);
++                }
++            }
++        }
++    }
++    Pair { runs, news }
++}
++
++#[gpui::test]
++async fn test_slash_command_run_only_on_the_qualifying_block_and_sends(cx: &mut TestAppContext) {
++    let (panel, workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let reply = concat!(
++        "Two options:\n\n",
++        "```\n/epic:epic stories run 014\n/epic:epic stories run 015\n```\n\n", // R1.2
++        "A shell line:\n\n",
++        "```sh\necho /epic:epic stories run 014\n```\n\n", // R1.2
++        "Next step:\n\n",
++        "```\n  /epic:epic stories run 014  \n```\n", // R1.1 -- the control
++    );
++    let source = open_source_thread(&panel, "what next?", vec![agent_says(reply)], &mut cx);
++    let source_id = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx).unwrap());
++    let source_entries = entry_count(&source, &cx);
++    let toasts = notification_count(&workspace, &cx);
++    draw(&mut cx);
++
++    let pair = sweep_both(&mut cx);
++    assert_eq!(
++        pair.runs.len(),
++        1,
++        "R1.1/R1.2: exactly one block carries Run"
++    );
++    assert_eq!(pair.news.len(), 1, "and the same block carries New Thread");
++
++    let source_agent = active_agent_id(&panel, &cx);
++    click(pair.runs[0], &mut cx);
++
++    // R1.3/R1.4: the predicate's trimmed command, sent once, in a new thread of the same agent.
++    assert_sent_new_thread(&panel, &source, &source_agent, COMMAND, &mut cx);
++    assert_eq!(
++        entry_count(&source, &cx),
++        source_entries,
++        "R1.7: source untouched"
++    );
++    assert!(
++        panel.read_with(&cx, |panel, _| panel
++            .retained_threads()
++            .contains_key(&source_id)),
++        "R1.7: the source thread is still kept"
++    );
++    assert_eq!(
++        notification_count(&workspace, &cx),
++        toasts,
++        "no error toast"
++    );
++}
++
++#[gpui::test]
++async fn test_slash_command_run_sends_the_clicked_block_not_another(cx: &mut TestAppContext) {
++    // Hostile half of R1.4: two qualifying blocks in ONE message. Two Run buttons with distinct
++    // bounds (R1.8: distinct ids), and the LOWER one -- the second block -- sends "/second",
++    // never "/first" (a captured first block, or a shared id routing the click upward).
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(
++        &panel,
++        "what next?",
++        vec![agent_says(
++            "Either:\n\n```\n/first\n```\n\nor:\n\n```\n/second\n```\n",
++        )],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let pair = sweep_both(&mut cx);
++    assert_eq!(pair.runs.len(), 2, "both blocks carry their own Run");
++    assert_eq!(pair.news.len(), 2, "both blocks carry their own New Thread");
++    let lower = pair
++        .runs
++        .iter()
++        .copied()
++        .max_by(|a, b| f32::from(a.origin.y).total_cmp(&f32::from(b.origin.y)))
++        .unwrap();
++
++    let source_agent = active_agent_id(&panel, &cx);
++    click(lower, &mut cx);
++    assert_sent_new_thread(&panel, &source, &source_agent, "/second", &mut cx);
++}
++
++#[gpui::test]
++async fn test_slash_command_run_sends_the_upper_block_when_it_is_clicked(cx: &mut TestAppContext) {
++    // The converse of the test above: the UPPER Run sends "/first" -- a fix that always took
++    // the last block would pass the other test and fail this one.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(
++        &panel,
++        "what next?",
++        vec![agent_says(
++            "Either:\n\n```\n/first\n```\n\nor:\n\n```\n/second\n```\n",
++        )],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let pair = sweep_both(&mut cx);
++    assert_eq!(pair.runs.len(), 2);
++    let upper = pair
++        .runs
++        .iter()
++        .copied()
++        .min_by(|a, b| f32::from(a.origin.y).total_cmp(&f32::from(b.origin.y)))
++        .unwrap();
++
++    let source_agent = active_agent_id(&panel, &cx);
++    click(upper, &mut cx);
++    assert_sent_new_thread(&panel, &source, &source_agent, "/first", &mut cx);
++}
++
++#[gpui::test]
++async fn test_slash_command_new_thread_beside_run_still_prefills_unsent(cx: &mut TestAppContext) {
++    // Hostile half of R1.5: with Run in the same row, the new-thread button must not send.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(
++        &panel,
++        "what next?",
++        vec![agent_says("Next:\n\n```\n/compact\n```\n")],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let pair = sweep_both(&mut cx);
++    assert_eq!(
++        pair.runs.len(),
++        1,
++        "precondition: Run is offered on the block"
++    );
++    assert_eq!(pair.news.len(), 1);
++    let source_agent = active_agent_id(&panel, &cx);
++    click(pair.news[0], &mut cx);
++
++    assert_prefilled_new_thread(&panel, &source, &source_agent, "/compact", &mut cx);
++    let active = panel
++        .read_with(&cx, |panel, cx| panel.active_agent_thread(cx))
++        .unwrap();
++    assert!(
++        user_messages(&active, &cx).is_empty(),
++        "R1.5: nothing was sent"
++    );
++}
++
++#[gpui::test]
++async fn test_slash_command_run_not_on_thinking_or_user_message(cx: &mut TestAppContext) {
++    // R1.2: a qualifying block in the thinking, and one in the operator's own message, carry no
++    // Run; the message's block (the control) does.
++    let (panel, _workspace, mut cx) = setup_panel_in_workspace(cx).await;
++    let source = open_source_thread(
++        &panel,
++        "Should I run\n\n```\n/help\n```\n",
++        vec![
++            agent_thinks("Maybe:\n\n```\n/init\n```\n"),
++            agent_says("No, run:\n\n```\n/compact\n```\n"),
++        ],
++        &mut cx,
++    );
++    draw(&mut cx);
++
++    let pair = sweep_both(&mut cx);
++    assert_eq!(
++        pair.runs.len(),
++        1,
++        "R1.2: only the agent message's block carries Run"
++    );
++    let source_agent = active_agent_id(&panel, &cx);
++    click(pair.runs[0], &mut cx);
++    assert_sent_new_thread(&panel, &source, &source_agent, "/compact", &mut cx);
++}
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index c2ca3b1..2d418b0 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -626,6 +626,12 @@ pub enum AgentInitialContent {
+         blocks: Vec<acp_v2::ContentBlock>,
+         auto_submit: bool,
+     },
++    /// A command the operator ran from a message (Run): sent at once as the new
++    /// thread's first message without checking its leading slash command, since a
++    /// new session has advertised no commands yet. Every other send is checked.
++    RunCommand {
++        blocks: Vec<acp_v2::ContentBlock>,
++    },
+     FromExternalSource(ExternalSourcePrompt),
+ }
+ 
+diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
+index 3a65bbf..006eb61 100644
+--- a/crates/agent_ui/src/conversation_view/thread_view.rs
++++ b/crates/agent_ui/src/conversation_view/thread_view.rs
+@@ -829,6 +829,7 @@ impl ThreadView {
+         let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
+ 
+         let mut should_auto_submit = false;
++        let mut skip_slash_command_check = false;
+         let mut show_external_source_prompt_warning = false;
+ 
+         let message_editor = cx.new(|cx| {
+@@ -859,6 +860,11 @@ impl ThreadView {
+                         should_auto_submit = auto_submit;
+                         Some(blocks)
+                     }
++                    AgentInitialContent::RunCommand { blocks } => {
++                        should_auto_submit = true;
++                        skip_slash_command_check = true;
++                        Some(blocks)
++                    }
+                     AgentInitialContent::FromExternalSource(prompt) => {
+                         show_external_source_prompt_warning = true;
+                         // SECURITY: Be explicit about not auto submitting prompt from external source.
+@@ -1131,7 +1137,14 @@ impl ThreadView {
+             });
+ 
+         if should_auto_submit {
++            // A Run's first message skips the slash-command check for this send
++            // only: the flag is cleared before anything else can send.
++            this.message_editor.update(cx, |editor, _| {
++                editor.set_skip_slash_command_check(skip_slash_command_check)
++            });
+             this.send(window, cx);
++            this.message_editor
++                .update(cx, |editor, _| editor.set_skip_slash_command_check(false));
+         }
+         this
+     }
+@@ -8852,8 +8865,9 @@ impl ThreadView {
+     }
+ 
+     /// `offers_slash_commands` is set only for an agent's message: a code block
+-    /// there holding one slash command gets a button that opens a new thread
+-    /// with it. Thinking blocks share this path and must not get it.
++    /// there holding one slash command gets buttons that run it in a new thread
++    /// or open a new thread with it. Thinking blocks share this path and must
++    /// not get them.
+     fn render_message_content(
+         &self,
+         entry_ix: usize,
+@@ -13118,43 +13132,40 @@ impl ThreadView {
+     fn slash_command_action(
+         &self,
+         cx: &App,
+-    ) -> impl Fn(&str) -> Option<markdown::CodeBlockAction> + 'static {
++    ) -> impl Fn(&str) -> Vec<markdown::CodeBlockAction> + 'static {
+         let workspace = self.workspace.clone();
+         let agent_id = self.agent_id.clone();
+         let session_id = self.thread.read(cx).session_id().clone();
+         move |code| {
+-            slash_command_in_code_block(code)?;
+-            let workspace = workspace.clone();
+-            let agent_id = agent_id.clone();
+-            let session_id = session_id.clone();
+-            Some(markdown::CodeBlockAction {
+-                icon: IconName::ThreadFromSummary,
+-                tooltip: "New Thread with This Command".into(),
+-                on_click: Rc::new(move |code: &str, window: &mut Window, cx: &mut App| {
+-                    let Some(command) = slash_command_in_code_block(code) else {
+-                        return;
+-                    };
+-                    let Some(panel) = workspace
+-                        .upgrade()
+-                        .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+-                    else {
+-                        log::warn!(
+-                            "slash command button: no agent panel to open a thread in (session {session_id})"
+-                        );
+-                        return;
+-                    };
+-                    let command = command.to_string();
+-                    panel.update(cx, |panel, cx| {
+-                        panel.new_thread_with_prefilled_prompt(
+-                            Agent::from(agent_id.clone()),
+-                            session_id.clone(),
+-                            command,
+-                            window,
+-                            cx,
+-                        );
+-                    });
+-                }),
+-            })
++            if slash_command_in_code_block(code).is_none() {
++                return Vec::new();
++            }
++            let button = |icon, tooltip, label, open| {
++                SlashCommandButton {
++                    icon,
++                    tooltip,
++                    label,
++                    workspace: workspace.clone(),
++                    agent_id: agent_id.clone(),
++                    session_id: session_id.clone(),
++                    open,
++                }
++                .into_action()
++            };
++            vec![
++                button(
++                    IconName::PlayOutlined,
++                    "Run in New Thread",
++                    "run",
++                    AgentPanel::run_prompt_in_new_thread,
++                ),
++                button(
++                    IconName::ThreadFromSummary,
++                    "New Thread with This Command",
++                    "new thread",
++                    AgentPanel::new_thread_with_prefilled_prompt,
++                ),
++            ]
+         }
+     }
+ 
+@@ -13848,6 +13859,71 @@ impl ThreadView {
+     }
+ }
+ 
++/// One of the buttons a code block holding a slash command gets; the buttons
++/// differ only in how the agent panel opens the new thread with the command.
++struct SlashCommandButton {
++    icon: IconName,
++    tooltip: &'static str,
++    /// Names the button in the log when there is no panel to open a thread in.
++    label: &'static str,
++    workspace: WeakEntity<Workspace>,
++    agent_id: AgentId,
++    session_id: acp_v2::SessionId,
++    open: fn(
++        &mut AgentPanel,
++        Agent,
++        acp_v2::SessionId,
++        String,
++        &mut Window,
++        &mut Context<AgentPanel>,
++    ),
++}
++
++impl SlashCommandButton {
++    fn into_action(self) -> markdown::CodeBlockAction {
++        let Self {
++            icon,
++            tooltip,
++            label,
++            workspace,
++            agent_id,
++            session_id,
++            open,
++        } = self;
++        markdown::CodeBlockAction {
++            icon,
++            tooltip: tooltip.into(),
++            on_click: Rc::new(move |code: &str, window: &mut Window, cx: &mut App| {
++                // Re-read from the code the click hands over, so a button only ever
++                // acts on its own block's command.
++                let Some(command) = slash_command_in_code_block(code) else {
++                    return;
++                };
++                let Some(panel) = workspace
++                    .upgrade()
++                    .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
++                else {
++                    log::warn!(
++                        "slash command {label} button: no agent panel to open a thread in (session {session_id})"
++                    );
++                    return;
++                };
++                let command = command.to_string();
++                panel.update(cx, |panel, cx| {
++                    open(
++                        panel,
++                        Agent::from(agent_id.clone()),
++                        session_id.clone(),
++                        command,
++                        window,
++                        cx,
++                    );
++                });
++            }),
++        }
++    }
++}
++
+ impl Render for ThreadView {
+     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         // Keep the message editor's local slash commands in sync with the
+diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
+index 186d746..e822d08 100644
+--- a/crates/agent_ui/src/message_editor.rs
++++ b/crates/agent_ui/src/message_editor.rs
+@@ -227,6 +227,9 @@ pub struct MessageEditor {
+     /// Set when Enter (or a send chord) was swallowed because a question is
+     /// pending; the composer then says why until the question ends.
+     swallowed_send: bool,
++    /// Set only around the send of a Run's first message, which `contents`
++    /// then lets through without checking its leading slash command.
++    skip_slash_command_check: bool,
+     agent_id: AgentId,
+     thread_store: Option<Entity<ThreadStore>>,
+     /// The rendered draft, while the preview is showing; `None` while editing.
+@@ -641,6 +644,7 @@ impl MessageEditor {
+             local_commands,
+             question_pending,
+             swallowed_send: false,
++            skip_slash_command_check: false,
+             agent_id,
+             thread_store,
+             preview: None,
+@@ -946,19 +950,28 @@ impl MessageEditor {
+             )
+         };
+         let agent_id = self.agent_id.clone();
++        let skip_slash_command_check = self.skip_slash_command_check;
+         let build_task = self.build_content_blocks(full_mention_content, cx);
+ 
+         cx.spawn(async move |_, _cx| {
+-            Self::validate_slash_commands(
+-                &text,
+-                &available_commands,
+-                &available_skills,
+-                &agent_id,
+-            )?;
++            if !skip_slash_command_check {
++                Self::validate_slash_commands(
++                    &text,
++                    &available_commands,
++                    &available_skills,
++                    &agent_id,
++                )?;
++            }
+             build_task.await
+         })
+     }
+ 
++    /// While set, `contents` skips the slash-command check. The caller sets it
++    /// around a single send and clears it right after.
++    pub fn set_skip_slash_command_check(&mut self, skip: bool) {
++        self.skip_slash_command_check = skip;
++    }
++
+     pub fn draft_contents(
+         &self,
+         cx: &mut Context<Self>,
+diff --git a/crates/markdown/src/code_block_action_tests.rs b/crates/markdown/src/code_block_action_tests.rs
+index e38ceed..5ab92e1 100644
+--- a/crates/markdown/src/code_block_action_tests.rs
++++ b/crates/markdown/src/code_block_action_tests.rs
+@@ -1,23 +1,24 @@
+-//! A caller-decided action button in a code block's button row (story 020, Task 3.1;
+-//! R1.1, R1.5, Q12).
++//! Caller-decided action buttons in a code block's button row: a LIST of actions (story 035,
++//! Task 2.1; R1.1, R1.2, R1.8, Q12). Replaces story 020's single-action version of this file:
++//! its six scenarios are kept, re-shaped for a list, and the list-specific ones are added.
+ //!
+-//! Wiring: in `crates/markdown/src/markdown.rs` (the crate root) declare
++//! Wiring (unchanged from 0045): in `crates/markdown/src/markdown.rs` (the crate root)
+ //!
+ //!     #[cfg(test)]
+ //!     mod code_block_action_tests;
+ //!
+-//! Contract (from the plan's surface):
+-//!   - `MarkdownElement::on_code_block_action(self, impl Fn(&str) -> Option<CodeBlockAction> + 'static) -> Self`
+-//!   - `pub struct CodeBlockAction { pub icon: IconName, pub tooltip: SharedString (or any
+-//!     `From<&'static str>`), pub on_click: Rc<dyn Fn(&str, &mut Window, &mut App)> }`
+-//!   - the button is a `ui::IconButton`, so it paints under the debug selector
+-//!     `ICON-{icon:?}` -- that is how these tests find it.
++//! Contract (Task 2.1 Objective):
++//!   - `MarkdownElement::on_code_block_action(self, impl Fn(&str) -> Vec<CodeBlockAction> + 'static) -> Self`
++//!   - `CodeBlockAction { icon: IconName, tooltip: SharedString, on_click: Rc<dyn Fn(&str, &mut Window, &mut App)> }`
++//!   - every returned action is rendered, in order, before Copy, each with a unique element id;
++//!     an empty list draws nothing; Copy hidden -> no action at all.
++//!   - each action is a `ui::IconButton`, painted under the debug selector `ICON-{icon:?}`:
++//!     that is how these tests find it, so every action in a test carries its own icon.
+ //!
+-//! Behaviour asserted: the hook is asked with the block's code; `Some` draws a button that
+-//! hands that same code to `on_click`; `None` draws nothing extra; the button follows the
+-//! Copy button's visibility (hidden with it, revealed on hover with it); each block's
+-//! button hands over its own block's code; buttons stay distinct across two markdown
+-//! entities rendering the same source.
++//! Hostile halves (identity): two actions of ONE block must not collapse onto one button (a
++//! shared element id, or one `on_click` captured for both); two blocks' actions, and two
++//! entities' actions, must not collapse either -- the four-button test makes a THIRD element
++//! (another block's action at the same index) the collision candidate for each id.
+ 
+ use std::{cell::RefCell, rc::Rc};
+ 
+@@ -32,10 +33,9 @@ use crate::{
+     MarkdownStyle, WrapButtonVisibility,
+ };
+ 
+-type Hook = Rc<dyn Fn(&str) -> Option<CodeBlockAction>>;
++type Hook = Rc<dyn Fn(&str) -> Vec<CodeBlockAction>>;
++type Clicks = Rc<RefCell<Vec<(&'static str, String)>>>;
+ 
+-const ACTION: &str = "ICON-ThreadFromSummary";
+-const OTHER_ACTION: &str = "ICON-Plus";
+ const COPY: &str = "ICON-Copy";
+ 
+ struct ActionView {
+@@ -78,35 +78,40 @@ fn draw(cx: &mut VisualTestContext) {
+     cx.run_until_parked();
+ }
+ 
+-/// A hook that records every code it is asked about and every code handed to a click,
+-/// answering with `icon` for every block whose code satisfies `accept`.
+-struct Recorder {
+-    asked: Rc<RefCell<Vec<String>>>,
+-    clicked: Rc<RefCell<Vec<String>>>,
++/// One action whose click records `(tag, code)` into `clicks`.
++fn action(icon: IconName, tag: &'static str, clicks: &Clicks) -> CodeBlockAction {
++    let clicks = clicks.clone();
++    CodeBlockAction {
++        icon,
++        tooltip: tag.into(),
++        on_click: Rc::new(move |code: &str, _: &mut Window, _: &mut App| {
++            clicks.borrow_mut().push((tag, code.trim().to_string()));
++        }),
++    }
+ }
+ 
+-fn recording_hook(icon: IconName, accept: fn(&str) -> bool) -> (Hook, Recorder) {
++/// A hook answering `[(icon, tag)...]` for every block `accept` takes, recording what it is asked.
++fn hook(
++    actions: Vec<(IconName, &'static str)>,
++    accept: fn(&str) -> bool,
++) -> (Hook, Rc<RefCell<Vec<String>>>, Clicks) {
+     let asked = Rc::new(RefCell::new(Vec::new()));
+-    let clicked = Rc::new(RefCell::new(Vec::new()));
++    let clicks: Clicks = Rc::default();
+     let hook: Hook = {
+         let asked = asked.clone();
+-        let clicked = clicked.clone();
++        let clicks = clicks.clone();
+         Rc::new(move |code: &str| {
+             asked.borrow_mut().push(code.to_string());
+             if !accept(code) {
+-                return None;
++                return Vec::new();
+             }
+-            let clicked = clicked.clone();
+-            Some(CodeBlockAction {
+-                icon,
+-                tooltip: "New Thread with This Command".into(),
+-                on_click: Rc::new(move |code: &str, _: &mut Window, _: &mut App| {
+-                    clicked.borrow_mut().push(code.to_string());
+-                }),
+-            })
++            actions
++                .iter()
++                .map(|(icon, tag)| action(*icon, tag, &clicks))
++                .collect()
+         })
+     };
+-    (hook, Recorder { asked, clicked })
++    (hook, asked, clicks)
+ }
+ 
+ fn open_view<'a>(
+@@ -133,7 +138,6 @@ fn open_view<'a>(
+     cx
+ }
+ 
+-/// Moves the mouse down the view and returns the first bounds at which `selector` paints.
+ fn hover_until_painted(
+     selector: &'static str,
+     cx: &mut VisualTestContext,
+@@ -148,11 +152,20 @@ fn hover_until_painted(
+     None
+ }
+ 
++fn click(selector: &'static str, cx: &mut VisualTestContext) {
++    draw(cx);
++    let bounds = cx
++        .debug_bounds(selector)
++        .unwrap_or_else(|| panic!("{selector} must be painted"));
++    cx.simulate_click(bounds.center(), Modifiers::none());
++    cx.run_until_parked();
++}
++
+ #[gpui::test]
+ fn test_code_block_action_is_asked_with_the_code_and_hands_it_to_the_click(
+     cx: &mut TestAppContext,
+ ) {
+-    let (hook, recorder) = recording_hook(IconName::ThreadFromSummary, |_| true);
++    let (hook, asked, clicks) = hook(vec![(IconName::ThreadFromSummary, "new")], |_| true);
+     let cx = open_view(
+         vec![(
+             "Next:\n\n```sh\n  /epic:epic stories run 014  \n```\n",
+@@ -161,78 +174,129 @@ fn test_code_block_action_is_asked_with_the_code_and_hands_it_to_the_click(
+         CopyButtonVisibility::AlwaysVisible,
+         cx,
+     );
+-
+-    let asked = recorder.asked.borrow().clone();
+     assert!(
+         asked
++            .borrow()
+             .iter()
+             .any(|code| code.trim() == "/epic:epic stories run 014"),
+-        "the hook must be asked with the block's code, got {asked:?}"
++        "the hook is asked with the block's code: {:?}",
++        asked.borrow()
+     );
+-    assert!(
+-        cx.debug_bounds(COPY).is_some(),
+-        "precondition: Copy is painted"
++    click("ICON-ThreadFromSummary", cx);
++    assert_eq!(
++        *clicks.borrow(),
++        vec![("new", "/epic:epic stories run 014".to_string())],
++        "one click, one call, with the block's code"
+     );
+-    let button = cx
+-        .debug_bounds(ACTION)
+-        .expect("the hook said Some: its button must be painted beside Copy");
+-
+-    cx.simulate_click(button.center(), Modifiers::none());
+-    cx.run_until_parked();
++}
+ 
+-    let clicked = recorder.clicked.borrow().clone();
+-    assert_eq!(clicked.len(), 1, "one click, one call: {clicked:?}");
++#[gpui::test]
++fn test_code_block_action_two_actions_render_in_order_before_copy(cx: &mut TestAppContext) {
++    // R1.1/A4: the list's order is the row's order, and the whole list sits before Copy.
++    let (hook, _, _) = hook(
++        vec![
++            (IconName::PlayOutlined, "run"),
++            (IconName::ThreadFromSummary, "new"),
++        ],
++        |_| true,
++    );
++    let cx = open_view(
++        vec![("```\n/help\n```\n", Some(hook))],
++        CopyButtonVisibility::AlwaysVisible,
++        cx,
++    );
++    let run = cx
++        .debug_bounds("ICON-PlayOutlined")
++        .expect("the first action is painted");
++    let new = cx
++        .debug_bounds("ICON-ThreadFromSummary")
++        .expect("the second action is painted -- a list draws every action, not the first");
++    let copy = cx.debug_bounds(COPY).expect("Copy is painted");
++    assert!(
++        run.origin.x < new.origin.x && new.origin.x < copy.origin.x,
++        "order [first][second][Copy]: run {run:?}, new {new:?}, copy {copy:?}"
++    );
+     assert!(
+-        asked.contains(&clicked[0]),
+-        "the click hands over the same code the hook was asked with: {clicked:?} vs {asked:?}"
++        (f32::from(run.origin.y) - f32::from(new.origin.y)).abs() < 1.
++            && (f32::from(new.origin.y) - f32::from(copy.origin.y)).abs() < 1.,
++        "all three share one button row"
+     );
+ }
+ 
+ #[gpui::test]
+-fn test_code_block_action_absent_when_the_hook_declines(cx: &mut TestAppContext) {
+-    // Two blocks in one message: the hook accepts only the second, so the first gets
+-    // only today's buttons and the second gets the action.
+-    let (hook, recorder) =
+-        recording_hook(IconName::ThreadFromSummary, |code| code.trim() == "/help");
++fn test_code_block_action_two_actions_of_one_block_reach_their_own_handlers(
++    cx: &mut TestAppContext,
++) {
++    // Hostile half (R1.8): two buttons in ONE row -- a shared element id or a handler captured
++    // once would route the second click to the first action.
++    let (hook, _, clicks) = hook(
++        vec![
++            (IconName::PlayOutlined, "run"),
++            (IconName::ThreadFromSummary, "new"),
++        ],
++        |_| true,
++    );
+     let cx = open_view(
+-        vec![("```\necho hi\n```\n\n```\n/help\n```\n", Some(hook))],
++        vec![("```\n/help\n```\n", Some(hook))],
+         CopyButtonVisibility::AlwaysVisible,
+         cx,
+     );
++    click("ICON-ThreadFromSummary", cx);
++    click("ICON-PlayOutlined", cx);
++    click("ICON-ThreadFromSummary", cx);
++    assert_eq!(
++        *clicks.borrow(),
++        vec![
++            ("new", "/help".to_string()),
++            ("run", "/help".to_string()),
++            ("new", "/help".to_string()),
++        ],
++        "each button calls its own action, every time"
++    );
++}
+ 
+-    let asked = recorder.asked.borrow().clone();
++#[gpui::test]
++fn test_code_block_action_empty_list_draws_nothing(cx: &mut TestAppContext) {
++    // R1.2: the hook declines the first block (empty list) and accepts the second.
++    let (hook, asked, clicks) = hook(
++        vec![
++            (IconName::PlayOutlined, "run"),
++            (IconName::ThreadFromSummary, "new"),
++        ],
++        |code| code.trim() == "/help",
++    );
++    let cx = open_view(
++        vec![("```\necho hi\n```\n\n```\n/help\n```\n", Some(hook))],
++        CopyButtonVisibility::AlwaysVisible,
++        cx,
++    );
+     assert!(
+-        asked.iter().any(|code| code.trim() == "echo hi")
+-            && asked.iter().any(|code| code.trim() == "/help"),
+-        "the hook is asked about every code block: {asked:?}"
++        asked.borrow().iter().any(|code| code.trim() == "echo hi")
++            && asked.borrow().iter().any(|code| code.trim() == "/help"),
++        "the hook is asked about every block: {:?}",
++        asked.borrow()
+     );
+-    let button = cx
+-        .debug_bounds(ACTION)
+-        .expect("the accepted block has a button");
+-    cx.simulate_click(button.center(), Modifiers::none());
+-    cx.run_until_parked();
++    click("ICON-PlayOutlined", cx);
++    click("ICON-ThreadFromSummary", cx);
+     assert_eq!(
+-        recorder
+-            .clicked
+-            .borrow()
+-            .iter()
+-            .map(|code| code.trim().to_string())
+-            .collect::<Vec<_>>(),
+-        vec!["/help".to_string()],
+-        "the only button belongs to the accepted block"
++        *clicks.borrow(),
++        vec![("run", "/help".to_string()), ("new", "/help".to_string())],
++        "the only buttons painted belong to the accepted block"
+     );
+ }
+ 
+ #[gpui::test]
+ fn test_code_block_action_hidden_when_copy_is_hidden(cx: &mut TestAppContext) {
+-    // Hostile half: the hook says Some, but the caller hid Copy -- the action follows it.
+-    let (hook, _recorder) = recording_hook(IconName::ThreadFromSummary, |_| true);
+-    let (control, control_recorder) = recording_hook(IconName::Plus, |_| true);
+-    let cx = open_view(
++    // Hostile half: the hook returns two actions, but the caller hid Copy -- none is drawn.
++    let (hook, _, clicks) = hook(
+         vec![
+-            ("```\n/help\n```\n", Some(hook)),
+-            ("```\n/compact\n```\n", Some(control)),
++            (IconName::PlayOutlined, "run"),
++            (IconName::ThreadFromSummary, "new"),
+         ],
++        |_| true,
++    );
++    let cx = open_view(
++        vec![("```\n/help\n```\n", Some(hook))],
+         CopyButtonVisibility::Hidden,
+         cx,
+     );
+@@ -240,72 +304,62 @@ fn test_code_block_action_hidden_when_copy_is_hidden(cx: &mut TestAppContext) {
+         cx.debug_bounds(COPY).is_none(),
+         "precondition: Copy is hidden"
+     );
+-    assert!(
+-        hover_until_painted(ACTION, cx).is_none(),
+-        "no action button anywhere while Copy is hidden"
+-    );
+-    assert!(cx.debug_bounds(OTHER_ACTION).is_none());
+-    // The hook may or may not be consulted, but nothing it returns may become a click.
+-    assert!(control_recorder.clicked.borrow().is_empty());
++    assert!(hover_until_painted("ICON-PlayOutlined", cx).is_none());
++    assert!(hover_until_painted("ICON-ThreadFromSummary", cx).is_none());
++    assert!(clicks.borrow().is_empty());
+ }
+ 
+ #[gpui::test]
+ fn test_code_block_action_follows_copy_on_hover(cx: &mut TestAppContext) {
+-    let (hook, recorder) = recording_hook(IconName::ThreadFromSummary, |_| true);
++    let (hook, _, clicks) = hook(
++        vec![
++            (IconName::PlayOutlined, "run"),
++            (IconName::ThreadFromSummary, "new"),
++        ],
++        |_| true,
++    );
+     let cx = open_view(
+         vec![("```\n/help\n```\n", Some(hook))],
+         CopyButtonVisibility::VisibleOnHover,
+         cx,
+     );
+-
+-    // Mouse away from the block: neither Copy nor the action is painted.
+     assert!(cx.debug_bounds(COPY).is_none(), "Copy waits for hover");
+-    assert!(
+-        cx.debug_bounds(ACTION).is_none(),
+-        "the action waits for hover, like Copy"
+-    );
++    assert!(cx.debug_bounds("ICON-PlayOutlined").is_none());
++    assert!(cx.debug_bounds("ICON-ThreadFromSummary").is_none());
+ 
+-    // Hover the block: Copy appears, and the action appears in the same frame.
+     let copy = hover_until_painted(COPY, cx).expect("hovering the block reveals Copy");
+-    let action = cx
+-        .debug_bounds(ACTION)
+-        .expect("the action is revealed together with Copy");
+-    assert!(
+-        action.origin.x < copy.origin.x,
+-        "the action sits before Copy in the button row: action {action:?}, copy {copy:?}"
+-    );
++    let run = cx
++        .debug_bounds("ICON-PlayOutlined")
++        .expect("the first action is revealed with Copy");
++    let new = cx
++        .debug_bounds("ICON-ThreadFromSummary")
++        .expect("the second action is revealed with Copy");
++    assert!(run.origin.x < new.origin.x && new.origin.x < copy.origin.x);
+ 
+-    cx.simulate_click(action.center(), Modifiers::none());
++    cx.simulate_click(run.center(), Modifiers::none());
+     cx.run_until_parked();
+-    assert_eq!(
+-        recorder.clicked.borrow().len(),
+-        1,
+-        "the revealed action is clickable"
+-    );
++    assert_eq!(*clicks.borrow(), vec![("run", "/help".to_string())]);
+ }
+ 
+ #[gpui::test]
+-fn test_code_block_action_each_block_hands_over_its_own_code(cx: &mut TestAppContext) {
+-    // Hostile half for block identity: two accepted blocks in one markdown must not
+-    // collapse onto one button (e.g. a shared id or a captured first `code`). Different
+-    // icons per block make each button separately findable.
+-    let clicked = Rc::new(RefCell::new(Vec::<String>::new()));
++fn test_code_block_action_each_block_and_action_is_its_own_button(cx: &mut TestAppContext) {
++    // Hostile half for the derived id (block position + action position): two blocks with two
++    // actions each make four buttons. For every id there is a THIRD element that could reach the
++    // same id -- the other block's action at the same index, or the same block's other action.
++    // Four distinct icons make each separately findable; each must reach its own handler.
++    let clicks: Clicks = Rc::default();
+     let hook: Hook = {
+-        let clicked = clicked.clone();
+-        Rc::new(move |code: &str| {
+-            let icon = match code.trim() {
+-                "/first" => IconName::ThreadFromSummary,
+-                "/second" => IconName::Plus,
+-                _ => return None,
+-            };
+-            let clicked = clicked.clone();
+-            Some(CodeBlockAction {
+-                icon,
+-                tooltip: "New Thread with This Command".into(),
+-                on_click: Rc::new(move |code: &str, _: &mut Window, _: &mut App| {
+-                    clicked.borrow_mut().push(code.trim().to_string());
+-                }),
+-            })
++        let clicks = clicks.clone();
++        Rc::new(move |code: &str| match code.trim() {
++            "/first" => vec![
++                action(IconName::PlayOutlined, "first-0", &clicks),
++                action(IconName::ThreadFromSummary, "first-1", &clicks),
++            ],
++            "/second" => vec![
++                action(IconName::Plus, "second-0", &clicks),
++                action(IconName::Star, "second-1", &clicks),
++            ],
++            _ => Vec::new(),
+         })
+     };
+     let cx = open_view(
+@@ -316,53 +370,59 @@ fn test_code_block_action_each_block_hands_over_its_own_code(cx: &mut TestAppCon
+         CopyButtonVisibility::AlwaysVisible,
+         cx,
+     );
+-
+-    let second = cx
+-        .debug_bounds(OTHER_ACTION)
+-        .expect("second block's button");
+-    cx.simulate_click(second.center(), Modifiers::none());
+-    cx.run_until_parked();
+-    draw(cx);
+-    let first = cx.debug_bounds(ACTION).expect("first block's button");
+-    cx.simulate_click(first.center(), Modifiers::none());
+-    cx.run_until_parked();
+-
++    click("ICON-Star", cx);
++    click("ICON-PlayOutlined", cx);
++    click("ICON-Plus", cx);
++    click("ICON-ThreadFromSummary", cx);
+     assert_eq!(
+-        *clicked.borrow(),
+-        vec!["/second".to_string(), "/first".to_string()],
+-        "each button hands over its own block's code"
++        *clicks.borrow(),
++        vec![
++            ("second-1", "/second".to_string()),
++            ("first-0", "/first".to_string()),
++            ("second-0", "/second".to_string()),
++            ("first-1", "/first".to_string()),
++        ],
++        "four buttons, four handlers, each with its own block's code"
+     );
+ }
+ 
+ #[gpui::test]
+ fn test_code_block_action_unique_across_markdown_entities(cx: &mut TestAppContext) {
+-    // Mirrors `test_code_block_controls_are_unique_across_markdown_entities`: two
+-    // entities render the same source, both with the hook, beside Copy. Each entity's
+-    // button must reach its own handler.
+-    let (first_hook, first) = recording_hook(IconName::ThreadFromSummary, |_| true);
+-    let (second_hook, second) = recording_hook(IconName::Plus, |_| true);
++    // Two entities render the SAME source (same block positions), two actions each: the entity
++    // is the only thing telling the four ids apart.
++    let (first_hook, _, first) = hook(
++        vec![
++            (IconName::PlayOutlined, "a-run"),
++            (IconName::ThreadFromSummary, "a-new"),
++        ],
++        |_| true,
++    );
++    let (second_hook, _, second) = hook(
++        vec![(IconName::Plus, "b-run"), (IconName::Star, "b-new")],
++        |_| true,
++    );
+     let source = "```sh\n/help\n```";
+     let cx = open_view(
+         vec![(source, Some(first_hook)), (source, Some(second_hook))],
+         CopyButtonVisibility::AlwaysVisible,
+         cx,
+     );
+-
+-    let a = cx.debug_bounds(ACTION).expect("first entity's button");
+-    let b = cx
+-        .debug_bounds(OTHER_ACTION)
+-        .expect("second entity's button");
+-    assert_ne!(a, b, "two entities, two buttons");
+-
+-    cx.simulate_click(b.center(), Modifiers::none());
+-    cx.run_until_parked();
+-    assert_eq!(first.clicked.borrow().len(), 0);
+-    assert_eq!(second.clicked.borrow().len(), 1);
+-
+-    draw(cx);
+-    let a = cx.debug_bounds(ACTION).expect("first entity's button");
+-    cx.simulate_click(a.center(), Modifiers::none());
+-    cx.run_until_parked();
+-    assert_eq!(first.clicked.borrow().len(), 1);
+-    assert_eq!(second.clicked.borrow().len(), 1);
++    click("ICON-Star", cx);
++    click("ICON-PlayOutlined", cx);
++    click("ICON-Plus", cx);
++    click("ICON-ThreadFromSummary", cx);
++    assert_eq!(
++        *first.borrow(),
++        vec![
++            ("a-run", "/help".to_string()),
++            ("a-new", "/help".to_string())
++        ]
++    );
++    assert_eq!(
++        *second.borrow(),
++        vec![
++            ("b-new", "/help".to_string()),
++            ("b-run", "/help".to_string())
++        ]
++    );
+ }
+diff --git a/crates/markdown/src/markdown.rs b/crates/markdown/src/markdown.rs
+index 5017161..52fd855 100644
+--- a/crates/markdown/src/markdown.rs
++++ b/crates/markdown/src/markdown.rs
+@@ -1736,7 +1736,7 @@ pub struct CodeBlockAction {
+     pub on_click: Rc<dyn Fn(&str, &mut Window, &mut App)>,
+ }
+ 
+-type CodeBlockActionCallback = Rc<dyn Fn(&str) -> Option<CodeBlockAction>>;
++type CodeBlockActionCallback = Rc<dyn Fn(&str) -> Vec<CodeBlockAction>>;
+ 
+ pub struct MarkdownElement {
+     markdown: Entity<Markdown>,
+@@ -1841,11 +1841,12 @@ impl MarkdownElement {
+         self
+     }
+ 
+-    /// Asks `action` about every code block; a block it answers `Some` for gets
+-    /// that button in its button row, shown and hidden with the Copy button.
++    /// Asks `action` about every code block; every button it returns for a block
++    /// goes in that block's button row, in order before Copy, shown and hidden
++    /// with the Copy button. An empty list draws nothing.
+     pub fn on_code_block_action(
+         mut self,
+-        action: impl Fn(&str) -> Option<CodeBlockAction> + 'static,
++        action: impl Fn(&str) -> Vec<CodeBlockAction> + 'static,
+     ) -> Self {
+         self.code_block_action = Some(Rc::new(action));
+         self
+@@ -3182,13 +3183,15 @@ impl Element for MarkdownElement {
+                         {
+                             let copy_button_visibility = *copy_button_visibility;
+                             let wrap_button_visibility = *wrap_button_visibility;
+-                            let action = (copy_button_visibility != CopyButtonVisibility::Hidden)
+-                                .then(|| {
+-                                    self.code_block_action
+-                                        .as_ref()
+-                                        .and_then(|action| action(&code))
+-                                })
+-                                .flatten();
++                            let actions = if copy_button_visibility != CopyButtonVisibility::Hidden
++                            {
++                                self.code_block_action
++                                    .as_ref()
++                                    .map(|action| action(&code))
++                                    .unwrap_or_default()
++                            } else {
++                                Vec::new()
++                            };
+                             builder.modify_current_div(|el| {
+                                 let any_hover = copy_button_visibility
+                                     == CopyButtonVisibility::VisibleOnHover
+@@ -3229,14 +3232,17 @@ impl Element for MarkdownElement {
+                                             ))
+                                         },
+                                     )
+-                                    .when_some(action, |this, action| {
+-                                        this.child(render_code_block_action_button(
+-                                            range.end,
+-                                            code.clone(),
+-                                            action,
+-                                            self.markdown.entity_id(),
+-                                        ))
+-                                    })
++                                    .children(actions.into_iter().enumerate().map(
++                                        |(index, action)| {
++                                            render_code_block_action_button(
++                                                range.end,
++                                                index,
++                                                code.clone(),
++                                                action,
++                                                self.markdown.entity_id(),
++                                            )
++                                        },
++                                    ))
+                                     .when(
+                                         copy_button_visibility != CopyButtonVisibility::Hidden,
+                                         |this| {
+@@ -3616,13 +3622,16 @@ fn render_wrap_code_block_button(
+ 
+ fn render_code_block_action_button(
+     id: usize,
++    index: usize,
+     code: String,
+     action: CodeBlockAction,
+     markdown_id: gpui::EntityId,
+ ) -> impl IntoElement {
++    // The index keeps two actions of one block apart: without it the second
++    // button of block A and the first of block B could share an id.
+     let button_id = ElementId::NamedChild(
+         Arc::new(ElementId::from(("code-block-action", markdown_id))),
+-        id.to_string().into(),
++        format!("{id}-{index}").into(),
+     );
+     let on_click = action.on_click;
+     IconButton::new(button_id, action.icon)

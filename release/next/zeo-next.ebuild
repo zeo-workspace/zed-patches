@@ -2000,6 +2000,14 @@ src_prepare() {
 			# gets a button that opens a new thread with that command in its
 			# composer, unsent (story 020). Pure Zed, BY CHOICE.
 			"${FILESDIR}/0045-slash-command-opens-new-thread.patch"
+			# 0054: a Run button beside 0045's opens a new thread and sends the
+			# clicked block's command; only that first message skips the
+			# slash-command check (story 035). Pure Zed, BY CHOICE.
+			"${FILESDIR}/0054-slash-command-run-button.patch"
+			# 0055: Decline on a question card asks first only when something was
+			# typed or picked, and leaves a "Skipped" line (story 035). Pure Zed,
+			# BY CHOICE.
+			"${FILESDIR}/0055-question-decline-asks-first.patch"
 		)
 	fi
 

@@ -307,6 +307,17 @@
 # the assistant-message path). Pure Zed, so it rides this flag BY CHOICE, like
 # 0014 and 0026 (story 020).
 0045-slash-command-opens-new-thread.patch
+# 0054: a Run button left of 0045's New Thread button opens a new thread with
+# the same agent and SENDS the clicked block's command (only that block's); the
+# markdown hook now takes a list of actions. Run's first message alone skips the
+# slash-command check, since a new session has advertised no commands yet.
+# Pure Zed, so it rides this flag BY CHOICE, like 0043 and 0045 (story 035).
+0054-slash-command-run-button.patch
+# 0055: Decline on an AskUserQuestion card asks "Skip this question?" only when
+# something was typed or picked (compared with what the card first showed); a
+# declined question leaves a muted "Skipped" line. Other forms are unchanged.
+# Pure Zed, so it rides this flag BY CHOICE, like 0043 and 0045 (story 035).
+0055-question-decline-asks-first.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
