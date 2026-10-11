@@ -1,6 +1,6 @@
-From c6c5b69de0aa401b85d65d57fe8bc5e2fab1c9e9 Mon Sep 17 00:00:00 2001
+From 6ce22dec05a1c75074ccd4d002d5613f5fb8cb43 Mon Sep 17 00:00:00 2001
 From: lucascouts <lucascs@protonmail.com>
-Date: Sun, 11 Oct 2026 00:41:07 -0300
+Date: Sun, 11 Oct 2026 11:02:51 -0300
 Subject: [PATCH] agent_tasks_panel: left-aligned rows, a close button, a
  scrollbar, a text filter and multi-select
 
@@ -16,7 +16,8 @@ line to that width and holds the label in a flex line of its own, so the
 text starts at the slot's left edge and only shrinks to truncate. The
 progress text keeps the right end and is capped at 40% of the row, or on
 a 320px dock it took every free pixel and the label had no slot to start
-in. crates/ui is not touched.
+in. The group header's title takes the same Base04 inset ButtonLike gives
+the rows, so the labels start under it. crates/ui is not touched.
 
 A top toolbar carries an X ("Close Panel") that emits PanelEvent::Close,
 which the dock honours only while it shows this panel -- the same rule as
@@ -25,9 +26,10 @@ panel, not a row; there is no per-row close or dismiss. Nothing is reset
 by it: toggles, filter text and selection are as they were on reopening.
 
 The list gets a vertical scrollbar through ui::Scrollbars, settings-free
-(the panel has no settings), with a track along it so a click on the
-track scrolls there; Scrollbars::new alone reserves only the thumb and
-ignores such a click.
+(the panel has no settings) and always shown while there is something to
+scroll: Scrollbars::new hides the thumb a second after the pointer
+enters, which the GUI proof caught as no scrollbar at all. A track runs
+along it so a click on the track scrolls there.
 
 A one-line input ("Filter tasks...") on the toolbar narrows the list to
 rows whose label, description or thread title contains the text, case
@@ -40,12 +42,17 @@ Rows can be selected: ctrl-click (cmd on macOS) toggles, shift-click takes
 the listed rows from the anchor, neither opens the thread; a plain click
 clears the selection and opens as before. agent_tasks_panel::ToggleSelected,
 bound to shift-space in the AgentTasksPanel context of both default
-keymaps, toggles the focused row; outside a row it propagates, so
-shift-space still types a space in the filter. Escape on the panel clears
-the selection. A selected row draws element_selected as a background --
-never an extra line, which uniform_list's one-line height forbids -- and
-says ", selected" to screen readers. The selection is keyed by session and
-task id and dropped for any row that stops being listed.
+keymaps, toggles the row one of whose controls has focus; outside a row it
+propagates, so shift-space still types a space in the filter. Escape on the
+panel clears the selection. A selected row draws element_selected as a
+background -- never an extra line, which uniform_list's one-line height
+forbids -- and says ", selected" to screen readers. The selection is keyed
+by session and task id and dropped for any row that stops being listed.
+
+Zed binds Tab to menu::SelectNext rather than to a focus move, and 0035's
+panel never handled it, so its tab stops were out of the keyboard's reach
+in the real app. The panel now maps SelectNext and SelectPrevious to
+focus_next and focus_prev, as the elicitation card does.
 
 While rows are selected a toolbar shows "N selected", Clear Selection,
 Archive Selected (every selected ended, unarchived row in one batch;
@@ -94,7 +101,7 @@ index a281490..24560ae 100644
      "context": "OutlinePanel && not_editing",
      "use_key_equivalents": true,
 diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
-index dcb229b..1718f27 100644
+index dcb229b..ab9f4f0 100644
 --- a/crates/agent_tasks_panel/src/panel.rs
 +++ b/crates/agent_tasks_panel/src/panel.rs
 @@ -23,13 +23,16 @@ use collections::HashMap;
@@ -693,7 +700,42 @@ index dcb229b..1718f27 100644
          self.row_focus_handles = row_focus_handles;
          self.group_focus_handles = group_focus_handles;
          entries
-@@ -1013,6 +1435,7 @@ fn render_row(
+@@ -979,12 +1401,28 @@ fn render_header(
+         .gap_1()
+         .justify_between()
+         .child(
+-            div().min_w_0().flex_1().child(
+-                Label::new(title.clone())
+-                    .size(LabelSize::Small)
+-                    .color(Color::Muted)
+-                    .truncate(),
+-            ),
++            // The rows' labels sit inside a ButtonLike, which pads them by `Base04`; the title
++            // takes the same inset so the labels start under it.
++            div()
++                .min_w_0()
++                .flex_1()
++                .pl(DynamicSpacing::Base04.rems(cx))
++                .child(
++                    h_flex().w_full().min_w_0().child(
++                        div()
++                            .debug_selector({
++                                let session_id = session_id.clone();
++                                move || format!("agent-tasks-group-title-{session_id}")
++                            })
++                            .min_w_0()
++                            .child(
++                                Label::new(title.clone())
++                                    .size(LabelSize::Small)
++                                    .color(Color::Muted)
++                                    .truncate(),
++                            ),
++                    ),
++                ),
+         )
+         .child(
+             h_flex()
+@@ -1013,6 +1451,7 @@ fn render_row(
      cx: &mut Context<AgentTasksPanel>,
  ) -> AnyElement {
      let record = &row.entry.record;
@@ -701,7 +743,7 @@ index dcb229b..1718f27 100644
      let key: TaskKey = (record.session_id.clone(), record.task_id.clone());
      let row_id = row_element_id(&key.0, &key.1);
      let control_id =
-@@ -1035,40 +1458,86 @@ fn render_row(
+@@ -1035,40 +1474,86 @@ fn render_row(
          })
          .min_w_0()
          .flex_1();
@@ -801,7 +843,7 @@ index dcb229b..1718f27 100644
              }))
              .into_any_element(),
      };
-@@ -1151,10 +1620,12 @@ fn render_row(
+@@ -1151,10 +1636,12 @@ fn render_row(
      // `uniform_list` lays each line out against the list's width, but a line with no width of
      // its own shrinks to its content — and a one-line editor has none, so its slot would get
      // no room at all while renaming.
@@ -814,7 +856,7 @@ index dcb229b..1718f27 100644
          .pl_2()
          .pr_2()
          .gap_1()
-@@ -1346,6 +1817,7 @@ fn status_color(status: AgentTaskStatus) -> Color {
+@@ -1346,6 +1833,7 @@ fn status_color(status: AgentTaskStatus) -> Color {
  fn panel_row(
      entry: &HistoryEntry,
      live: Option<AgentTask>,
@@ -822,7 +864,7 @@ index dcb229b..1718f27 100644
      notice: Option<SharedString>,
      error: Option<SharedString>,
  ) -> PanelRow {
-@@ -1361,12 +1833,30 @@ fn panel_row(
+@@ -1361,12 +1849,30 @@ fn panel_row(
      PanelRow {
          can_stop,
          can_archive: !entry.archived && !entry.record.status.is_running(),
@@ -853,7 +895,7 @@ index dcb229b..1718f27 100644
  /// The keys of every archived record, in the store's order.
  fn archived_keys(records: &[HistoryEntry]) -> Vec<TaskKey> {
      records
-@@ -1459,9 +1949,19 @@ impl Render for AgentTasksPanel {
+@@ -1459,9 +1965,23 @@ impl Render for AgentTasksPanel {
          v_flex()
              .key_context("AgentTasksPanel")
              .track_focus(&self.focus_handle)
@@ -865,6 +907,10 @@ index dcb229b..1718f27 100644
 +                    panel.cancel_selection(window, cx)
 +                }),
 +            )
++            // Zed binds Tab to `menu::SelectNext`, not to a focus move, so without these the
++            // panel's tab stops are out of the keyboard's reach (R2.1, R5.5).
++            .on_action(|_: &menu::SelectNext, window, cx| window.focus_next(cx))
++            .on_action(|_: &menu::SelectPrevious, window, cx| window.focus_prev(cx))
              .size_full()
              .bg(cx.theme().colors().panel_background)
 +            .child(self.render_toolbar(cx))
@@ -873,7 +919,7 @@ index dcb229b..1718f27 100644
              .when_some(self.status_message(cx), |panel, message| {
                  panel.child(
                      div().p_1().child(
-@@ -1480,23 +1980,44 @@ impl Render for AgentTasksPanel {
+@@ -1480,23 +2000,45 @@ impl Render for AgentTasksPanel {
                              .items_center()
                              .justify_center()
                              .p_4()
@@ -915,11 +961,12 @@ index dcb229b..1718f27 100644
 +                                .size_full()
 +                                .track_scroll(&self.scroll_handle),
 +                            )
-+                            // Settings-free, since the panel has none. `Scrollbars::new` alone
-+                            // reserves only the thumb and ignores a click beside it; the track
-+                            // makes a click on it scroll there (R3.2).
++                            // Settings-free, since the panel has none, and always shown while
++                            // there is something to scroll (R3.1): the default auto-hides it a
++                            // second after the pointer enters. The track makes a click on it
++                            // scroll there (R3.2); the thumb alone ignores such a click.
 +                            .custom_scrollbars(
-+                                Scrollbars::new(ScrollAxes::Vertical)
++                                Scrollbars::always_visible(ScrollAxes::Vertical)
 +                                    .tracked_scroll_handle(&self.scroll_handle)
 +                                    .with_track_along(
 +                                        ScrollAxes::Vertical,
@@ -931,7 +978,7 @@ index dcb229b..1718f27 100644
                      )
                  }
              })
-@@ -1623,3 +2144,39 @@ mod tool_call_id_contract;
+@@ -1623,3 +2165,39 @@ mod tool_call_id_contract;
  #[cfg(test)]
  #[path = "panel/delete_action_tests.rs"]
  mod delete_action;
@@ -2119,10 +2166,10 @@ index 0000000..c4572b6
 +}
 diff --git a/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs b/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs
 new file mode 100644
-index 0000000..9bace27
+index 0000000..9cd1b4e
 --- /dev/null
 +++ b/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,187 @@
 +// Story 034, task 2.1 — row text is left-aligned (R1.1, R1.2, R1.3). Module path:
 +// `panel::row_alignment`. Every test name starts with `row_alignment_`, the task's validation
 +// filter. Hostile fixtures come before benign ones.
@@ -2286,6 +2333,27 @@ index 0000000..9bace27
 +        assert!(
 +            short_rename.origin.x - short_detail.right() <= px(24.),
 +            "at {width}px the detail sits at the right end of the row, next to its buttons"
++        );
++    }
++}
++
++// Success metric (found by the GUI proof, task 7.1): a row's label starts where its group
++// header's title starts, within 1 px, so the column reads as one list under its header.
++#[gpui::test]
++async fn row_alignment_row_labels_start_under_the_group_title(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_finished(&db, "s1", "short", 1_000).await;
++    let mut panels = open_panels(cx).await;
++
++    for width in [320., 600.] {
++        show_at_width(&mut panels, width);
++        let title = bounds(&mut panels.cx, "agent-tasks-group-title-s1");
++        let label = bounds(&mut panels.cx, "agent-tasks-row-label-text-short");
++        assert!(
++            (title.origin.x - label.origin.x).abs() <= px(1.),
++            "at {width}px the row label starts under the group title: label {:?}, title {:?}",
++            label.origin.x,
++            title.origin.x
 +        );
 +    }
 +}
@@ -2517,10 +2585,10 @@ index 0000000..398ec39
 +}
 diff --git a/crates/agent_tasks_panel/src/panel/selection_gesture_tests.rs b/crates/agent_tasks_panel/src/panel/selection_gesture_tests.rs
 new file mode 100644
-index 0000000..9105079
+index 0000000..83420dc
 --- /dev/null
 +++ b/crates/agent_tasks_panel/src/panel/selection_gesture_tests.rs
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,424 @@
 +// Story 034, task 4.2 — selection gestures, rendering and the keyboard (R5.1, R5.3, R5.4, R5.5,
 +// R5.8, and R2.3 for the selection). Module path: `panel::selection_gesture`. Every test name
 +// starts with `selection_gesture_`, the task's validation filter. Hostile fixtures come before
@@ -2897,6 +2965,53 @@ index 0000000..9105079
 +    panels.cx.run_until_parked();
 +
 +    assert_eq!(selected_tasks(&mut panels), vec!["ta", "tc"]);
++}
++
++// R2.1, R5.5, Q13 (found by the GUI proof, task 7.1): in Zed `tab` is `menu::SelectNext`, not a
++// built-in focus move, so the panel's controls are reachable from the keyboard only when the panel
++// turns it into one. From the panel, Tab walks to a row, and shift-space then selects that row.
++#[gpui::test]
++async fn selection_gesture_tab_reaches_a_row_and_shift_space_selects_it(cx: &mut TestAppContext) {
++    let (mut panels, _a, _b, _c) = three_threads(cx).await;
++    panels.cx.update(|_, cx| {
++        cx.bind_keys([
++            KeyBinding::new("tab", menu::SelectNext, None),
++            KeyBinding::new("shift-tab", menu::SelectPrevious, None),
++            KeyBinding::new("shift-space", ToggleSelected, Some("AgentTasksPanel")),
++        ])
++    });
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.focus_handle(cx).focus(window, cx)
++        });
++    panels.cx.run_until_parked();
++
++    let mut on_row = false;
++    for _ in 0..12 {
++        panels.cx.simulate_keystrokes("tab");
++        panels.cx.run_until_parked();
++        on_row = panels
++            .tasks_panel
++            .update_in(&mut panels.cx, |panel, window, _| {
++                panel
++                    .row_focus_handles
++                    .values()
++                    .any(|focus| focus.open.is_focused(window))
++            });
++        if on_row {
++            break;
++        }
++    }
++    assert!(on_row, "Tab from the panel reaches a row's open control");
++
++    panels.cx.simulate_keystrokes("shift-space");
++    panels.cx.run_until_parked();
++    assert_eq!(
++        selected_tasks(&mut panels).len(),
++        1,
++        "shift-space selects the row Tab reached"
++    );
 +}
 diff --git a/crates/agent_tasks_panel/src/panel/selection_state_tests.rs b/crates/agent_tasks_panel/src/panel/selection_state_tests.rs
 new file mode 100644
