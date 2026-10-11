@@ -1,6 +1,6 @@
-From 128352a8a3cb3400519613ef00011fc474aebe2d Mon Sep 17 00:00:00 2001
+From d80206471150b1d9eaf9eb043b5170b675862ca8 Mon Sep 17 00:00:00 2001
 From: lucascouts <lucascs@protonmail.com>
-Date: Sun, 11 Oct 2026 11:15:41 -0300
+Date: Sun, 11 Oct 2026 11:29:17 -0300
 Subject: [PATCH] agent_tasks_panel: left-aligned rows, a close button, a
  scrollbar, a text filter and multi-select
 
@@ -58,8 +58,15 @@ While rows are selected a toolbar shows "N selected", Clear Selection,
 Archive Selected (every selected ended, unarchived row in one batch;
 running rows stay unarchived and selected) and, under the Archived filter,
 Delete Selected through 0042's own prompt and store path: only the
-selected archived rows are counted and deleted, never a thread. A failed
-write keeps memory and logs one line naming every id, as before.
+selected archived rows are counted and deleted, never a thread, and only
+the deleted records leave the selection -- a row selected meanwhile, or
+one unarchived while the prompt was open, stays selected. A failed write
+keeps memory and logs one line naming every id, as before.
+
+While the text filter narrows the list, a group header's Archive acts on
+what the header shows: only the group's listed rows that have ended
+unarchived, never one a toggle or the text hides. With no text it archives
+every finished task of the thread, as 0035 did.
 
 It also runs rustfmt over four files of this crate that earlier patches
 (0035-0042) shipped unformatted -- history_db.rs, its statement_tests.rs,
@@ -164,7 +171,7 @@ index 78490ea..2198618 100644
      run_sql(&db, "DROP TRIGGER fail_delete_mid_batch").await;
      db.delete(&batch).await.unwrap();
 diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
-index dcb229b..ab9f4f0 100644
+index dcb229b..5026377 100644
 --- a/crates/agent_tasks_panel/src/panel.rs
 +++ b/crates/agent_tasks_panel/src/panel.rs
 @@ -23,13 +23,16 @@ use collections::HashMap;
@@ -369,7 +376,7 @@ index dcb229b..ab9f4f0 100644
      }
  
      pub fn is_filter_enabled(&self, filter: TaskFilter) -> bool {
-@@ -443,6 +558,154 @@ impl AgentTasksPanel {
+@@ -443,6 +558,182 @@ impl AgentTasksPanel {
          cx.notify();
      }
  
@@ -512,6 +519,34 @@ index dcb229b..ab9f4f0 100644
 +        cx.notify();
 +    }
 +
++    /// Takes out of the selection the keys of `batch` the store no longer holds — the ones it
++    /// deleted. A key it refused, unarchived while the prompt was open, stays selected, and so
++    /// does every row outside the batch (R7.4).
++    fn deselect_deleted(&mut self, batch: &[TaskKey], cx: &mut Context<Self>) {
++        let records = self.store.read(cx).records();
++        let deleted: Vec<TaskKey> = batch
++            .iter()
++            .filter(|(session_id, task_id)| {
++                !records.iter().any(|entry| {
++                    entry.record.session_id == *session_id && entry.record.task_id == *task_id
++                })
++            })
++            .cloned()
++            .collect();
++        if deleted.is_empty() {
++            return;
++        }
++        self.selection.retain(|key| !deleted.contains(key));
++        if self
++            .selection_anchor
++            .as_ref()
++            .is_some_and(|anchor| deleted.contains(anchor))
++        {
++            self.selection_anchor = None;
++        }
++        cx.notify();
++    }
++
 +    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
 +        if self.selection.is_empty() && self.selection_anchor.is_none() {
 +            return;
@@ -524,23 +559,43 @@ index dcb229b..ab9f4f0 100644
      /// Opens the thread of `key`'s task in the window that holds its project (R2.5; story
      /// 024 R1.1), through the same router as the tray link — which brings forward a
      /// conversation the target agent panel already holds rather than loading a second one. A
-@@ -600,7 +863,7 @@ impl AgentTasksPanel {
-             );
-             return;
-         }
--        self.confirm_delete(vec![key.clone()], window, cx);
-+        self.confirm_delete(vec![key.clone()], false, window, cx);
+@@ -579,9 +870,30 @@ impl AgentTasksPanel {
      }
  
-     /// Deletes every archived record once the user confirms (story 025). The batch is the one
-@@ -610,10 +873,53 @@ impl AgentTasksPanel {
-         if keys.is_empty() {
-             return;
-         }
--        self.confirm_delete(keys, window, cx);
-+        self.confirm_delete(keys, false, window, cx);
-+    }
-+
+     /// Archives every finished task of `session_id`'s thread; its running tasks stay (R3.2).
++    ///
++    /// While the text filter narrows the list, the header acts on what it shows: only the
++    /// group's listed rows that have ended unarchived, never one the filters hide (R4.7).
+     pub fn archive_group(&mut self, session_id: &acp_v2::SessionId, cx: &mut Context<Self>) {
+-        self.store
+-            .update(cx, |store, cx| store.archive_group(session_id, cx));
++        if self.filter_query.trim().is_empty() {
++            self.store
++                .update(cx, |store, cx| store.archive_group(session_id, cx));
++            return;
++        }
++        let keys: Vec<TaskKey> = self
++            .groups(cx)
++            .into_iter()
++            .filter(|group| group.session_id == *session_id)
++            .flat_map(|group| group.rows)
++            .filter(|row| row.can_archive)
++            .map(|row| row_key(&row))
++            .collect();
++        if keys.is_empty() {
++            log::debug!(
++                "agent tasks panel: no listed task of session {session_id} can be archived"
++            );
++            return;
++        }
++        self.store.update(cx, |store, cx| store.archive(&keys, cx));
+     }
+ 
+     /// Deletes `key`'s record once the user confirms (story 025). Only an archived record is
+@@ -613,6 +925,43 @@ impl AgentTasksPanel {
+         self.confirm_delete(keys, window, cx);
+     }
+ 
 +    /// The selected rows Delete Selected acts on: listed and archived, and only while the
 +    /// Archived filter is on (R7.2, R7.3).
 +    fn deletable_selection(
@@ -566,7 +621,7 @@ index dcb229b..ab9f4f0 100644
 +            .collect()
 +    }
 +
-+    /// Deletes the selected archived records once the user confirms, then clears the
++    /// Deletes the selected archived records once the user confirms, and only they leave the
 +    /// selection; Cancel keeps both (R7.3–R7.5). The batch is the one the prompt counted, and
 +    /// the store refuses any of it unarchived meanwhile, so nothing is deleted unasked.
 +    pub fn request_delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -575,21 +630,13 @@ index dcb229b..ab9f4f0 100644
 +            log::debug!("agent tasks panel: no selected task record can be deleted");
 +            return;
 +        }
-+        self.confirm_delete(keys, true, window, cx);
-     }
- 
--    fn confirm_delete(&mut self, keys: Vec<TaskKey>, window: &mut Window, cx: &mut Context<Self>) {
-+    fn confirm_delete(
-+        &mut self,
-+        keys: Vec<TaskKey>,
-+        clear_selection: bool,
-+        window: &mut Window,
-+        cx: &mut Context<Self>,
-+    ) {
++        self.confirm_delete(keys, window, cx);
++    }
++
+     fn confirm_delete(&mut self, keys: Vec<TaskKey>, window: &mut Window, cx: &mut Context<Self>) {
          let message = match keys.len() {
              1 => "Delete 1 task record?".to_string(),
-             count => format!("Delete {count} task records?"),
-@@ -626,12 +932,16 @@ impl AgentTasksPanel {
+@@ -626,12 +975,15 @@ impl AgentTasksPanel {
              cx,
          );
          let store = self.store.clone();
@@ -600,14 +647,13 @@ index dcb229b..ab9f4f0 100644
                  return;
              }
              store.update(cx, |store, cx| store.delete_archived(&keys, cx));
-+            if clear_selection {
-+                // A panel closed meanwhile has no selection left to clear.
-+                this.update(cx, |panel, cx| panel.clear_selection(cx)).ok();
-+            }
++            // A panel closed meanwhile has no selection left to update.
++            this.update(cx, |panel, cx| panel.deselect_deleted(&keys, cx))
++                .ok();
          })
          .detach();
      }
-@@ -765,10 +1075,9 @@ impl AgentTasksPanel {
+@@ -765,10 +1117,9 @@ impl AgentTasksPanel {
          let Some(renaming) = &self.renaming else {
              return;
          };
@@ -621,7 +667,7 @@ index dcb229b..ab9f4f0 100644
          if !listed {
              self.discard_rename(window, cx);
          }
-@@ -827,6 +1136,111 @@ impl AgentTasksPanel {
+@@ -827,6 +1178,111 @@ impl AgentTasksPanel {
          }
      }
  
@@ -733,7 +779,7 @@ index dcb229b..ab9f4f0 100644
      fn render_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
          let has_archived = self
              .store
-@@ -927,10 +1341,7 @@ impl AgentTasksPanel {
+@@ -927,10 +1383,7 @@ impl AgentTasksPanel {
                  archive_focus,
              });
              for row in group.rows {
@@ -745,7 +791,7 @@ index dcb229b..ab9f4f0 100644
                  let focus = self
                      .row_focus_handles
                      .remove(&key)
-@@ -939,6 +1350,17 @@ impl AgentTasksPanel {
+@@ -939,6 +1392,17 @@ impl AgentTasksPanel {
                  entries.push(ListEntry::Row(row, focus));
              }
          }
@@ -763,7 +809,7 @@ index dcb229b..ab9f4f0 100644
          self.row_focus_handles = row_focus_handles;
          self.group_focus_handles = group_focus_handles;
          entries
-@@ -979,12 +1401,28 @@ fn render_header(
+@@ -979,12 +1443,28 @@ fn render_header(
          .gap_1()
          .justify_between()
          .child(
@@ -798,7 +844,7 @@ index dcb229b..ab9f4f0 100644
          )
          .child(
              h_flex()
-@@ -1013,6 +1451,7 @@ fn render_row(
+@@ -1013,6 +1493,7 @@ fn render_row(
      cx: &mut Context<AgentTasksPanel>,
  ) -> AnyElement {
      let record = &row.entry.record;
@@ -806,7 +852,7 @@ index dcb229b..ab9f4f0 100644
      let key: TaskKey = (record.session_id.clone(), record.task_id.clone());
      let row_id = row_element_id(&key.0, &key.1);
      let control_id =
-@@ -1035,40 +1474,86 @@ fn render_row(
+@@ -1035,40 +1516,86 @@ fn render_row(
          })
          .min_w_0()
          .flex_1();
@@ -906,7 +952,7 @@ index dcb229b..ab9f4f0 100644
              }))
              .into_any_element(),
      };
-@@ -1151,10 +1636,12 @@ fn render_row(
+@@ -1151,10 +1678,12 @@ fn render_row(
      // `uniform_list` lays each line out against the list's width, but a line with no width of
      // its own shrinks to its content — and a one-line editor has none, so its slot would get
      // no room at all while renaming.
@@ -919,7 +965,7 @@ index dcb229b..ab9f4f0 100644
          .pl_2()
          .pr_2()
          .gap_1()
-@@ -1346,6 +1833,7 @@ fn status_color(status: AgentTaskStatus) -> Color {
+@@ -1346,6 +1875,7 @@ fn status_color(status: AgentTaskStatus) -> Color {
  fn panel_row(
      entry: &HistoryEntry,
      live: Option<AgentTask>,
@@ -927,7 +973,7 @@ index dcb229b..ab9f4f0 100644
      notice: Option<SharedString>,
      error: Option<SharedString>,
  ) -> PanelRow {
-@@ -1361,12 +1849,30 @@ fn panel_row(
+@@ -1361,12 +1891,30 @@ fn panel_row(
      PanelRow {
          can_stop,
          can_archive: !entry.archived && !entry.record.status.is_running(),
@@ -958,7 +1004,7 @@ index dcb229b..ab9f4f0 100644
  /// The keys of every archived record, in the store's order.
  fn archived_keys(records: &[HistoryEntry]) -> Vec<TaskKey> {
      records
-@@ -1459,9 +1965,23 @@ impl Render for AgentTasksPanel {
+@@ -1459,9 +2007,23 @@ impl Render for AgentTasksPanel {
          v_flex()
              .key_context("AgentTasksPanel")
              .track_focus(&self.focus_handle)
@@ -982,7 +1028,7 @@ index dcb229b..ab9f4f0 100644
              .when_some(self.status_message(cx), |panel, message| {
                  panel.child(
                      div().p_1().child(
-@@ -1480,23 +2000,45 @@ impl Render for AgentTasksPanel {
+@@ -1480,23 +2042,45 @@ impl Render for AgentTasksPanel {
                              .items_center()
                              .justify_center()
                              .p_4()
@@ -1041,7 +1087,7 @@ index dcb229b..ab9f4f0 100644
                      )
                  }
              })
-@@ -1623,3 +2165,39 @@ mod tool_call_id_contract;
+@@ -1623,3 +2207,43 @@ mod tool_call_id_contract;
  #[cfg(test)]
  #[path = "panel/delete_action_tests.rs"]
  mod delete_action;
@@ -1081,6 +1127,10 @@ index dcb229b..ab9f4f0 100644
 +#[cfg(test)]
 +#[path = "panel/delete_selected_tests.rs"]
 +mod delete_selected;
++
++#[cfg(test)]
++#[path = "panel/header_archive_filter_tests.rs"]
++mod header_archive_filter;
 diff --git a/crates/agent_tasks_panel/src/panel/bulk_archive_tests.rs b/crates/agent_tasks_panel/src/panel/bulk_archive_tests.rs
 new file mode 100644
 index 0000000..43b8699
@@ -1734,14 +1784,23 @@ index 408c8d7..7c11553 100644
  // The thread a deleted record belonged to is untouched: its metadata row stays.
 diff --git a/crates/agent_tasks_panel/src/panel/delete_selected_tests.rs b/crates/agent_tasks_panel/src/panel/delete_selected_tests.rs
 new file mode 100644
-index 0000000..fce87f7
+index 0000000..c8a1a46
 --- /dev/null
 +++ b/crates/agent_tasks_panel/src/panel/delete_selected_tests.rs
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,357 @@
 +// Story 034, task 4.4 — Delete Selected under the Archived filter (R7.2, R7.3, R7.4, R7.5,
 +// R7.6). Module path: `panel::delete_selected`. Every test name starts with `delete_selected_`,
 +// the task's validation filter. Hostile fixtures come before benign ones. R7.1 (per-row Delete
 +// and Delete All Archived unchanged) stays proved by the `panel::delete_action` suite.
++//
++// Refine v3, task 9.1 (2026-10-11) — R7.4 modified: confirming Delete Selected removes ONLY the
++// deleted records from the selection; v2 cleared all of it. Changed against task 4.4's file:
++//   - `delete_selected_counts_and_deletes_only_the_selected_archived_rows` ended with
++//     `assert_eq!(selection_len(&mut panels), 0, "the selection is cleared")`. The selected
++//     unarchived row `s2/f` is not deleted, so under the new R7.4 it stays selected: the
++//     assertion now expects 1, and `selected_keys` pins that the one kept key is `s2/f`;
++//   - added `delete_selected_keeps_a_row_selected_while_the_prompt_was_open`;
++//   - added the `selected_keys` helper. Every other test is unchanged.
 +//
 +// Declared in `src/panel.rs` as
 +//
@@ -1757,6 +1816,8 @@ index 0000000..fce87f7
 +//   - Delete Selected is announced with a label containing "delete selected"
 +//     (case-insensitive);
 +//   - `toggle_selected(&TaskKey, cx)` and the `selection` field (task 4.1).
++//   - Delete Selected is confirmed through `simulate_prompt_answer("Delete")`; the selection is
++//     read after the confirmation's spawned task has run (`run_until_parked`) and a redraw.
 +
 +use acp_thread::AgentTaskStatus;
 +use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -1828,6 +1889,20 @@ index 0000000..fce87f7
 +        .read_with(&panels.cx, |panel, _| panel.selection.len())
 +}
 +
++/// The selection's keys, sorted, as (session, task) strings.
++fn selected_keys(panels: &mut Panels) -> Vec<(String, String)> {
++    draw(&mut panels.cx);
++    let mut keys: Vec<_> = panels.tasks_panel.read_with(&panels.cx, |panel, _| {
++        panel
++            .selection
++            .iter()
++            .map(|(session, task)| (session.to_string(), task.to_string()))
++            .collect()
++    });
++    keys.sort();
++    keys
++}
++
 +fn in_memory(cx: &mut VisualTestContext) -> Vec<crate::HistoryEntry> {
 +    cx.update(|_, cx| TaskHistoryStore::global(cx).read(cx).records().to_vec())
 +}
@@ -1843,7 +1918,8 @@ index 0000000..fce87f7
 +
 +// Hostile (R7.3, R7.4): with a mixed selection, the prompt counts only the selected ARCHIVED
 +// rows, and confirming deletes exactly those — not the selected unarchived row, not an
-+// archived row that was not selected — in memory and on disk; then the selection is cleared.
++// archived row that was not selected — in memory and on disk; then only the deleted rows leave
++// the selection, so the selected unarchived row stays selected.
 +#[gpui::test]
 +async fn delete_selected_counts_and_deletes_only_the_selected_archived_rows(
 +    cx: &mut TestAppContext,
@@ -1889,7 +1965,54 @@ index 0000000..fce87f7
 +            ("s2".to_string(), "f".to_string()),
 +        ]
 +    );
-+    assert_eq!(selection_len(&mut panels), 0, "the selection is cleared");
++    assert_eq!(
++        selection_len(&mut panels),
++        1,
++        "only the deleted rows leave the selection"
++    );
++    assert_eq!(
++        selected_keys(&mut panels),
++        vec![("s2".to_string(), "f".to_string())],
++        "the selected unarchived row is kept"
++    );
++}
++
++// Hostile (R7.4): a row toggled into the selection while the prompt is open is not in the
++// counted batch. Confirming deletes the counted rows only, takes exactly those out of the
++// selection, and keeps the late row — archived like the deleted ones, so a rule that drops
++// every archived or every selected row drops it too — both recorded and selected.
++#[gpui::test]
++async fn delete_selected_keeps_a_row_selected_while_the_prompt_was_open(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "a1", 1_000, true).await;
++    seed(&db, "s1", "a2", 1_100, true).await;
++    seed(&db, "s1", "late", 1_200, true).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Finished, TaskFilter::Archived]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    select(&mut panels, "s1", "a1");
++    select(&mut panels, "s1", "a2");
++
++    request(&mut panels);
++    let (message, _) = panels
++        .cx
++        .pending_prompt()
++        .expect("Delete Selected asks first");
++    assert_eq!(message, "Delete 2 task records?");
++    select(&mut panels, "s1", "late");
++    answer(&mut panels, "Delete");
++
++    let memory = in_memory(&mut panels.cx);
++    assert!(find(&memory, "s1", "a1").is_none());
++    assert!(find(&memory, "s1", "a2").is_none());
++    let late = find(&memory, "s1", "late").expect("not counted, so not deleted");
++    assert!(late.archived);
++    assert!(find(&load(&db).await, "s1", "late").is_some());
++    assert_eq!(
++        selected_keys(&mut panels),
++        vec![("s1".to_string(), "late".to_string())],
++        "the deleted keys are gone and the row selected while the prompt was open stays"
++    );
 +}
 +
 +// Hostile (R7.4, race): what the prompt counted is the batch. A counted row unarchived while it
@@ -2291,6 +2414,277 @@ index 0000000..c4572b6
 +        visible_keys(&mut panels),
 +        vec![("s1".to_string(), "alpha".to_string())]
 +    );
++}
+diff --git a/crates/agent_tasks_panel/src/panel/header_archive_filter_tests.rs b/crates/agent_tasks_panel/src/panel/header_archive_filter_tests.rs
+new file mode 100644
+index 0000000..d306bb6
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/header_archive_filter_tests.rs
+@@ -0,0 +1,265 @@
++// Story 034, refine v3, task 9.2 — the group header's Archive honours the text filter (R4.7;
++// R4.6 and story 014's R3.2 for the empty text). Module path: `panel::header_archive_filter`.
++// Every test name starts with `header_archive_filter_`, the task's validation filter. Hostile
++// fixtures come before benign ones.
++//
++// Declared in `src/panel.rs` as
++//
++//     #[cfg(test)]
++//     #[path = "panel/header_archive_filter_tests.rs"]
++//     mod header_archive_filter;
++//
++// Contract assumed (adjust HERE when the implementation drifts):
++//   - `AgentTasksPanel::archive_group(&mut self, session_id: &acp_v2::SessionId, cx)` is what the
++//     group header's Archive control does;
++//   - `AgentTasksPanel::set_filter_query(&mut self, query: &str, window, cx)` sets the filter
++//     text; a blank (empty or whitespace-only) text is no filter (R4.6);
++//   - a row is "listed" when it passes the toggles AND matches the text: its label, its
++//     description ("Task <id>" from `record`/`wire_task`) or its thread's title;
++//   - `TaskHistoryStore::global(cx).read(cx).records()` is the store's memory; the history
++//     database `init_base` returns is what the store writes to;
++//   - `set_filter(TaskFilter, bool, cx)` and `TaskFilter::ALL` (story 014).
++
++use acp_thread::AgentTaskStatus;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use workspace::Workspace;
++
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, AgentTasksPanel, TaskFilter, TaskHistoryStore};
++
++async fn seed(
++    db: &AgentTaskHistoryDb,
++    session: &str,
++    task: &str,
++    status: AgentTaskStatus,
++    at: i64,
++) {
++    db.insert_started(&record(session, task, AgentTaskStatus::Running, at))
++        .await
++        .unwrap();
++    db.update_ended(&record(session, task, status, at))
++        .await
++        .unwrap();
++}
++
++fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++fn show_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.focus_panel::<AgentTasksPanel>(window, cx);
++    });
++    draw(cx);
++}
++
++fn only(panels: &mut Panels, on: &[TaskFilter]) {
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        for filter in TaskFilter::ALL {
++            panel.set_filter(filter, on.contains(&filter), cx);
++        }
++    });
++    draw(&mut panels.cx);
++}
++
++fn set_query(panels: &mut Panels, query: &str) {
++    panels
++        .tasks_panel
++        .update_in(&mut panels.cx, |panel, window, cx| {
++            panel.set_filter_query(query, window, cx)
++        });
++    draw(&mut panels.cx);
++}
++
++/// Clicks the Archive control of `session`'s group header.
++fn archive_header(panels: &mut Panels, session: &str) {
++    let session_id = sid(session);
++    panels.tasks_panel.update(&mut panels.cx, |panel, cx| {
++        panel.archive_group(&session_id, cx)
++    });
++    panels.cx.run_until_parked();
++    draw(&mut panels.cx);
++}
++
++/// Whether `session/task` is archived in the store's memory.
++fn archived(cx: &mut VisualTestContext, session: &str, task: &str) -> bool {
++    cx.update(|_, cx| {
++        let records = TaskHistoryStore::global(cx).read(cx).records().to_vec();
++        find(&records, session, task)
++            .unwrap_or_else(|| panic!("{session}/{task} is recorded"))
++            .archived
++    })
++}
++
++/// Whether `session/task` is archived in the history database.
++async fn archived_on_disk(db: &AgentTaskHistoryDb, session: &str, task: &str) -> bool {
++    let rows = load(db).await;
++    find(&rows, session, task)
++        .unwrap_or_else(|| panic!("{session}/{task} is stored"))
++        .archived
++}
++
++/// Three finished rows of `s1` ("Task alpha", "Task beta", "Task gamma") and, in another thread,
++/// a finished row whose description the same filter text matches ("Task beta" in `s2`).
++async fn seed_three_and_a_namesake(db: &AgentTaskHistoryDb) {
++    seed(db, "s1", "alpha", AgentTaskStatus::Completed, 1_000).await;
++    seed(db, "s1", "beta", AgentTaskStatus::Completed, 1_100).await;
++    seed(db, "s1", "gamma", AgentTaskStatus::Completed, 1_200).await;
++    seed(db, "s2", "beta", AgentTaskStatus::Completed, 1_300).await;
++}
++
++// Hostile (R4.7): a filter text lists one of the thread's three finished rows; the header's
++// Archive archives that row only. The two rows the text hides stay unarchived — in memory and
++// on disk — and the other thread's row the same text lists is not that group's, so it stays too.
++#[gpui::test]
++async fn header_archive_filter_archives_only_the_rows_the_text_lists(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed_three_and_a_namesake(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    set_query(&mut panels, "beta");
++    assert_eq!(
++        visible_keys(&mut panels)
++            .into_iter()
++            .filter(|(session, _)| session == "s1")
++            .collect::<Vec<_>>(),
++        vec![("s1".to_string(), "beta".to_string())],
++        "fixture: the text lists one row of s1"
++    );
++
++    archive_header(&mut panels, "s1");
++
++    assert!(archived(&mut panels.cx, "s1", "beta"), "the listed row");
++    assert!(
++        !archived(&mut panels.cx, "s1", "alpha"),
++        "hidden by the text: not archived"
++    );
++    assert!(
++        !archived(&mut panels.cx, "s1", "gamma"),
++        "hidden by the text: not archived"
++    );
++    assert!(
++        !archived(&mut panels.cx, "s2", "beta"),
++        "another thread's row is not this header's"
++    );
++    assert!(archived_on_disk(&db, "s1", "beta").await);
++    assert!(!archived_on_disk(&db, "s1", "alpha").await);
++    assert!(!archived_on_disk(&db, "s1", "gamma").await);
++    assert!(!archived_on_disk(&db, "s2", "beta").await);
++}
++
++// Hostile (R4.7): "listed" is the toggles AND the text. A failed row the text matches but the
++// Failed toggle (off by default) hides is not listed, so the header's Archive leaves it.
++#[gpui::test]
++async fn header_archive_filter_skips_a_matching_row_the_toggles_hide(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    seed(&db, "s1", "beta-done", AgentTaskStatus::Completed, 1_000).await;
++    seed(&db, "s1", "beta-failed", AgentTaskStatus::Failed, 1_100).await;
++    let mut panels = open_panels(cx).await;
++    only(&mut panels, &[TaskFilter::Active, TaskFilter::Finished]);
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    set_query(&mut panels, "beta");
++    assert_eq!(
++        visible_keys(&mut panels),
++        vec![("s1".to_string(), "beta-done".to_string())],
++        "fixture: Failed is off, so only the completed row is listed"
++    );
++
++    archive_header(&mut panels, "s1");
++
++    assert!(archived(&mut panels.cx, "s1", "beta-done"));
++    assert!(
++        !archived(&mut panels.cx, "s1", "beta-failed"),
++        "hidden by a toggle: not archived"
++    );
++    assert!(!archived_on_disk(&db, "s1", "beta-failed").await);
++}
++
++// Hostile (R3.4, R4.7): a running row the filter text lists is never archived by the header;
++// the group's listed row that has ended is.
++#[gpui::test]
++async fn header_archive_filter_never_archives_a_running_row(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let thread = open_live_thread(&mut panels, "Live");
++    send_tasks(
++        &thread,
++        vec![
++            wire_task("done", "running", 900, None),
++            wire_task("run", "running", 1_000, None),
++        ],
++        &mut panels.cx,
++    );
++    send_tasks(
++        &thread,
++        vec![
++            wire_task("done", "completed", 900, Some((10, 1))),
++            wire_task("run", "running", 1_000, None),
++        ],
++        &mut panels.cx,
++    );
++    let session = session_of(&thread, &panels.cx).to_string();
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    // "task" matches both descriptions ("Task done", "Task run"), case-insensitively.
++    set_query(&mut panels, "task");
++    let mut listed = visible_keys(&mut panels);
++    listed.sort();
++    assert_eq!(
++        listed,
++        vec![
++            (session.clone(), "done".to_string()),
++            (session.clone(), "run".to_string()),
++        ],
++        "fixture: the text lists both rows"
++    );
++
++    archive_header(&mut panels, &session);
++
++    assert!(
++        !archived(&mut panels.cx, &session, "run"),
++        "running: never archived"
++    );
++    assert!(archived(&mut panels.cx, &session, "done"));
++}
++
++/// Benign (R4.6, story 014 R3.2): with `query` blank the header archives every finished row of
++/// its thread, as before — and still only its thread's.
++async fn assert_blank_text_archives_every_finished_row(cx: &mut TestAppContext, query: &str) {
++    let db = init_base(cx);
++    seed_three_and_a_namesake(&db).await;
++    let mut panels = open_panels(cx).await;
++    show_panel(&panels.workspace.clone(), &mut panels.cx);
++    set_query(&mut panels, query);
++
++    archive_header(&mut panels, "s1");
++
++    for task in ["alpha", "beta", "gamma"] {
++        assert!(
++            archived(&mut panels.cx, "s1", task),
++            "text {query:?}: s1/{task} archived"
++        );
++        assert!(
++            archived_on_disk(&db, "s1", task).await,
++            "text {query:?}: s1/{task} archived on disk"
++        );
++    }
++    assert!(
++        !archived(&mut panels.cx, "s2", "beta"),
++        "another thread's row is not this header's"
++    );
++}
++
++// Benign (R4.6): an empty filter text archives all three finished rows, as before.
++#[gpui::test]
++async fn header_archive_filter_empty_text_archives_every_finished_row(cx: &mut TestAppContext) {
++    assert_blank_text_archives_every_finished_row(cx, "").await;
++}
++
++// Benign (R4.6): a whitespace-only filter text is no filter, so all three are archived.
++#[gpui::test]
++async fn header_archive_filter_whitespace_text_archives_every_finished_row(
++    cx: &mut TestAppContext,
++) {
++    assert_blank_text_archives_every_finished_row(cx, "   ").await;
 +}
 diff --git a/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs b/crates/agent_tasks_panel/src/panel/row_alignment_tests.rs
 new file mode 100644
