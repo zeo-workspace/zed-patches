@@ -31,6 +31,22 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.4.0_p20261010-r1] — 2026-10-11 (untagged)
+
+### Changed
+
+- The series moves to Zed `93d745668` (one commit past `96984225a`, same UTC day,
+  hence `-r1`): `ui`'s `IconButton::hover_color` and `git_ui`'s commit-button
+  colours, no file any patch touches. Refreshed from the 49 patches the overlay
+  ships, all 49 byte-identical afterwards; `Cargo.lock` unchanged, pycargoebuild
+  reproduces CRATES (1458) and GIT_CRATES (72) exactly. verify 49/49, rebrand
+  clean, check-sync in sync, nextest 4068 passed / 20 skipped, doctests and the
+  upstream-ignored tests (e2e excluded) pass.
+- `0053` (story 034) is in `patches/zeo-0.4.0_p20261010/` but **not** in this
+  series: the story is still in progress, so its line is commented out here and
+  the ebuild does not apply it. Bringing it back means uncommenting it, refreshing
+  and adding it to the ebuild's `PATCHES+=()`.
+
 ## [0.4.0_p20261010] — 2026-10-10 (untagged)
 
 A new Zed snapshot, `96984225a`, and a new feature, so Zeo moves to 0.4.0. The
