@@ -340,6 +340,15 @@
 # unchanged, with or without it.
 0052-devtools-bridge.patch
 
+# @feature: ai-jail
+# @default: off
+# 0057: the Agent Sandbox settings (story 043) -- Zeo starts the Claude adapters
+# of a project through ai-jail, with a command it builds from user-only settings,
+# and refuses to start them when the jail is on and unusable. Its own group, after
+# devtools-bridge and before test; USE ai-jail is off by default, so the portable
+# builds skip it (@default: off). 0050/0051 apply on top of it, with or without it.
+0057-agent-sandbox-settings.patch
+
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
 # ebuild applies them under USE=test alone. They are generated on top of every

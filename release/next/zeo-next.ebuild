@@ -1623,9 +1623,12 @@ KEYWORDS="~amd64"
 #
 # ai-jail was added on 2026-10-03, carried over from app-editors/zed when that
 # package stopped being part of this chain: it pulls in sys-apps/ai-jail, a
-# sandbox for AI coding agents, and tells how to run claude-agent-acp-plus
-# inside it. It changes nothing in this binary -- Zeo only spawns the agent
-# command a user's settings name -- so it is off by default.
+# sandbox for AI coding agents. Since story 043 it also applies patch 0057, the
+# Agent Sandbox: a per-project switch in Settings -> AI -> Agent Sandbox
+# (ai-jail) that starts the Claude adapters through ai-jail with a generated
+# command, a jail icon in the agent panel and an ai-memory section. It stays
+# off by default: the jail needs a one-time login in its own config directory,
+# and the portable build leaves the group out (series `# @default: off`).
 #
 # inspector is the GPUI UI inspector.
 #
@@ -1641,12 +1644,13 @@ IUSE="+X ai-jail +claude-agent-acp-plus +claude-agent-acp-tui +claude-code-ide
 # BENTOO-DIVERGENCE: REQUIRED_USE - the || ( X wayland ) clause, which follows
 # from the X and wayland flags this overlay adds (see the IUSE tag). ::gentoo
 # exposes neither, so it has nothing to constrain. ai-jail? requires the agent
-# it wraps. devtools-bridge? requires the group 0052 is generated on top of.
+# it wraps, and the group 0057 is generated on top of (devtools-bridge's 0052).
+# devtools-bridge? requires the group 0052 is generated on top of.
 # test? requires the adapter flags the test-only patches (0050, 0051) are
 # generated on top of.
 REQUIRED_USE="
 	|| ( X wayland )
-	ai-jail? ( claude-agent-acp-plus )
+	ai-jail? ( claude-agent-acp-plus devtools-bridge )
 	devtools-bridge? ( claude-agent-acp-plus )
 	test? ( claude-agent-acp-plus claude-code-ide )
 "
@@ -2033,6 +2037,14 @@ src_prepare() {
 		PATCHES+=( "${FILESDIR}/0052-devtools-bridge.patch" )
 	fi
 
+	# 0057 (story 043): the Agent Sandbox -- Claude adapters of a project whose
+	# switch is on start through ai-jail with a command Zeo generates, or not at
+	# all. Its own group, after devtools-bridge and before test; 0050/0051 apply on
+	# top of it unchanged.
+	if use ai-jail; then
+		PATCHES+=( "${FILESDIR}/0057-agent-sandbox-settings.patch" )
+	fi
+
 	# 0050 and 0051 change tests only -- nothing in them reaches the binary -- so
 	# they apply only when the suite is built. They are generated on top of every
 	# group above, which is what the test? clause in REQUIRED_USE enforces.
@@ -2286,32 +2298,19 @@ pkg_postinst() {
 
 	if use ai-jail; then
 		elog ""
-		elog "ai-jail can run claude-agent-acp-plus in a sandbox: writable project,"
-		elog "network limited to anthropic.com, and none of your ~/.claude visible."
-		elog "It keeps its own Claude state in a separate directory, so log in once,"
-		elog "outside the sandbox:"
+		elog "Zeo can start the Claude adapters inside ai-jail: writable project,"
+		elog "read-only .git and .zed, network limited to the allowed hosts, and none"
+		elog "of your ~/.claude visible. The jail keeps its own Claude state in a"
+		elog "separate directory, so log in once, outside the sandbox:"
 		elog ""
 		elog "    install -d -m 700 ~/.claude-jailed"
 		elog "    CLAUDE_CONFIG_DIR=~/.claude-jailed claude    # then: /login"
 		elog ""
-		elog "Then add a second agent to ~/.config/zeo/settings.json:"
-		elog ""
-		elog "    \"agent_servers\": {"
-		elog "        \"Claude Agent (Plus, jailed)\": {"
-		elog "            \"type\": \"custom\","
-		elog "            \"command\": \"ai-jail\","
-		elog "            \"args\": [\"--exec\", \"--no-save-config\", \"--no-status-bar\","
-		elog "                     \"--no-toolchains\","
-		elog "                     \"--claude-dir\", \"~/.claude-jailed\", \"--map\", \".git\","
-		elog "                     \"--allow-host\", \"anthropic.com\","
-		elog "                     \"--allow-host\", \"platform.claude.com\","
-		elog "                     \"claude-agent-acp-plus\"]"
-		elog ""
-		elog "--no-toolchains keeps ai-jail from also opening its default package"
-		elog "registries (github.com, npm, crates.io, ...); platform.claude.com is where"
-		elog "the login renews its token, so without it the sandboxed agent stops after hours."
-		elog "        }"
-		elog "    }"
+		elog "Then turn it on per project in Settings -> AI -> Agent Sandbox (ai-jail),"
+		elog "or with the palette command 'agent sandbox: toggle'. The lock icon in the"
+		elog "agent panel shows whether the thread you are looking at is jailed."
+		elog "A hand-written \"ai-jail\" entry in agent_servers keeps working, shown as"
+		elog "jailed by its own command."
 	fi
 
 	if use claude-code-ide; then
