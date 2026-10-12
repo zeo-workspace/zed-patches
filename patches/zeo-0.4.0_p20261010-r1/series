@@ -284,6 +284,15 @@
 # migration, no store change. After 0042, whose panel and delete path it
 # changes, so it rides this flag BY DEPENDENCY (story 034).
 0053-agent-tasks-panel-polish.patch
+# 0056: _claude/tasks version 2 (claude-agent-acp-plus >= 0.26.0) in Zeo -- a
+# tasks card row expands to show what the task runs and its last output lines;
+# Open Log saves a shell task's output and opens it read-only, Open Thread shows
+# a subagent's thread; a task's log is kept in Zeo's data directory (dir 0700,
+# file 0600, atomic replace, 1 MiB cap) with its history record, deleted with
+# it and swept when orphaned. Migration: HISTORY_MIGRATIONS step 4, log_bytes.
+# After 0053, the last task patch, whose card, panel, store and delete paths it
+# extends, so it rides this flag BY DEPENDENCY (story 041).
+0056-agent-task-output-and-logs.patch
 # 0043: while the agent waits on an answer to its question (0027's card,
 # 0030's pending state), Enter and the send chords do nothing in the
 # composer -- no send, no newline -- under the new question_pending key

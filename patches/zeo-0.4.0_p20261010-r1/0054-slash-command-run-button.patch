@@ -63,10 +63,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 762e993..1f81991 100644
+index 021b0b3..0d70217 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2119,6 +2119,87 @@ impl AgentPanel {
+@@ -2331,6 +2331,87 @@ impl AgentPanel {
          self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
      }
  
@@ -154,7 +154,7 @@ index 762e993..1f81991 100644
      /// Opens a new thread for `agent` with `text` in its composer -- never sent:
      /// the operator reviews it and sends it. An agent that is no longer
      /// configured opens nothing and says so. `source_session` is the session whose
-@@ -2132,39 +2213,10 @@ impl AgentPanel {
+@@ -2344,39 +2425,10 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -196,7 +196,7 @@ index 762e993..1f81991 100644
          log::info!(
              "opening a prefilled thread: agent {agent_id}, source session {source_session}, command length {}",
              text.len()
-@@ -7474,6 +7526,12 @@ mod tests {
+@@ -7691,6 +7743,12 @@ mod tests {
      mod slash_command_button_tests;
  
      mod slash_command_contract_tests;
@@ -1116,10 +1116,10 @@ index 0000000..d99f46a
 +    assert_sent_new_thread(&panel, &source, &source_agent, "/compact", &mut cx);
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index c2ca3b1..2d418b0 100644
+index c2dd7c2..7a10341 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -626,6 +626,12 @@ pub enum AgentInitialContent {
+@@ -637,6 +637,12 @@ pub enum AgentInitialContent {
          blocks: Vec<acp_v2::ContentBlock>,
          auto_submit: bool,
      },

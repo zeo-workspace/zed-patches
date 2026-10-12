@@ -1700,6 +1700,8 @@ DEPEND="
 # claude-agent-acp-plus >= 0.24.0: the first release that sends the
 # _claude/tasks snapshot 0034, 0037 and 0038 read; 0.23.6 sends only a count,
 # which leaves the tasks card empty.
+# claude-agent-acp-plus >= 0.26.0: the first release with _claude/tasks
+# version 2 (tail, hasOutput, _claude/tasks/output), which 0056 reads.
 # Exactly one editor of the family is installed at a time, by decision
 # (2026-10-01) rather than by a file collision with zed or zed-bin: zeo owns
 # /usr/bin/zeo, /usr/libexec/zeo-editor and dev.zeo.Zeo.*, which neither
@@ -1710,7 +1712,7 @@ RDEPEND="
 	!app-editors/zed-bin
 	!app-editors/zeo-bin
 	ai-jail? ( || ( sys-apps/ai-jail sys-apps/ai-jail-bin ) )
-	claude-agent-acp-plus? ( >=dev-util/claude-agent-acp-plus-0.24.0 )
+	claude-agent-acp-plus? ( >=dev-util/claude-agent-acp-plus-0.26.0 )
 	claude-agent-acp-tui? ( dev-util/claude-agent-acp-tui )
 	claude-code-ide? ( dev-util/claude-code )
 	neovim? ( app-editors/neovim )
@@ -1988,6 +1990,14 @@ src_prepare() {
 			# Delete Selected. After 0042, whose panel and delete path it changes,
 			# so BY DEPENDENCY (story 034).
 			"${FILESDIR}/0053-agent-tasks-panel-polish.patch"
+			# 0056: _claude/tasks version 2 -- a card row expands to show what the
+			# task runs and its last output lines; Open Log saves a shell task's
+			# output (Zeo's data dir, 0700/0600, 1 MiB cap) and opens it read-only,
+			# from the card and from 0035's panel; the log is deleted with its
+			# record (migration step 4). Needs claude-agent-acp-plus >= 0.26.0;
+			# older adapters advertise version 1 and the additions stay hidden.
+			# After 0053, BY DEPENDENCY (story 041).
+			"${FILESDIR}/0056-agent-task-output-and-logs.patch"
 			# 0043: while the agent waits on an answer to its question, Enter and
 			# the send chords do nothing in the composer; the Send button still
 			# sends (story 017). Reads 0027's card and 0030's pending state.
