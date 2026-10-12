@@ -6394,13 +6394,23 @@ index 0000000..b15bbb1
 +    );
 +}
 diff --git a/crates/agent_ui/src/tasks_card/test_helpers.rs b/crates/agent_ui/src/tasks_card/test_helpers.rs
-index 218492b..2de3560 100644
+index 218492b..0bb66ee 100644
 --- a/crates/agent_ui/src/tasks_card/test_helpers.rs
 +++ b/crates/agent_ui/src/tasks_card/test_helpers.rs
-@@ -178,6 +178,39 @@ impl AgentConnection for TaskActionsConnection {
-         Task::ready(Ok(thread))
-     }
- 
+@@ -171,7 +171,42 @@ impl AgentConnection for TaskActionsConnection {
+                 project,
+                 action_log,
+                 session_id,
+-                watch::Receiver::constant(agent_client_protocol::schema::v2::PromptCapabilities::new()),
++                watch::Receiver::constant(
++                    agent_client_protocol::schema::v2::PromptCapabilities::new(),
++                ),
++                cx,
++            )
++        });
++        Task::ready(Ok(thread))
++    }
++
 +    // Loads a subagent's own session the way `new_session` builds a thread, so the
 +    // conversation can hold and show a subagent thread (story 041, R5.5).
 +    fn supports_load_session(&self) -> bool {
@@ -6428,15 +6438,22 @@ index 218492b..2de3560 100644
 +                watch::Receiver::constant(
 +                    agent_client_protocol::schema::v2::PromptCapabilities::new(),
 +                ),
-+                cx,
-+            )
-+        });
-+        Task::ready(Ok(thread))
-+    }
-+
-     fn auth_methods(&self) -> &[agent_client_protocol::schema::v2::AuthMethod] {
+                 cx,
+             )
+         });
+@@ -182,7 +217,11 @@ impl AgentConnection for TaskActionsConnection {
          &[]
      }
+ 
+-    fn authenticate(&self, _method: agent_client_protocol::schema::v2::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
++    fn authenticate(
++        &self,
++        _method: agent_client_protocol::schema::v2::AuthMethodId,
++        _cx: &mut App,
++    ) -> Task<Result<()>> {
+         Task::ready(Ok(()))
+     }
+ 
 diff --git a/crates/agent_ui/src/test_support.rs b/crates/agent_ui/src/test_support.rs
 index 6bc0de1..5a8e771 100644
 --- a/crates/agent_ui/src/test_support.rs
