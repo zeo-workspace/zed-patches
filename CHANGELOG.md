@@ -31,7 +31,7 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-## [0.4.0_p20261012-r1] — 2026-10-13 (untagged)
+## [0.4.0_p20261012-r1] — 2026-10-13 (tagged)
 
 ### Changed
 
