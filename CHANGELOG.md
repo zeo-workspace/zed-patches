@@ -31,6 +31,29 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.4.0_p20261012-r1] — 2026-10-13 (untagged)
+
+### Changed
+
+- The series moves to Zed `26363aabd` (seven commits past `f929b3f7c`, same UTC
+  day, hence `-r1`), which moves session modes onto ACP schema v2
+  (`SessionModeId` → `SessionConfigValueId`, `SessionMode` →
+  `SessionConfigSelectOption`). `Cargo.lock` unchanged; pycargoebuild reproduces
+  CRATES and GIT_CRATES exactly.
+- `refresh.sh` stopped at `0010` (`mode_selector.rs` rewritten upstream), so the
+  series was carried by cherry-pick from the old base onto the new one. Three
+  patches changed content, each fixed inside the patch that owns the code:
+  `0010` takes the v2 types and keeps upstream's new
+  `cycling_modes_preserves_choice_order_and_wraps` with its default assertion
+  inverted (cycling never persists, which is `0010`'s rule); `0007`'s
+  manual-badge tests take the v2 types; `0036`'s test helpers take v2 ids, and
+  upstream's new `AcpSessionModes` test initialiser gains the `on_change` field
+  `0036` adds. The other 20 changed files differ in context and offsets only.
+- verify 49/49, rebrand clean, check-sync in sync, selftest 101/101,
+  check-protocol holds, nextest 4084 passed / 20 skipped, doctests and the
+  upstream-ignored tests (e2e excluded) pass; `ebuild prepare` and `compile` run
+  as user. e2e not run.
+
 ## [0.4.0_p20261010-r1] — 2026-10-11 (untagged)
 
 ### Changed
