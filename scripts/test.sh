@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the test suites of the crates the series touches, the way the release ships them.
 #
-#     test.sh <PF> [--from-tree] [--doc] [--ignored] [--e2e] [-- <nextest args>]
+#     test.sh <PF> [--from-tree] [--doc] [--ignored] [--e2e | --e2e-subscription] [-- <nextest args>]
 #
 # The source tested is the packaged Zed commit with the series applied:
 #
@@ -28,6 +28,16 @@
 #   --e2e       the e2e suites (--features agent/e2e,agent_servers/e2e) against a
 #               real model: ANTHROPIC_API_KEY, else the session keyring entry
 #               `service anthropic purpose zeo-e2e`. The key is never printed.
+#   --e2e-subscription
+#               the Claude Agent (Plus) e2e suite only (0051), billed to a Claude
+#               subscription instead of an API key: CLAUDE_CODE_OAUTH_TOKEN, else
+#               the keyring entry `service anthropic purpose zeo-e2e-oauth`, else
+#               the same variable in Zeo's settings.json, under an agent server's
+#               "env" (ZP_ZEO_SETTINGS, default ~/.config/zeo/settings.json). The
+#               token is made once with `claude setup-token` and never printed.
+#               Any API key in the environment is
+#               dropped, since Claude Code would prefer it. The native agent suite
+#               is skipped: it calls the Messages API itself, which takes only a key.
 #
 # Arguments after `--` go to every nextest run (e.g. `-E 'test(foo)'`).
 #
@@ -52,17 +62,20 @@ CRATES=(acp_thread agent agent_servers agent_settings agent_tasks_panel agent_ui
 	recent_projects release_channel remote_server settings settings_content
 	settings_ui sidebar title_bar ui workspace zed zed_credentials_provider)
 
+# The Claude Agent (Plus) half of the e2e suites, 0051's zeo_plus_e2e_tests module.
+E2E_PLUS_FILTER='test(/^zeo_plus_e2e_tests::/)'
+
 E2E_FILTER='test(common_e2e) | test(=tests::test_basic_tool_calls) | test(=tests::test_cancellation) | test(=tests::test_concurrent_tool_calls) | test(=tests::test_streaming_tool_calls)'
 
 usage() {
-	sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	exit 2
 }
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 main() {
-	local pf="" from_tree=0 doc=0 ignored=0 e2e=0
+	local pf="" from_tree=0 doc=0 ignored=0 e2e=0 e2e_sub=0
 	local -a extra=()
 	while (($# > 0)); do
 		case "$1" in
@@ -70,6 +83,7 @@ main() {
 		--doc) doc=1 ;;
 		--ignored) ignored=1 ;;
 		--e2e) e2e=1 ;;
+		--e2e-subscription) e2e_sub=1 ;;
 		--) shift; extra=("$@"); break ;;
 		-h | --help) usage ;;
 		-*) die 2 "unknown option: $1" ;;
@@ -194,11 +208,47 @@ main() {
 			--features "agent/e2e,agent_servers/e2e" -- -E "${E2E_FILTER}"
 	fi
 
+	if ((e2e_sub)); then
+		local zeo_settings="${ZP_ZEO_SETTINGS:-${HOME}/.config/zeo/settings.json}"
+		if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && command -v secret-tool >/dev/null; then
+			CLAUDE_CODE_OAUTH_TOKEN="$(secret-tool lookup service anthropic purpose zeo-e2e-oauth 2>/dev/null)" || true
+		fi
+		# settings.json is JSONC (comments, trailing commas), so match the key, not the document.
+		if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -r "${zeo_settings}" ]]; then
+			CLAUDE_CODE_OAUTH_TOKEN="$(grep -oP '"CLAUDE_CODE_OAUTH_TOKEN"\s*:\s*"\K[^"]+' "${zeo_settings}" | head -n1)" || true
+		fi
+		[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] ||
+			die 2 "--e2e-subscription needs CLAUDE_CODE_OAUTH_TOKEN: in the environment, the keyring entry (service anthropic purpose zeo-e2e-oauth) or ${zeo_settings} -- make one with: claude setup-token"
+		export CLAUDE_CODE_OAUTH_TOKEN
+		unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+		printf 'native agent e2e skipped: it calls the Messages API directly, which a subscription cannot authenticate\n'
+		nextest_phase "e2e, Claude Agent (Plus) on a subscription" -p agent_servers \
+			--features agent_servers/e2e -- -E "${E2E_PLUS_FILTER}"
+	fi
+
 	if ((failed)); then
 		printf '\n\033[1ma phase failed -- see above\033[0m\n'
 		return 1
 	fi
 	printf '\n\033[1mevery phase passed\033[0m\n'
 }
+
+# remote_server's command tests run `bash -i`. Under a controlling terminal that
+# shell tries to take the terminal from nextest's background process group, is
+# stopped by SIGTTOU, and every one of them times out. Run in a session of our
+# own, without one, as CI does; Ctrl-C is forwarded to the whole group.
+if [[ -z "${ZP_TEST_DETACHED:-}" ]] && { : </dev/tty; } 2>/dev/null; then
+	ZP_TEST_DETACHED=1 setsid "${BASH}" "${BASH_SOURCE[0]}" "$@" &
+	child=$!
+	trap 'kill -TERM -- "-${child}" 2>/dev/null' INT TERM
+	rc=0
+	wait "${child}" || rc=$?
+	# A trapped signal interrupts the wait (status > 128); wait again for the real one.
+	if ((rc > 128)) && kill -0 "${child}" 2>/dev/null; then
+		rc=0
+		wait "${child}" || rc=$?
+	fi
+	exit "${rc}"
+fi
 
 main "$@"
