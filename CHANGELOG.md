@@ -31,6 +31,39 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.4.0_p20261013] — 2026-10-13 (untagged)
+
+### Changed
+
+- The series moves to Zed `36682547b` (16 commits past `26363aabd`), which
+  routes ACP v2 configuration and usage updates through `agent_servers`.
+  `Cargo.lock` changes only between workspace crates; pycargoebuild reproduces
+  CRATES and GIT_CRATES exactly.
+- `refresh.sh` stopped twice; both fixes kept each patch's shape:
+  `0011` (+498/−2) reads the account quota inside the new
+  `AcpThread::update_usage`, which both the v1 and v2 paths now call with
+  `_meta` intact; `0045` (+1175/−10) re-adds `slash_command_in_code_block` to an
+  import line upstream rewrapped. The other 25 changed files differ in context
+  and offsets only.
+- verify 49/49, rebrand clean, check-sync in sync, selftest 101/101,
+  check-protocol holds, nextest 4101/4101 (20 skipped), doctests 43/43,
+  upstream-ignored tests 4/4; `ebuild prepare` and `compile` run as user. e2e:
+  the Claude Agent (Plus) suite 6/6 on a subscription; the native agent suite
+  not run (API key only).
+
+### Added
+
+- `scripts/test.sh --e2e-subscription`: the Claude Agent (Plus) e2e suite billed
+  to a Claude subscription. The token (`claude setup-token`) comes from
+  `CLAUDE_CODE_OAUTH_TOKEN`, the keyring, or Zeo's `settings.json`; API keys are
+  dropped from the environment so Claude Code cannot prefer them.
+
+### Fixed
+
+- `scripts/test.sh` run from a terminal: `remote_server`'s command tests start
+  `bash -i`, which SIGTTOU stopped under a controlling terminal, so five of them
+  timed out. The script now runs in a session of its own, forwarding Ctrl-C.
+
 ## [0.4.0_p20261012-r1] — 2026-10-13 (tagged)
 
 ### Changed
