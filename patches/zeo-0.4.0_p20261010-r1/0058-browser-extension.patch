@@ -24,7 +24,7 @@ oracle; a Rust agreement test reads them through ZEO_BROWSER_CONTRACT_DIR):
 - the bridge reads a connection's first line: version 1 keeps 0052's one-shot
   request/response unchanged; a v2 hello opens a long-lived session;
 - client kinds: hello, list_threads, subscribe {follow | thread_id},
-  unsubscribe, send {text, attachments}, cancel, authorize, open_in_zeo;
+  send {text, attachments}, cancel, authorize, open_in_zeo;
 - server kinds: approval_pending, welcome, threads, snapshot (last 100 entries,
   one line <= 1 000 000 bytes, `earlier` counts the rest), entry_added,
   entry_updated (coalesced to <= 1 per 100 ms per entry), entries_removed,
@@ -631,10 +631,10 @@ index 173fd6d..a54b804 100644
  
 diff --git a/crates/agent_ui/src/browser_channel.rs b/crates/agent_ui/src/browser_channel.rs
 new file mode 100644
-index 0000000..1f492ba
+index 0000000..3d9af37
 --- /dev/null
 +++ b/crates/agent_ui/src/browser_channel.rs
-@@ -0,0 +1,2530 @@
+@@ -0,0 +1,2519 @@
 +//! Answers browser sessions: what a `zeo-browser` sidebar, through `zeo-browser-host` and the
 +//! devtools bridge, may do to agent threads (story 045, design.md §B2).
 +//!
@@ -1639,18 +1639,16 @@ index 0000000..1f492ba
 +struct Attached {
 +    thread_id: ThreadId,
 +    thread: WeakEntity<AcpThread>,
++    /// The view showing the thread, which holds its error (R6.7).
++    view: WeakEntity<ThreadView>,
 +    /// The last `status` the session was told.
 +    status: Status,
-+    /// Whether the thread was generating at the last status check.
-+    generating: bool,
-+    /// An `Error` came since the thread last started generating.
-+    errored: bool,
 +    /// Entries inside their coalescing interval.
 +    updates: HashMap<usize, PendingUpdate>,
 +    /// How many of the thread's entries the session holds. GPUI delivers a `NewEntry` after the
 +    /// whole update, when the thread may already hold several new entries.
 +    sent_entries: usize,
-+    _subscriptions: [Subscription; 2],
++    _subscriptions: [Subscription; 3],
 +}
 +
 +struct PendingUpdate {
@@ -1664,6 +1662,7 @@ index 0000000..1f492ba
 +struct Located {
 +    thread_id: ThreadId,
 +    thread: Entity<AcpThread>,
++    view: Entity<ThreadView>,
 +}
 +
 +/// Re-reviews every stream on window activation, window close, an agent panel's active-view
@@ -1742,28 +1741,26 @@ index 0000000..1f492ba
 +    let generation = channel.next_stream;
 +    let snapshot = snapshot(located.as_ref(), request_id, cx);
 +    let attached = located.map(|located| {
-+        let (status, generating, sent_entries) = {
-+            let thread = located.thread.read(cx);
-+            (
-+                thread_status(thread, false),
-+                thread.status() == ThreadStatus::Generating,
-+                thread.entries().len(),
-+            )
-+        };
++        let status = thread_status(located.view.read(cx), cx);
++        let sent_entries = located.thread.read(cx).entries().len();
 +        let events = cx.subscribe(&located.thread, {
 +            let id = id.clone();
 +            move |thread, event, cx| on_thread_event(&id, generation, &thread, event, cx)
 +        });
 +        let released = cx.observe_release(&located.thread, |_, cx| schedule_review(cx));
++        // The view stores a failed turn's error after the thread's `Error` event.
++        let view_changed = cx.observe(&located.view, {
++            let id = id.clone();
++            move |_, cx| send_status(&id, generation, cx)
++        });
 +        Attached {
 +            thread_id: located.thread_id,
 +            thread: located.thread.downgrade(),
++            view: located.view.downgrade(),
 +            status,
-+            generating,
-+            errored: false,
 +            updates: HashMap::default(),
 +            sent_entries,
-+            _subscriptions: [events, released],
++            _subscriptions: [events, released, view_changed],
 +        }
 +    });
 +    let Some(state) = global(cx).sessions.get_mut(id) else {
@@ -1803,7 +1800,7 @@ index 0000000..1f492ba
 +        .iter()
 +        .map(|entry| wire_entry(entry, cx))
 +        .collect();
-+    let status = thread_status(thread, false);
++    let status = thread_status(located.view.read(cx), cx);
 +    let permissions: Vec<Permission> = thread
 +        .pending_permission_requests()
 +        .filter_map(|request| wire_permission(thread, request.id, cx))
@@ -1874,9 +1871,11 @@ index 0000000..1f492ba
 +
 +fn locate(view: &Entity<ConversationView>, cx: &App) -> Option<Located> {
 +    let conversation = view.read(cx);
++    let thread_view = conversation.root_thread_view()?;
 +    Some(Located {
 +        thread_id: conversation.thread_id,
-+        thread: conversation.root_thread(cx)?,
++        thread: thread_view.read(cx).thread.clone(),
++        view: thread_view,
 +    })
 +}
 +
@@ -1909,7 +1908,7 @@ index 0000000..1f492ba
 +        title: thread_title(thread),
 +        project,
 +        agent: thread.connection().agent_id().to_string(),
-+        status: thread_status(thread, false).state,
++        status: thread_status(located.view.read(cx), cx).state,
 +        followed,
 +    }
 +}
@@ -1924,21 +1923,21 @@ index 0000000..1f492ba
 +        )
 +}
 +
-+/// A permission waiting outranks generating; an error shows once the thread has stopped (R6.7).
-+fn thread_status(thread: &AcpThread, errored: bool) -> Status {
-+    let state = if thread.pending_permission_requests().next().is_some() {
-+        ThreadState::AwaitingPermission
++/// A permission waiting outranks generating; an error shows once the thread has stopped, with
++/// the message of the error its view shows, which the view drops when a new turn starts (R6.7).
++/// The message is the operator's to read, never logged (R13.4).
++fn thread_status(view: &ThreadView, cx: &App) -> Status {
++    let thread = view.thread.read(cx);
++    let (state, message) = if thread.pending_permission_requests().next().is_some() {
++        (ThreadState::AwaitingPermission, None)
 +    } else if thread.status() == ThreadStatus::Generating {
-+        ThreadState::Working
-+    } else if errored {
-+        ThreadState::Error
++        (ThreadState::Working, None)
++    } else if let Some(error) = view.thread_error_text(cx) {
++        (ThreadState::Error, Some(capped_title(&error)))
 +    } else {
-+        ThreadState::Idle
++        (ThreadState::Idle, None)
 +    };
-+    Status {
-+        state,
-+        message: None,
-+    }
++    Status { state, message }
 +}
 +
 +/// An entry as the sidebar shows it: `to_markdown` capped at [`ENTRY_MARKDOWN_BYTES`], and a
@@ -2012,8 +2011,9 @@ index 0000000..1f492ba
 +        .collect()
 +}
 +
-+/// The longest tool title, permission title, option label or thread title sent, in bytes. A
-+/// title can be a whole command (a heredoc), and one line must stay under the cap (R3.10).
++/// The longest tool title, permission title, option label, thread title or error message sent,
++/// in bytes. A title can be a whole command (a heredoc), and one line must stay under the cap
++/// (R3.10).
 +const TITLE_BYTES: usize = 4 * 1024;
 +
 +/// `text` cut to [`TITLE_BYTES`] on a character boundary, with an ellipsis when cut.
@@ -2193,17 +2193,11 @@ index 0000000..1f492ba
 +            };
 +            stream_send(id, removed, cx);
 +        }
-+        AcpThreadEvent::StatusChanged => send_status(id, generation, thread, cx),
++        AcpThreadEvent::StatusChanged | AcpThreadEvent::Error => send_status(id, generation, cx),
 +        AcpThreadEvent::Stopped { .. } => {
 +            // A stream must never end on a partial message.
 +            flush_updates(id, generation, thread, cx);
-+            send_status(id, generation, thread, cx);
-+        }
-+        AcpThreadEvent::Error => {
-+            if let Some(attached) = attached_mut(id, generation, cx) {
-+                attached.errored = true;
-+            }
-+            send_status(id, generation, thread, cx);
++            send_status(id, generation, cx);
 +        }
 +        AcpThreadEvent::ToolAuthorizationRequested(request) => {
 +            let permission = wire_permission(thread.read(cx), *request, cx);
@@ -2212,7 +2206,7 @@ index 0000000..1f492ba
 +            {
 +                return;
 +            }
-+            send_status(id, generation, thread, cx);
++            send_status(id, generation, cx);
 +        }
 +        AcpThreadEvent::ToolAuthorizationReceived(request) => {
 +            let resolved = ServerMsg::PermissionResolved {
@@ -2220,7 +2214,7 @@ index 0000000..1f492ba
 +                request_id: permission_request_id(*request),
 +            };
 +            if stream_send(id, resolved, cx) {
-+                send_status(id, generation, thread, cx);
++                send_status(id, generation, cx);
 +            }
 +        }
 +        AcpThreadEvent::TitleUpdated => {
@@ -2244,20 +2238,12 @@ index 0000000..1f492ba
 +}
 +
 +/// Sends the thread's status when it differs from the last one sent.
-+fn send_status(id: &SessionId, generation: u64, thread: &Entity<AcpThread>, cx: &mut App) {
-+    let generating = thread.read(cx).status() == ThreadStatus::Generating;
-+    let errored = {
-+        let Some(attached) = attached_mut(id, generation, cx) else {
-+            return;
-+        };
-+        // A new turn clears the previous turn's error.
-+        if generating && !attached.generating {
-+            attached.errored = false;
-+        }
-+        attached.generating = generating;
-+        attached.errored
++fn send_status(id: &SessionId, generation: u64, cx: &mut App) {
++    let Some(view) = attached_mut(id, generation, cx).and_then(|attached| attached.view.upgrade())
++    else {
++        return;
 +    };
-+    let status = thread_status(thread.read(cx), errored);
++    let status = thread_status(view.read(cx), cx);
 +    let Some(attached) = attached_mut(id, generation, cx) else {
 +        return;
 +    };
@@ -3159,6 +3145,9 @@ index 0000000..1f492ba
 +#[cfg(test)]
 +#[path = "browser_channel_tests/drive.rs"]
 +mod drive;
++#[cfg(test)]
++#[path = "browser_channel_tests/status.rs"]
++mod status;
 +#[cfg(test)]
 +#[path = "browser_channel_tests/stream.rs"]
 +mod stream;
@@ -4299,6 +4288,316 @@ index 0000000..8a3e0f7
 +        );
 +        assert!(view.editor_expanded, "the expanded composer stays expanded");
 +    });
++}
+diff --git a/crates/agent_ui/src/browser_channel_tests/status.rs b/crates/agent_ui/src/browser_channel_tests/status.rs
+new file mode 100644
+index 0000000..c8ed307
+--- /dev/null
++++ b/crates/agent_ui/src/browser_channel_tests/status.rs
+@@ -0,0 +1,304 @@
++// Story 045, task 12.1 — the thread's error state and message in `Status` (design.md §Contract:
++// `Status = { state: "idle" | "working" | "awaiting_permission" | "error"; message: string | null
++// }`). Requirement: R6.7. Never logged: R13.4. Fixtures and seams: `test_support`.
++//
++// Wired INSIDE `src/browser_channel.rs`, next to the other test modules:
++//
++//     #[cfg(test)]
++//     #[path = "browser_channel_tests/status.rs"]
++//     mod status;
++//
++// Driven black-box: a turn fails through the stub connection, and every assertion reads the
++// session's wire output (`status` messages and `snapshot.status`).
++//
++// Hostile halves first:
++//   - wrongly collapse: a thread that errored, seen by a FRESH subscribe, must not read `idle`
++//     like a thread that never failed — and a clean thread beside it must not read `error`
++//     because a different thread failed (the error belongs to its thread, not to the channel);
++//   - wrongly split: once the errored thread runs again, its state and its message clear
++//     together — no `working` or `idle` status still carrying the old message, and no fresh
++//     snapshot still reading `error`;
++//   - caps: an error text over every wire-string cap of this module arrives cut, on a character
++//     boundary, and its line still fits; a short one arrives whole and verbatim (plain text).
++
++use acp_thread::StubAgentConnection;
++use agent_client_protocol::schema::v1 as acp_v1;
++use gpui::TestAppContext;
++use serde_json::{Value, json};
++
++use super::test_support::*;
++
++/// Markdown syntax on purpose: the sidebar gets the error's own text, not a rendering of it.
++const ERROR_TEXT: &str = "agent crashed: `claude-agent-acp` exited with **status 7**";
++
++fn statuses(msgs: &[Value]) -> Vec<Value> {
++    msgs.iter()
++        .filter(|m| m["kind"] == "status")
++        .map(|m| m["status"].clone())
++        .collect()
++}
++
++fn snapshot_of(msgs: &[Value]) -> Value {
++    msgs.iter()
++        .find(|m| m["kind"] == "snapshot")
++        .cloned()
++        .unwrap_or_else(|| panic!("a snapshot: {:?}", kinds(msgs)))
++}
++
++/// A new session, approved, subscribed to `target`; returns it and its snapshot.
++fn fresh_subscribe(n: u64, win: &Win, target: Value, cx: &mut TestAppContext) -> (Probe, Value) {
++    let probe = open_session(n);
++    approve(&probe, &win.app_state(), cx);
++    probe.handle(
++        request("subscribe", "s", json!({ "target": target })),
++        &win.app_state(),
++        cx,
++    );
++    let snapshot = snapshot_of(&probe.drain(cx));
++    (probe, snapshot)
++}
++
++/// Sends a message from the browser and fails its turn with `text`; returns what followed.
++fn fail_turn(
++    probe: &Probe,
++    win: &Win,
++    connection: &StubAgentConnection,
++    text: &str,
++    cx: &mut TestAppContext,
++) -> Vec<Value> {
++    let finish = connection.defer_next_prompt_response();
++    probe.handle(
++        request("send", "m", json!({ "text": "go", "attachments": [] })),
++        &win.app_state(),
++        cx,
++    );
++    let mut got = probe.drain(cx);
++    assert!(
++        statuses(&got).iter().any(|s| s["state"] == "working"),
++        "the turn ran: {:?}",
++        kinds(&got)
++    );
++    assert!(
++        finish.send(Err(anyhow::anyhow!(text.to_string()))).is_ok(),
++        "the turn is still waiting for its response"
++    );
++    cx.run_until_parked();
++    got.extend(probe.drain(cx));
++    got
++}
++
++fn assert_errored_with(status: &Value, text: &str, context: &str) {
++    assert_eq!(status["state"], "error", "{context}: {status}");
++    let message = status["message"].as_str().unwrap_or_else(|| {
++        panic!("{context}: an error status carries its message (R6.7): {status}")
++    });
++    assert!(
++        message.contains(text),
++        "{context}: the error's own text, verbatim: {message:?}"
++    );
++}
++
++fn assert_clean(status: &Value, context: &str) {
++    assert_ne!(status["state"], "error", "{context}: {status}");
++    assert!(
++        status["message"].is_null(),
++        "{context}: no message outside an error: {status}"
++    );
++}
++
++#[gpui::test]
++async fn status_a_failed_turn_sends_error_with_its_message(cx: &mut TestAppContext) {
++    init(cx);
++    let fs = shared_fs(cx).await;
++    let connection = StubAgentConnection::new();
++    let win = window(&fs, "/p/app", Some(connection.clone()), cx).await;
++    let (probe, snapshot) = fresh_subscribe(1, &win, json!({ "follow": true }), cx);
++    assert_clean(&snapshot["status"], "before any turn");
++
++    let logged_before = super::logged_lines().len();
++    let got = fail_turn(&probe, &win, &connection, ERROR_TEXT, cx);
++    let statuses = statuses(&got);
++    assert!(
++        statuses.iter().any(|s| s["state"] == "error"),
++        "R6.7: the failure is sent: {statuses:?}"
++    );
++    let last = statuses.last().expect("a status after the failure");
++    assert_errored_with(last, ERROR_TEXT, "the last status after the failure");
++    for status in &statuses {
++        if status["state"] != "error" {
++            assert!(
++                status["message"].is_null(),
++                "message only with error: {status}"
++            );
++        }
++    }
++
++    let logged: Vec<String> = super::logged_lines()
++        .into_iter()
++        .skip(logged_before)
++        .collect();
++    assert!(
++        logged.iter().all(|line| !line.contains("status 7")),
++        "R13.4: the error text is sent, never logged: {logged:?}"
++    );
++}
++
++#[gpui::test]
++async fn status_a_fresh_subscribe_reads_the_error_and_only_on_the_thread_that_failed(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx).await;
++    let failing = StubAgentConnection::new();
++    let mut a = window(&fs, "/p/app", Some(failing.clone()), cx).await;
++    let b = window(&fs, "/p/web", Some(StubAgentConnection::new()), cx).await;
++    activate(&mut a);
++    let (live, snapshot) = fresh_subscribe(1, &a, json!({ "follow": true }), cx);
++    let a_id = snapshot["thread"]["thread_id"].clone();
++    fail_turn(&live, &a, &failing, ERROR_TEXT, cx);
++
++    // The other thread: listed by project, never touched by A's failure.
++    let probe = open_session(2);
++    approve(&probe, &a.app_state(), cx);
++    probe.handle(request("list_threads", "l", json!({})), &a.app_state(), cx);
++    let threads = probe
++        .drain(cx)
++        .into_iter()
++        .find(|m| m["kind"] == "threads")
++        .expect("threads");
++    let b_id = threads["items"]
++        .as_array()
++        .expect("items")
++        .iter()
++        .find(|item| item["project"] == "web")
++        .map(|item| item["thread_id"].clone())
++        .expect("the thread of the second window");
++    assert_ne!(a_id, b_id);
++
++    // Hostile half: the clean thread must not inherit the failure of another thread.
++    let (_, clean) = fresh_subscribe(3, &b, json!({ "thread_id": b_id }), cx);
++    assert_eq!(clean["thread"]["thread_id"], b_id);
++    assert_clean(&clean["status"], "a thread that never failed");
++
++    // Hostile half: the failed thread, seen by a session that was not there, is not `idle`.
++    let (_, errored) = fresh_subscribe(4, &a, json!({ "thread_id": a_id }), cx);
++    assert_eq!(errored["thread"]["thread_id"], a_id);
++    assert_errored_with(
++        &errored["status"],
++        ERROR_TEXT,
++        "R6.7: a snapshot after the failure",
++    );
++
++    // The session that watched the failure re-subscribes: the same answer.
++    live.handle(
++        request(
++            "subscribe",
++            "again",
++            json!({ "target": { "thread_id": a_id } }),
++        ),
++        &a.app_state(),
++        cx,
++    );
++    let again = snapshot_of(&live.drain(cx));
++    assert_errored_with(
++        &again["status"],
++        ERROR_TEXT,
++        "a re-subscribe after the failure",
++    );
++}
++
++#[gpui::test]
++async fn status_the_next_run_clears_the_error_state_and_its_message_together(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx).await;
++    let connection = StubAgentConnection::new();
++    let win = window(&fs, "/p/app", Some(connection.clone()), cx).await;
++    let (probe, _) = fresh_subscribe(1, &win, json!({ "follow": true }), cx);
++    let failed = fail_turn(&probe, &win, &connection, ERROR_TEXT, cx);
++    let last = statuses(&failed).last().cloned().expect("a status");
++    assert_errored_with(
++        &last,
++        ERROR_TEXT,
++        "precondition: the failure carried its message",
++    );
++
++    // The next run: the stub keeps the turn open until `end_turn`.
++    probe.handle(
++        request("send", "m2", json!({ "text": "again", "attachments": [] })),
++        &win.app_state(),
++        cx,
++    );
++    let running = statuses(&probe.drain(cx));
++    let working = running
++        .iter()
++        .find(|s| s["state"] == "working")
++        .unwrap_or_else(|| panic!("the next run is working: {running:?}"));
++    assert_clean(working, "the next run");
++    for status in &running {
++        assert_clean(status, "while the next run goes");
++    }
++
++    let session_id = win
++        .thread()
++        .read_with(&win.cx, |thread, _| thread.session_id().clone());
++    connection.end_turn(session_id, acp_v1::StopReason::EndTurn);
++    cx.run_until_parked();
++    let ended = statuses(&probe.drain(cx));
++    let last = ended
++        .last()
++        .unwrap_or_else(|| panic!("a status at the end: {ended:?}"));
++    assert_eq!(last["state"], "idle", "{last}");
++    assert_clean(last, "after a clean turn");
++
++    let (_, snapshot) = fresh_subscribe(2, &win, json!({ "follow": true }), cx);
++    assert_clean(
++        &snapshot["status"],
++        "a fresh subscribe after the clean turn",
++    );
++}
++
++#[gpui::test]
++async fn status_an_over_long_error_message_is_capped_on_a_character_boundary(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let fs = shared_fs(cx).await;
++    let connection = StubAgentConnection::new();
++    let win = window(&fs, "/p/app", Some(connection.clone()), cx).await;
++    let (probe, _) = fresh_subscribe(1, &win, json!({ "follow": true }), cx);
++
++    // An odd-length head, then two-byte characters: an even byte cap lands mid-character.
++    let widest_cap = super::TITLE_BYTES.max(super::ENTRY_MARKDOWN_BYTES);
++    let huge = format!("HEAD-{}", "é".repeat(widest_cap * 2));
++    assert!(huge.len() > widest_cap * 3);
++    let got = fail_turn(&probe, &win, &connection, &huge, cx);
++    for msg in &got {
++        let line = serde_json::to_string(msg).expect("serializes");
++        assert!(line.len() < super::MAX_SERVER_LINE_BYTES, "R3.10: one line");
++    }
++    let last = statuses(&got).last().cloned().expect("a status");
++    assert_eq!(last["state"], "error", "{}", last["state"]);
++    let message = last["message"]
++        .as_str()
++        .expect("an error status carries its message, even an over-long one");
++    let bound = widest_cap + super::TRUNCATION_NOTE.len();
++    assert!(
++        message.len() <= bound,
++        "capped like the module's other wire strings: {} > {bound} bytes",
++        message.len()
++    );
++    assert!(message.len() < huge.len(), "the message was cut");
++    assert!(
++        message.starts_with("HEAD-éé"),
++        "the head of the text is kept"
++    );
++
++    // The cap holds in a snapshot too.
++    let (_, snapshot) = fresh_subscribe(2, &win, json!({ "follow": true }), cx);
++    let message = snapshot["status"]["message"]
++        .as_str()
++        .expect("the snapshot carries the capped message");
++    assert!(message.len() <= bound, "{} > {bound} bytes", message.len());
 +}
 diff --git a/crates/agent_ui/src/browser_channel_tests/stream.rs b/crates/agent_ui/src/browser_channel_tests/stream.rs
 new file mode 100644
@@ -6356,7 +6655,7 @@ index c132e27..b46b20b 100644
      selection: Option<&thread_view::PermissionSelection>,
      is_allow: bool,
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index c9525ff..fdacd4a 100644
+index c9525ff..4c260c4 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -1276,7 +1276,7 @@ impl ThreadView {
@@ -6505,7 +6804,209 @@ index c9525ff..fdacd4a 100644
  
              let _ = this.update(cx, |this, cx| {
                  this.current_submission = Some(submission_id);
-@@ -14694,6 +14797,7 @@ pub(crate) fn open_link(
+@@ -2254,94 +2357,14 @@ impl ThreadView {
+         cx.notify();
+     }
+ 
++    /// The plain-text message of the error the thread view shows, if any.
++    pub(crate) fn thread_error_text(&self, cx: &App) -> Option<SharedString> {
++        let error = self.thread_error.as_ref()?;
++        Some(self.thread_error_summary(error, cx).2)
++    }
++
+     fn emit_thread_error_telemetry(&self, error: &ThreadError, cx: &mut Context<Self>) {
+-        let (error_kind, acp_error_code, message): (&str, Option<SharedString>, SharedString) =
+-            match error {
+-                ThreadError::ZedPaymentRequired => (
+-                    "payment_required",
+-                    None,
+-                    "You reached your free usage limit. Upgrade to Zed Pro for more prompts."
+-                        .into(),
+-                ),
+-                ThreadError::Refusal => {
+-                    let model_or_agent_name = self.current_model_name(cx);
+-                    let message = format!(
+-                        "{} refused to respond to this prompt. This can happen when a model believes the prompt violates its content policy or safety guidelines, so rephrasing it can sometimes address the issue.",
+-                        model_or_agent_name
+-                    );
+-                    ("refusal", None, message.into())
+-                }
+-                ThreadError::DataRetentionConsentRequired => {
+-                    let message = format!(
+-                        "{} is not available with Zero Data Retention.",
+-                        self.current_model_name(cx)
+-                    );
+-                    ("data_retention_consent_required", None, message.into())
+-                }
+-                ThreadError::AuthenticationRequired(message) => {
+-                    ("authentication_required", None, message.clone())
+-                }
+-                ThreadError::RateLimitExceeded { provider } => (
+-                    "rate_limit_exceeded",
+-                    None,
+-                    format!("{provider}'s rate limit was reached.").into(),
+-                ),
+-                ThreadError::ServerOverloaded { provider } => (
+-                    "server_overloaded",
+-                    None,
+-                    format!("{provider}'s servers are temporarily unavailable.").into(),
+-                ),
+-                ThreadError::PromptTooLarge => (
+-                    "prompt_too_large",
+-                    None,
+-                    "Context too large for the model's context window.".into(),
+-                ),
+-                ThreadError::NoCredentials { provider } => (
+-                    "no_api_key",
+-                    None,
+-                    format!("No credentials configured for {provider}.").into(),
+-                ),
+-                ThreadError::StreamError { provider } => (
+-                    "stream_error",
+-                    None,
+-                    format!("Connection to {provider}'s API was interrupted.").into(),
+-                ),
+-                ThreadError::AuthenticationFailed { provider } => (
+-                    "invalid_api_key",
+-                    None,
+-                    format!("Authentication with {provider} failed.").into(),
+-                ),
+-                ThreadError::PermissionDenied { provider, message } => (
+-                    "permission_denied",
+-                    None,
+-                    message.clone().unwrap_or_else(|| {
+-                        format!(
+-                            "{provider}'s API rejected the request due to insufficient permissions."
+-                        )
+-                        .into()
+-                    }),
+-                ),
+-                ThreadError::ProviderRejection { message } => {
+-                    ("provider_rejection", None, message.clone())
+-                }
+-                ThreadError::MaxOutputTokens => (
+-                    "max_output_tokens",
+-                    None,
+-                    "Model reached its maximum output length.".into(),
+-                ),
+-                ThreadError::NoModelSelected => {
+-                    ("no_model_selected", None, "No model selected.".into())
+-                }
+-                ThreadError::ApiError { provider } => (
+-                    "api_error",
+-                    None,
+-                    format!("{provider}'s API returned an unexpected error.").into(),
+-                ),
+-                ThreadError::Other {
+-                    acp_error_code,
+-                    message,
+-                } => ("other", acp_error_code.clone(), message.clone()),
+-            };
++        let (error_kind, acp_error_code, message) = self.thread_error_summary(error, cx);
+ 
+         let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
+         let session_id = self.thread.read(cx).session_id().clone();
+@@ -2362,6 +2385,99 @@ impl ThreadView {
+         );
+     }
+ 
++    /// The kind, ACP error code and plain-text message of `error`.
++    fn thread_error_summary(
++        &self,
++        error: &ThreadError,
++        cx: &App,
++    ) -> (&'static str, Option<SharedString>, SharedString) {
++        match error {
++            ThreadError::ZedPaymentRequired => (
++                "payment_required",
++                None,
++                "You reached your free usage limit. Upgrade to Zed Pro for more prompts.".into(),
++            ),
++            ThreadError::Refusal => {
++                let model_or_agent_name = self.current_model_name(cx);
++                let message = format!(
++                    "{} refused to respond to this prompt. This can happen when a model believes the prompt violates its content policy or safety guidelines, so rephrasing it can sometimes address the issue.",
++                    model_or_agent_name
++                );
++                ("refusal", None, message.into())
++            }
++            ThreadError::DataRetentionConsentRequired => {
++                let message = format!(
++                    "{} is not available with Zero Data Retention.",
++                    self.current_model_name(cx)
++                );
++                ("data_retention_consent_required", None, message.into())
++            }
++            ThreadError::AuthenticationRequired(message) => {
++                ("authentication_required", None, message.clone())
++            }
++            ThreadError::RateLimitExceeded { provider } => (
++                "rate_limit_exceeded",
++                None,
++                format!("{provider}'s rate limit was reached.").into(),
++            ),
++            ThreadError::ServerOverloaded { provider } => (
++                "server_overloaded",
++                None,
++                format!("{provider}'s servers are temporarily unavailable.").into(),
++            ),
++            ThreadError::PromptTooLarge => (
++                "prompt_too_large",
++                None,
++                "Context too large for the model's context window.".into(),
++            ),
++            ThreadError::NoCredentials { provider } => (
++                "no_api_key",
++                None,
++                format!("No credentials configured for {provider}.").into(),
++            ),
++            ThreadError::StreamError { provider } => (
++                "stream_error",
++                None,
++                format!("Connection to {provider}'s API was interrupted.").into(),
++            ),
++            ThreadError::AuthenticationFailed { provider } => (
++                "invalid_api_key",
++                None,
++                format!("Authentication with {provider} failed.").into(),
++            ),
++            ThreadError::PermissionDenied { provider, message } => (
++                "permission_denied",
++                None,
++                message.clone().unwrap_or_else(|| {
++                    format!(
++                        "{provider}'s API rejected the request due to insufficient permissions."
++                    )
++                    .into()
++                }),
++            ),
++            ThreadError::ProviderRejection { message } => {
++                ("provider_rejection", None, message.clone())
++            }
++            ThreadError::MaxOutputTokens => (
++                "max_output_tokens",
++                None,
++                "Model reached its maximum output length.".into(),
++            ),
++            ThreadError::NoModelSelected => {
++                ("no_model_selected", None, "No model selected.".into())
++            }
++            ThreadError::ApiError { provider } => (
++                "api_error",
++                None,
++                format!("{provider}'s API returned an unexpected error.").into(),
++            ),
++            ThreadError::Other {
++                acp_error_code,
++                message,
++            } => ("other", acp_error_code.clone(), message.clone()),
++        }
++    }
++
+     pub fn cancel_generation(&mut self, cx: &mut Context<Self>) {
+         self.thread_retry_status.take();
+         self.thread_error.take();
+@@ -14694,6 +14810,7 @@ pub(crate) fn open_link(
              MentionUri::TerminalSelection { .. } => {}
              MentionUri::GitDiff { .. } => {}
              MentionUri::MergeConflict { .. } => {}
