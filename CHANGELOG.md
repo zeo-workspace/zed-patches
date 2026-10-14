@@ -31,6 +31,21 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.4.0_p20261014] — 2026-10-14 (untagged)
+
+### Changed
+
+- The series moves to Zed `c403bc6af` (8 commits past `36682547b`), which
+  routes ACP v2 permission and elicitation requests through `agent_servers`,
+  sharing v1's elicitation owners. `Cargo.lock` changes only between workspace
+  crates; pycargoebuild reproduces CRATES and GIT_CRATES exactly.
+- `refresh.sh` ran clean: 11 patches differ in context and offsets only, 38 are
+  identical.
+- verify 49/49, rebrand clean, check-sync in sync, selftest 101/101,
+  check-protocol holds, nextest 4106/4106 (20 skipped), doctests 43/43,
+  upstream-ignored tests 4/4; `ebuild prepare` and `compile` run as user. e2e
+  not run: no subscription token was reachable by `test.sh`.
+
 ## [0.4.0_p20261013] — 2026-10-13 (untagged)
 
 ### Changed
