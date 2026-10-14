@@ -1832,6 +1832,10 @@ src_prepare() {
 		"${FILESDIR}/0046-agent-default-agents-prefer-the-system-adapter.patch"
 		"${FILESDIR}/0048-agent-thread-organization-storage.patch"
 		"${FILESDIR}/0049-agent-sidebar-pinned-section.patch"
+		# 0061 starts every agent with ZEO_THREAD=1, so zeo-systray's hook can
+		# tell Zeo's sessions from any other Claude Code process and offer the
+		# tray link (0024) only for those. Ungrouped like 0024.
+		"${FILESDIR}/0061-agent-mark-agent-servers-with-zeo-thread.patch"
 	)
 
 	if use claude-agent-acp-plus; then

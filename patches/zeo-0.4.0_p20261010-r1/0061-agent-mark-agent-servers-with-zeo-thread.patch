@@ -1,0 +1,76 @@
+From 081ce912804d14e4e060e03bc22f3e68657bb18f Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Wed, 14 Oct 2026 10:09:41 -0300
+Subject: [PATCH] agent: mark every agent server Zeo starts with ZEO_THREAD=1
+
+zeo-systray is fed by a Claude Code hook wired in ~/.claude/settings.json, so
+it hears about every Claude Code process on the machine, not only Zeo's
+threads: a terminal `claude -p`, an editor plugin, a script, the adapter's own
+ACP probes. It offered "Open thread" for all of them, and the link (0024) for a
+session Zeo never owned opens Zeo on `no thread found`: there is no
+sidebar_threads row, so the handler falls back to `open_thread` on the native
+agent, which has never heard of the id.
+
+Measured 2026-10-14 over seven days of the tray's journal: 13 of ~73 clicked
+session ids had no row in ~/.local/share/zeo/db/0-zeo/db.sqlite -- adapter
+probes in /tmp/sora-acp-*, epic test harnesses in /tmp/epic-mb-*, the bentoo
+autoupdate repair run through the `claude` CLI, a VS Code session, and five
+runs that persisted no transcript at all. Every id that did have a row opened.
+
+Only Zeo knows which sessions are its own, so it says so where the hook can
+read it: `ZEO_THREAD=1` goes into the environment of every agent server it
+starts. The adapter hands its whole environment to the Claude Code child
+(claude-agent-plus, `...process.env` in the session's `env`), and Claude Code's
+hooks inherit it, so `zeo-systray notify` sees the marker and forwards
+`"client":"zeo"`. The tray keeps notifying every session but offers Open only
+for Zeo's.
+
+The marker is added in `CustomAgentServer::connect`, beside NO_BROWSER and the
+proxy variables, because that is the one map every local start passes through
+-- custom entries, registry agents, and a remote project, whose server-side
+handler extends its response with this map. For a custom entry it is applied
+after the entry's own `env`, so a settings `env` cannot drop it by accident; a
+registry agent's settings `env` is still applied last, as upstream orders it.
+Because the name is one of the variables this start configures, it is also
+forwarded into the ai-jail sandbox (0057), which passes on only those names.
+
+Ungrouped, like 0024: a tray link can point at any thread, and the marker
+costs nothing where no tray listens.
+
+Two alternatives were measured and dropped. The transcript's `entrypoint`
+does not separate them: the adapter's ACP probes report `sdk-ts`, the same as
+Zeo's threads. And the daemon reading Zeo's database would tie it to the
+editor's internal schema.
+
+The tests live in 0057's sandbox_hook_lifecycle_tests.rs, whose fixture
+spawns a real agent script: an unjailed start carries `ZEO_THREAD=1` beside
+the entry's own env, and a jailed one passes it through to ai-jail.
+
+Story 050.
+---
+
+diff --git a/crates/agent_servers/src/custom.rs b/crates/agent_servers/src/custom.rs
+index 45b8df5..5b17ea7 100644
+--- a/crates/agent_servers/src/custom.rs
++++ b/crates/agent_servers/src/custom.rs
+@@ -19,6 +19,9 @@ pub const GEMINI_ID: &str = "gemini";
+ pub const CLAUDE_AGENT_ID: &str = "claude-acp";
+ pub const CODEX_ID: &str = "codex-acp";
+ pub const CURSOR_ID: &str = "cursor";
++/// Read by the zeo-systray hook, which links a notification to its thread only for a session
++/// whose environment carries it.
++pub const ZEO_THREAD_ENV: &str = "ZEO_THREAD";
+ 
+ /// A generic agent server implementation for custom user-defined agents
+ pub struct CustomAgentServer {
+@@ -224,6 +227,10 @@ impl AgentServer for CustomAgentServer {
+         }
+ 
+         let mut extra_env = load_proxy_env(cx);
++        // Claude Code hooks inherit the agent's environment, and the zeo-systray hook offers to
++        // reopen a session only when it carries this marker: the hook fires for every Claude Code
++        // process on the machine, and only a session Zeo started has a thread Zeo can open.
++        extra_env.insert(ZEO_THREAD_ENV.to_owned(), "1".to_owned());
+         if delegate.store.read(cx).no_browser() {
+             extra_env.insert("NO_BROWSER".to_owned(), "1".to_owned());
+         }

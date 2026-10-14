@@ -78,6 +78,14 @@
 # sidebar.rs (0028-0030) and the keymaps (0035, 0043, 0044) are generated on
 # top of it (story 032).
 0049-agent-sidebar-pinned-section.patch
+# 0061: every agent server Zeo starts gets ZEO_THREAD=1 in its environment.
+# zeo-systray's hook fires for every Claude Code process on the machine, and
+# only a session Zeo started has a thread its tray link (0024) can open; the
+# marker reaches the hook through the adapter and Claude Code, which both pass
+# their environment on. Added in CustomAgentServer::connect, beside NO_BROWSER,
+# the one map every local start passes through. UNGROUPED like 0024; its tests
+# sit in 0057's lifecycle file, whose fixture spawns a real agent (story 050).
+0061-agent-mark-agent-servers-with-zeo-thread.patch
 
 # @feature: claude-agent-acp-plus
 0001-force-enable-claude-agent-acp-plus.patch

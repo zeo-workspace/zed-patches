@@ -102,6 +102,11 @@ argv shape, version probe, launch decision, prompts, scope resolution,
 ai-memory fixtures) plus tests/real_ai_jail.rs against a real ai-jail;
 agent_servers spawn-hook and lifecycle tests; agent_ui icon tests;
 settings_ui page tests.
+
+The lifecycle tests also hold 0061's: ZEO_THREAD is on the jail test's
+allowed list and asserted there, and unjailed_agent_carries_the_zeo_thread_marker
+checks an unjailed start. They live here because this fixture is the one that
+spawns a real agent script and reads back its environment (story 050).
 ---
  Cargo.lock                                    |   44 +
  Cargo.toml                                    |    2 +
@@ -135,7 +140,7 @@ settings_ui page tests.
  crates/agent_servers/src/acp/transport.rs     |  170 +-
  crates/agent_servers/src/agent_servers.rs     |    4 +
  crates/agent_servers/src/custom.rs            |  129 +-
- .../src/sandbox_hook_lifecycle_tests.rs       |  237 +++
+ .../src/sandbox_hook_lifecycle_tests.rs       |  279 +++
  .../agent_servers/src/sandbox_hook_tests.rs   |  395 ++++
  crates/agent_servers/src/test_log_capture.rs  |   56 +-
  crates/agent_ui/Cargo.toml                    |    1 +
@@ -157,7 +162,7 @@ settings_ui page tests.
  crates/zed/Cargo.toml                         |    1 +
  crates/zed/src/main.rs                        |    1 +
  crates/zed_actions/src/lib.rs                 |    4 +
- 54 files changed, 15283 insertions(+), 33 deletions(-)
+ 54 files changed, 15325 insertions(+), 33 deletions(-)
  create mode 100644 crates/agent_sandbox/Cargo.toml
  create mode 100644 crates/agent_sandbox/src/agent_sandbox.rs
  create mode 100644 crates/agent_sandbox/src/command.rs
@@ -11112,7 +11117,7 @@ index 6de17a2..d07ab6f 100644
  pub mod thread_config_store;
  
 diff --git a/crates/agent_servers/src/custom.rs b/crates/agent_servers/src/custom.rs
-index 45b8df5..ab8c48a 100644
+index 5b17ea7..3ac8993 100644
 --- a/crates/agent_servers/src/custom.rs
 +++ b/crates/agent_servers/src/custom.rs
 @@ -1,7 +1,9 @@
@@ -11125,7 +11130,7 @@ index 45b8df5..ab8c48a 100644
  use anyhow::{Context as _, Result};
  use collections::HashSet;
  use fs::Fs;
-@@ -253,20 +255,63 @@ impl AgentServer for CustomAgentServer {
+@@ -260,20 +262,63 @@ impl AgentServer for CustomAgentServer {
                      extra_env.insert("GEMINI_API_KEY".into(), api_key);
                  }
              }
@@ -11203,7 +11208,7 @@ index 45b8df5..ab8c48a 100644
              let connection = crate::acp::connect(
                  agent_id,
                  project,
-@@ -274,6 +319,10 @@ impl AgentServer for CustomAgentServer {
+@@ -281,6 +326,10 @@ impl AgentServer for CustomAgentServer {
                  store.clone(),
                  default_mode,
                  default_config_options,
@@ -11214,7 +11219,7 @@ index 45b8df5..ab8c48a 100644
                  cx,
              )
              .await?;
-@@ -286,6 +335,58 @@ impl AgentServer for CustomAgentServer {
+@@ -293,6 +342,58 @@ impl AgentServer for CustomAgentServer {
      }
  }
  
@@ -11275,10 +11280,10 @@ index 45b8df5..ab8c48a 100644
      if let Some(key) = env_var.value {
 diff --git a/crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs b/crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs
 new file mode 100644
-index 0000000..114e644
+index 0000000..6d0adb5
 --- /dev/null
 +++ b/crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,279 @@
 +// Story 043, task 3.2 — what the spawn hook leaves behind: the text a refused start shows, and
 +// how long a start's launch record lives (R1.9, R5, review M1). Added after tech review; the
 +// launch line and the spawn shapes are `sandbox_hook_tests`.
@@ -11494,9 +11499,10 @@ index 0000000..114e644
 +        .lines()
 +        .filter_map(|line| line.split_once('='))
 +        .collect();
-+    // PWD, SHLVL and _ are set by the fake ai-jail's own /bin/sh; NO_PROXY / NO_BROWSER are
-+    // what Zeo itself adds for every agent.
++    // PWD, SHLVL and _ are set by the fake ai-jail's own /bin/sh; NO_PROXY / NO_BROWSER /
++    // ZEO_THREAD are what Zeo itself adds for every agent.
 +    let allowed = [
++        "ZEO_THREAD",
 +        "HOOK_SECRET",
 +        "PATH",
 +        "HOME",
@@ -11513,8 +11519,49 @@ index 0000000..114e644
 +        assert!(allowed.contains(name), "{name} reached ai-jail");
 +    }
 +    assert!(env.contains(&("HOOK_SECRET", "hook-secret-value")));
++    assert!(
++        env.contains(&("ZEO_THREAD", "1")),
++        "the jailed agent is marked as Zeo's"
++    );
 +    let home = paths::home_dir().display().to_string();
 +    assert!(env.contains(&("HOME", home.as_str())), "HOME is Zeo's");
++}
++
++// Story 050: Claude Code hooks inherit the agent's environment, and the tray's hook offers to
++// reopen a session only when it carries this marker. A session Zeo never owned has no thread to
++// open, so the marker is how the tray tells the two apart.
++#[gpui::test]
++async fn unjailed_agent_carries_the_zeo_thread_marker(cx: &mut TestAppContext) {
++    let f = Fixture::new();
++    let script = std::fs::read_to_string(&f.agent).expect("read agent");
++    let dump = f.base.join("agent.env");
++    let script = script.replacen(
++        "#!/bin/sh\n",
++        &format!("#!/bin/sh\nenv > '{}'\n", dump.display()),
++        1,
++    );
++    std::fs::write(&f.agent, script).expect("rewrite agent");
++    let mut settings = f.settings(false, &f.base.join("nowhere/ai-jail"));
++    settings["agent_servers"][AGENT]["env"] = json!({ "HOOK_SECRET": "hook-secret-value" });
++    init(settings, cx);
++    let (_project, result) = start(&f, cx).await;
++    result.expect("the scripted agent initializes");
++
++    let dump = std::fs::read_to_string(&dump).expect("the agent was spawned");
++    let env: Vec<(&str, &str)> = dump
++        .lines()
++        .filter_map(|line| line.split_once('='))
++        .collect();
++    // Names only: the agent inherits the test process's environment, which can hold tokens.
++    let names: Vec<&str> = env.iter().map(|(name, _)| *name).collect();
++    assert!(
++        env.contains(&("ZEO_THREAD", "1")),
++        "agent env names: {names:?}"
++    );
++    assert!(
++        env.contains(&("HOOK_SECRET", "hook-secret-value")),
++        "the entry's own env still arrives beside the marker"
++    );
 +}
 diff --git a/crates/agent_servers/src/sandbox_hook_tests.rs b/crates/agent_servers/src/sandbox_hook_tests.rs
 new file mode 100644
