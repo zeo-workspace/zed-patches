@@ -43,8 +43,9 @@ bumps inside a range are summarised rather than listed one by one.
   identical.
 - verify 49/49, rebrand clean, check-sync in sync, selftest 101/101,
   check-protocol holds, nextest 4106/4106 (20 skipped), doctests 43/43,
-  upstream-ignored tests 4/4; `ebuild prepare` and `compile` run as user. e2e
-  not run: no subscription token was reachable by `test.sh`.
+  upstream-ignored tests 4/4; `ebuild prepare` and `compile` run as user. e2e:
+  the Claude Agent (Plus) suite 6/6 on a subscription, `tool_call_with_permission`
+  included; the native agent suite not run (API key only).
 
 ## [0.4.0_p20261013] — 2026-10-13 (untagged)
 
