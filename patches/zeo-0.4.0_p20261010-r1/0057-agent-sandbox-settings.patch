@@ -103,8 +103,9 @@ ai-memory fixtures) plus tests/real_ai_jail.rs against a real ai-jail;
 agent_servers spawn-hook and lifecycle tests; agent_ui icon tests;
 settings_ui page tests.
 
-The lifecycle tests also hold 0061's: ZEO_THREAD is on the jail test's
-allowed list and asserted there, and unjailed_agent_carries_the_zeo_thread_marker
+The lifecycle tests also hold 0061's: the jail test requires ZEO_THREAD both
+in ai-jail's own environment and as `--env ZEO_THREAD`, since ai-jail passes
+on only the names given that way, and unjailed_agent_carries_the_zeo_thread_marker
 checks an unjailed start. They live here because this fixture is the one that
 spawns a real agent script and reads back its environment (story 050).
 ---
@@ -140,7 +141,7 @@ spawns a real agent script and reads back its environment (story 050).
  crates/agent_servers/src/acp/transport.rs     |  170 +-
  crates/agent_servers/src/agent_servers.rs     |    4 +
  crates/agent_servers/src/custom.rs            |  129 +-
- .../src/sandbox_hook_lifecycle_tests.rs       |  279 +++
+ .../src/sandbox_hook_lifecycle_tests.rs       |  289 +++
  .../agent_servers/src/sandbox_hook_tests.rs   |  395 ++++
  crates/agent_servers/src/test_log_capture.rs  |   56 +-
  crates/agent_ui/Cargo.toml                    |    1 +
@@ -162,7 +163,7 @@ spawns a real agent script and reads back its environment (story 050).
  crates/zed/Cargo.toml                         |    1 +
  crates/zed/src/main.rs                        |    1 +
  crates/zed_actions/src/lib.rs                 |    4 +
- 54 files changed, 15325 insertions(+), 33 deletions(-)
+ 54 files changed, 15335 insertions(+), 33 deletions(-)
  create mode 100644 crates/agent_sandbox/Cargo.toml
  create mode 100644 crates/agent_sandbox/src/agent_sandbox.rs
  create mode 100644 crates/agent_sandbox/src/command.rs
@@ -11280,10 +11281,10 @@ index 5b17ea7..3ac8993 100644
      if let Some(key) = env_var.value {
 diff --git a/crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs b/crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs
 new file mode 100644
-index 0000000..6d0adb5
+index 0000000..ee95fe8
 --- /dev/null
 +++ b/crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,289 @@
 +// Story 043, task 3.2 — what the spawn hook leaves behind: the text a refused start shows, and
 +// how long a start's launch record lives (R1.9, R5, review M1). Added after tech review; the
 +// launch line and the spawn shapes are `sandbox_hook_tests`.
@@ -11482,7 +11483,8 @@ index 0000000..6d0adb5
 +        &ai_jail,
 +        format!(
 +            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'ai-jail 2.8.1'; exit 0; fi\n\
-+             env > '{}/jail.env'\nexit 1\n",
++             env > '{}/jail.env'\nprintf '%s\\n' \"$@\" > '{}/jail.args'\nexit 1\n",
++            f.base.display(),
 +            f.base.display()
 +        ),
 +    )
@@ -11522,6 +11524,15 @@ index 0000000..6d0adb5
 +    assert!(
 +        env.contains(&("ZEO_THREAD", "1")),
 +        "the jailed agent is marked as Zeo's"
++    );
++    // ai-jail clears the environment and passes on only the names given with `--env`, so the
++    // marker reaching ai-jail's process is not enough: it has to be on that list too.
++    let args = std::fs::read_to_string(f.base.join("jail.args")).expect("ai-jail args");
++    let args: Vec<&str> = args.lines().collect();
++    assert!(
++        args.windows(2)
++            .any(|pair| pair[0] == "--env" && pair[1] == "ZEO_THREAD"),
++        "ZEO_THREAD is forwarded into the jail: {args:?}"
 +    );
 +    let home = paths::home_dir().display().to_string();
 +    assert!(env.contains(&("HOME", home.as_str())), "HOME is Zeo's");
