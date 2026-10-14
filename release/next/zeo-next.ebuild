@@ -2060,6 +2060,14 @@ src_prepare() {
 		PATCHES+=( "${FILESDIR}/0057-agent-sandbox-settings.patch" )
 	fi
 
+	# 0058 (story 045): the browser sidebar -- zeo-browser reads and drives the
+	# same agent thread through zeo-browser-host and a v2 session protocol on
+	# 0052's bridge socket, after an Allow in Zeo. Its own group, after ai-jail and
+	# before test; it applies with or without 0057, and 0050/0051 on top of it.
+	if use browser-extension; then
+		PATCHES+=( "${FILESDIR}/0058-browser-extension.patch" )
+	fi
+
 	# 0050 and 0051 change tests only -- nothing in them reaches the binary -- so
 	# they apply only when the suite is built. They are generated on top of every
 	# group above, which is what the test? clause in REQUIRED_USE enforces.
@@ -2260,6 +2268,9 @@ src_compile() {
 		--package zed
 		--package cli
 	)
+	# The native-messaging host the browser starts (0058): a workspace member of
+	# its own, so it is only built when the browser channel is.
+	use browser-extension && packages+=( --package zeo_browser_host )
 	# "${features[*]}" alone would be an empty --features argument when no flag
 	# is on; the count is what decides whether the option appears at all.
 	local feature_args=()
@@ -2284,6 +2295,19 @@ src_install() {
 	domenu "${S}/${APP_ID}.desktop"
 
 	if use browser-extension; then
+		# The host is started by the browser, never by a user: libexec, next to
+		# zeo-editor. Its manifests name this path and only the committed
+		# extension IDs (0058, crates/zeo_browser_host/manifests).
+		exeinto "/usr/libexec"
+		doexe "$(cargo_target_dir)"/zeo-browser-host
+		local manifests="${S}/crates/zeo_browser_host/manifests"
+		insinto /etc/opt/chrome/native-messaging-hosts
+		newins "${manifests}"/dev.zeo.browser_host.chrome.json dev.zeo.browser_host.json
+		insinto /etc/chromium/native-messaging-hosts
+		newins "${manifests}"/dev.zeo.browser_host.chrome.json dev.zeo.browser_host.json
+		insinto "/usr/$(get_libdir)/mozilla/native-messaging-hosts"
+		newins "${manifests}"/dev.zeo.browser_host.firefox.json dev.zeo.browser_host.json
+
 		# System scope, keyed by Firefox's application ID: every profile loads it.
 		insinto "/usr/$(get_libdir)/mozilla/extensions/{ec8030f7-c20a-464f-9b0e-13a3a9e97384}"
 		newins "${DISTDIR}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi" zeo-browser@zeo.dev.xpi
@@ -2332,6 +2356,20 @@ pkg_postinst() {
 		elog "agent panel shows whether the thread you are looking at is jailed."
 		elog "A hand-written \"ai-jail\" entry in agent_servers keeps working, shown as"
 		elog "jailed by its own command."
+	fi
+
+	if use browser-extension; then
+		elog ""
+		elog "The browser sidebar (zeo-browser) talks to this Zeo through"
+		elog "/usr/libexec/zeo-browser-host, installed with its Chrome, Chromium and"
+		elog "Firefox host manifests. Firefox loads the add-on from the system scope;"
+		elog "on Chrome or Chromium build and load it yourself:"
+		elog ""
+		elog "    cd zeo-browser && npm ci && npm run build"
+		elog "    chrome://extensions -> Developer mode -> Load unpacked -> dist/chrome"
+		elog ""
+		elog "The first connection asks in Zeo: Allow or Deny. Palette command"
+		elog "'devtools bridge: revoke browser access' forgets every browser allowed."
 	fi
 
 	if use claude-code-ide; then
