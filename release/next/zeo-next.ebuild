@@ -2046,6 +2046,11 @@ src_prepare() {
 			# answer live. Gated on the adapter advertising _claude/usage; an
 			# older adapter is never sent the request. Pure Zed, BY CHOICE.
 			"${FILESDIR}/0060-agent-refresh-account-quota-on-ring-hover.patch"
+			# 0062: git worktree add is refused when the repository's own config
+			# names a program the checkout would run (includeIf, a filter driver,
+			# a Git LFS agent or extension) or cannot be read; the error names the
+			# key and nothing is created. Pure Zed, BY CHOICE (PARITY item 105).
+			"${FILESDIR}/0062-git-refuse-worktree-when-repo-config-can-run-programs.patch"
 		)
 	fi
 
