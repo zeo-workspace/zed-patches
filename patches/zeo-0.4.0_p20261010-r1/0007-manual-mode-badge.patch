@@ -162,7 +162,7 @@ index fc6ce2d..fe98bdf 100644
      struct TestAgentServer {
          saved_defaults: Arc<Mutex<Vec<(String, Option<AgentConfigOptionValue>)>>>,
 diff --git a/crates/agent_ui/src/mode_selector.rs b/crates/agent_ui/src/mode_selector.rs
-index 46c1543..253aee8 100644
+index 34242c1..6c56637 100644
 --- a/crates/agent_ui/src/mode_selector.rs
 +++ b/crates/agent_ui/src/mode_selector.rs
 @@ -129,6 +129,20 @@ impl ModeSelector {
@@ -231,7 +231,7 @@ index 46c1543..253aee8 100644
      }
  }
  
-@@ -300,4 +341,86 @@ mod tests {
+@@ -333,4 +374,90 @@ mod tests {
              Task::ready(Ok(()))
          }
      }
@@ -241,12 +241,12 @@ index 46c1543..253aee8 100644
 +    #[test]
 +    fn manual_badge_shown_only_for_default_mode_id() {
 +        assert!(shows_manual_mode_badge(
-+            acp::SessionModeId::new("default").0.as_ref()
++            acp::SessionConfigValueId::new("default").0.as_ref()
 +        ));
 +
 +        for other in ["acceptEdits", "bypassPermissions", "plan", "manual", ""] {
 +            assert!(
-+                !shows_manual_mode_badge(acp::SessionModeId::new(other).0.as_ref()),
++                !shows_manual_mode_badge(acp::SessionConfigValueId::new(other).0.as_ref()),
 +                "badge must be keyed to the id `default`, not shown for `{other}`"
 +            );
 +        }
@@ -271,13 +271,13 @@ index 46c1543..253aee8 100644
 +                    "session starts in `default` (Manual): badge visible"
 +                );
 +
-+                selector.set_mode(acp::SessionModeId::new("acceptEdits"), cx);
++                selector.set_mode(acp::SessionConfigValueId::new("acceptEdits"), cx);
 +                assert!(
 +                    !shows_manual_mode_badge(selector.mode().0.as_ref()),
 +                    "leaving `default` removes the badge"
 +                );
 +
-+                selector.set_mode(acp::SessionModeId::new("default"), cx);
++                selector.set_mode(acp::SessionConfigValueId::new("default"), cx);
 +                assert!(
 +                    shows_manual_mode_badge(selector.mode().0.as_ref()),
 +                    "returning to `default` restores the badge"
@@ -289,30 +289,34 @@ index 46c1543..253aee8 100644
 +    /// Session-modes double whose mode set mirrors the Claude adapter's permission
 +    /// modes and starts in `default` (Manual).
 +    struct BadgeTestSessionModes {
-+        current_mode: RefCell<acp::SessionModeId>,
++        current_mode: RefCell<acp::SessionConfigValueId>,
 +    }
 +
 +    impl BadgeTestSessionModes {
 +        fn new() -> Self {
 +            Self {
-+                current_mode: RefCell::new(acp::SessionModeId::new("default")),
++                current_mode: RefCell::new(acp::SessionConfigValueId::new("default")),
 +            }
 +        }
 +    }
 +
 +    impl AgentSessionModes for BadgeTestSessionModes {
-+        fn current_mode(&self) -> acp::SessionModeId {
++        fn current_mode(&self) -> acp::SessionConfigValueId {
 +            self.current_mode.borrow().clone()
 +        }
 +
-+        fn all_modes(&self) -> Vec<acp::SessionMode> {
++        fn all_modes(&self) -> Vec<acp::SessionConfigSelectOption> {
 +            vec![
-+                acp::SessionMode::new("default", "Manual"),
-+                acp::SessionMode::new("acceptEdits", "Accept Edits"),
++                acp::SessionConfigSelectOption::new("default", "Manual"),
++                acp::SessionConfigSelectOption::new("acceptEdits", "Accept Edits"),
 +            ]
 +        }
 +
-+        fn set_mode(&self, mode: acp::SessionModeId, _cx: &mut App) -> Task<anyhow::Result<()>> {
++        fn set_mode(
++            &self,
++            mode: acp::SessionConfigValueId,
++            _cx: &mut App,
++        ) -> Task<anyhow::Result<()>> {
 +            *self.current_mode.borrow_mut() = mode;
 +            Task::ready(Ok(()))
 +        }

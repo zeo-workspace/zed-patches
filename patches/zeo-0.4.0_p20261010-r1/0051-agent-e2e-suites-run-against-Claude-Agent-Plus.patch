@@ -131,10 +131,10 @@ index 5711c45..d67b682 100644
                          cx,
                      );
 diff --git a/crates/agent/src/tests/mod.rs b/crates/agent/src/tests/mod.rs
-index 9fe0e17..a5b2721 100644
+index e1e97e1..6d2487d 100644
 --- a/crates/agent/src/tests/mod.rs
 +++ b/crates/agent/src/tests/mod.rs
-@@ -2558,20 +2558,26 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
+@@ -2557,20 +2557,26 @@ async fn test_mcp_tool_truncation(cx: &mut TestAppContext) {
  async fn test_cancellation(cx: &mut TestAppContext) {
      let ThreadTest { thread, .. } = setup(cx, TestModel::Sonnet4).await;
  
@@ -164,7 +164,7 @@ index 9fe0e17..a5b2721 100644
      let mut echo_id = None;
      let mut echo_completed = false;
      while let Some(event) = events.next().await {
-@@ -2608,13 +2614,18 @@ async fn test_cancellation(cx: &mut TestAppContext) {
+@@ -2607,13 +2613,18 @@ async fn test_cancellation(cx: &mut TestAppContext) {
      // if one of the tools is still running.
      thread.update(cx, |thread, cx| thread.cancel(cx)).await;
      let events = events.collect::<Vec<_>>().await;
@@ -189,7 +189,7 @@ index 9fe0e17..a5b2721 100644
      );
  
      // Ensure we can still send a new message after cancellation.
-@@ -5144,7 +5155,8 @@ enum TestModel {
+@@ -5143,7 +5154,8 @@ enum TestModel {
  impl TestModel {
      fn id(&self) -> LanguageModelId {
          match self {
@@ -199,7 +199,7 @@ index 9fe0e17..a5b2721 100644
              TestModel::Fake => unreachable!(),
          }
      }
-@@ -5220,19 +5232,31 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
+@@ -5219,19 +5231,31 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
              if let TestModel::Fake = model {
                  Task::ready(fake.model("fake"))
              } else {
@@ -242,10 +242,10 @@ index 9fe0e17..a5b2721 100644
              }
          })
 diff --git a/crates/agent_servers/src/agent_servers.rs b/crates/agent_servers/src/agent_servers.rs
-index 6de17a2..be3970e 100644
+index 77503d4..f0dbf36 100644
 --- a/crates/agent_servers/src/agent_servers.rs
 +++ b/crates/agent_servers/src/agent_servers.rs
-@@ -6,6 +6,8 @@ pub mod thread_config_store;
+@@ -10,6 +10,8 @@ pub mod thread_config_store;
  
  #[cfg(any(test, feature = "test-support"))]
  pub mod e2e_tests;

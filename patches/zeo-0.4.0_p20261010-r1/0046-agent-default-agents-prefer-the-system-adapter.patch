@@ -57,10 +57,10 @@ same id wins.
 ---
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 8c46ba8..55be678 100644
+index bfeffb8..03137d9 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -2984,8 +2984,10 @@
+@@ -2991,8 +2991,10 @@
    "context_servers": {},
    // Configures agent servers available in the agent panel.
    //

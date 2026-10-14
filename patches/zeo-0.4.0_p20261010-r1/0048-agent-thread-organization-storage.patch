@@ -96,7 +96,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 6179212..e0cc65b 100644
+index e6d0e98..ab42feb 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -31,6 +31,7 @@ pub mod terminal_thread_metadata_store;

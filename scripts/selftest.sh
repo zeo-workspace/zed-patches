@@ -2112,6 +2112,15 @@ test_xvfb_proof_drive_detects_an_editor_that_died_mid_run() {
 	rm -rf "${tmp}"
 }
 
+# --- release/portable: release_patches skips default-off groups (story 043, R10.5)
+test_release_patches_skips_default_off_groups() {
+	case_start "portable release_patches: a group marked '# @default: off' is skipped like test, default-on groups kept in order"
+	local out status
+	out="$(ZP_REPO="${REPO_ROOT}" bash "${SCRIPTS}/tests/release-patches-default-off.sh" 2>&1)"
+	status=$?
+	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
+}
+
 test_xvfb_proof_launch_isolates_bus_and_runtime_dir() {
 	case_start "xvfb-proof: Zeo runs on a private session bus with its own XDG_RUNTIME_DIR, mode 700"
 	local tmp out wd log
@@ -2766,6 +2775,8 @@ main() {
 		test_xvfb_proof_drive_detects_an_editor_that_died_mid_run
 		test_xvfb_proof_launch_isolates_bus_and_runtime_dir
 		test_xvfb_proof_lifecycle_spares_a_process_without_the_run_marker
+
+		test_release_patches_skips_default_off_groups
 	)
 
 	for t in "${tests[@]}"; do

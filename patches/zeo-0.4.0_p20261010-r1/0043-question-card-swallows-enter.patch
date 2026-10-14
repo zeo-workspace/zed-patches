@@ -75,7 +75,7 @@ here because it sits beside this patch's tests.
 ---
 
 diff --git a/assets/keymaps/default-linux.json b/assets/keymaps/default-linux.json
-index 6e137b4..28ff399 100644
+index b5d3da9..3e19b0b 100644
 --- a/assets/keymaps/default-linux.json
 +++ b/assets/keymaps/default-linux.json
 @@ -379,6 +379,17 @@
@@ -97,7 +97,7 @@ index 6e137b4..28ff399 100644
      "context": "Elicitation || (Elicitation > Editor)",
      "use_key_equivalents": true,
 diff --git a/assets/keymaps/default-macos.json b/assets/keymaps/default-macos.json
-index a281490..d5278e3 100644
+index 24560ae..b2e462c 100644
 --- a/assets/keymaps/default-macos.json
 +++ b/assets/keymaps/default-macos.json
 @@ -414,6 +414,17 @@
@@ -160,10 +160,10 @@ index b815233..41dd2ec 100644
    {
      "context": "SettingsWindow > NavigationMenu && !search",
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index fd7bf56..b09dac7 100644
+index c73c58c..ffa4d41 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -325,6 +325,11 @@ actions!(
+@@ -336,6 +336,11 @@ actions!(
          RenameSelectedThread,
          /// Starts a chat conversation with follow-up enabled.
          ChatWithFollow,
@@ -175,7 +175,7 @@ index fd7bf56..b09dac7 100644
          /// Cycles to the next inline assist suggestion.
          CycleNextInlineAssist,
          /// Cycles to the previous inline assist suggestion.
-@@ -979,6 +984,8 @@ fn update_command_palette_filter(cx: &mut App) {
+@@ -990,6 +995,8 @@ fn update_command_palette_filter(cx: &mut App) {
          // Skills are surfaced through the settings UI now, so this command
          // should never appear in the palette.
          filter.hide_action_types(&manage_skills_action);
@@ -185,10 +185,10 @@ index fd7bf56..b09dac7 100644
              filter.show_action_types(skill_creator_actions.iter());
          } else {
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 0644d99..3d529fd 100644
+index 260cdd7..786b31c 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -5946,9 +5946,6 @@ pub(crate) mod tests {
+@@ -6221,9 +6221,6 @@ pub(crate) mod tests {
      #[gpui::test]
      async fn test_preloaded_question_counts_as_pending(cx: &mut TestAppContext) {
          init_test(cx);
@@ -198,7 +198,7 @@ index 0644d99..3d529fd 100644
  
          // The question is asked before the conversation registers the thread, so it never
          // sees `ElicitationRequested` -- the case `register_thread` seeds for.
-@@ -5978,6 +5975,333 @@ pub(crate) mod tests {
+@@ -6253,6 +6250,333 @@ pub(crate) mod tests {
          });
      }
  
@@ -532,7 +532,7 @@ index 0644d99..3d529fd 100644
      #[gpui::test]
      async fn test_resume_without_history_adds_notice(cx: &mut TestAppContext) {
          init_test(cx);
-@@ -12892,6 +13216,27 @@ pub(crate) mod tests {
+@@ -13215,6 +13539,27 @@ pub(crate) mod tests {
          }
      }
  
@@ -580,10 +580,10 @@ index 225e741..28598b3 100644
          let required = schema.required.as_deref().unwrap_or_default();
          let mut fields = HashMap::default();
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 60de5b7..50c7d42 100644
+index 8d97249..5bae78c 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -3100,6 +3100,17 @@ impl ThreadView {
+@@ -3114,6 +3114,17 @@ impl ThreadView {
          self.elicitation_form_states.contains_key(id)
      }
  
@@ -601,7 +601,7 @@ index 60de5b7..50c7d42 100644
      fn submit_elicitation(
          &mut self,
          elicitation_id: ElicitationEntryId,
-@@ -8058,6 +8069,19 @@ impl ThreadView {
+@@ -8075,6 +8086,19 @@ impl ThreadView {
          self.message_editor.read(cx).set_local_commands(commands);
      }
  
@@ -621,13 +621,13 @@ index 60de5b7..50c7d42 100644
      /// Whether this elicitation is drawn by the pinned card above the message
      /// editor rather than inline, in the conversation.
      ///
-@@ -13549,6 +13573,7 @@ impl Render for ThreadView {
+@@ -13567,6 +13591,7 @@ impl Render for ThreadView {
          // current availability of feedback/sharing, which can change between
          // renders (settings, connection state, feature flags).
          self.sync_local_commands(cx);
 +        self.sync_question_pending(cx);
  
-         let has_messages = self.list_state.item_count() > 0;
+         let has_messages = self.has_visible_conversation(cx);
          let list_state = self.list_state.clone();
 diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
 index 459ae88..186d746 100644

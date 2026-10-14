@@ -80,7 +80,7 @@ Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
 ---
 
 diff --git a/assets/keymaps/default-linux.json b/assets/keymaps/default-linux.json
-index 28ff399..edb8a62 100644
+index 3e19b0b..c66e138 100644
 --- a/assets/keymaps/default-linux.json
 +++ b/assets/keymaps/default-linux.json
 @@ -339,6 +339,16 @@
@@ -101,7 +101,7 @@ index 28ff399..edb8a62 100644
      "context": "AcpThread > Editor && start_of_input",
      "use_key_equivalents": true,
 diff --git a/assets/keymaps/default-macos.json b/assets/keymaps/default-macos.json
-index d5278e3..39837cf 100644
+index b2e462c..3b4bb15 100644
 --- a/assets/keymaps/default-macos.json
 +++ b/assets/keymaps/default-macos.json
 @@ -374,6 +374,16 @@
@@ -164,10 +164,10 @@ index 41dd2ec..ed7a9c2 100644
      // Outranks the binding above while the agent waits on an answer to its
      // question, as the default keymaps' `question_pending` block does.
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index b09dac7..1e26842 100644
+index ffa4d41..f1135a3 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -330,6 +330,14 @@ actions!(
+@@ -341,6 +341,14 @@ actions!(
          /// is what keeps the keystroke from reaching the editor as a newline,
          /// which an unbound (`null`) Enter would.
          IgnoreSendWhileQuestionPending,
@@ -183,10 +183,10 @@ index b09dac7..1e26842 100644
          CycleNextInlineAssist,
          /// Cycles to the previous inline assist suggestion.
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 3d529fd..c132e27 100644
+index 786b31c..50ea12c 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -110,6 +110,7 @@ pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis
+@@ -111,6 +111,7 @@ pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis
  
  pub(crate) mod elicitation;
  mod message_queue;
@@ -194,7 +194,7 @@ index 3d529fd..c132e27 100644
  mod session_stats;
  mod thread_search_bar;
  mod thread_view;
-@@ -1919,6 +1920,7 @@ impl ConversationView {
+@@ -1920,6 +1921,7 @@ impl ConversationView {
                      active.update(cx, |active, cx| {
                          for index in new_entries {
                              active.sync_elicitation_state_for_entry(index, window, cx);
@@ -202,7 +202,7 @@ index 3d529fd..c132e27 100644
                          }
                          active.sync_editor_mode(cx);
                          active.sync_generating_indicator(cx);
-@@ -4151,6 +4153,14 @@ pub(crate) mod tests {
+@@ -4171,6 +4173,14 @@ pub(crate) mod tests {
  
      use super::*;
  
@@ -215,8 +215,8 @@ index 3d529fd..c132e27 100644
 +    mod recall_end_point_tests;
 +
      #[test]
-     fn test_data_retention_error_maps_from_provider_error() {
-         // The agent wraps the provider error in a fresh `anyhow::Error`, so
+     fn test_thread_error_protocol_codes_preserve_context_and_data() {
+         let data = json!({"detail": {"retry": false, "values": [1, 2]}});
 diff --git a/crates/agent_ui/src/conversation_view/sent_history.rs b/crates/agent_ui/src/conversation_view/sent_history.rs
 new file mode 100644
 index 0000000..b8350f1
@@ -2137,7 +2137,7 @@ index 0000000..949d577
 +    assert_eq!(composer_text(&view, cx), "my draft");
 +}
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 50c7d42..427e1f7 100644
+index 5bae78c..c64f926 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -1,5 +1,6 @@
@@ -2146,9 +2146,9 @@ index 50c7d42..427e1f7 100644
 +    DEFAULT_THREAD_TITLE, RecallNewerMessage, RecallOlderMessage, SelectPermissionGranularity,
 +    conversation_view::sent_history::{Recall, SentMessageHistory},
      conversation_view::thread_search_bar::{ThreadSearchBar, ThreadSearchBarEvent},
+     entry_view_state::TERMINAL_CONTENT_TOP_PADDING,
      open_abs_path_at_point, project_path_for_file_link,
-     thread_metadata_store::{ThreadId, ThreadMetadataStore},
-@@ -60,6 +61,11 @@ use super::*;
+@@ -61,6 +62,11 @@ use super::*;
  
  const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/articles/15425996-data-retention-practices-for-mythos-class-models";
  
@@ -2160,7 +2160,7 @@ index 50c7d42..427e1f7 100644
  #[derive(Default)]
  struct ThreadFeedbackState {
      feedback: Option<ThreadFeedback>,
-@@ -612,6 +618,10 @@ pub struct ThreadView {
+@@ -613,6 +619,10 @@ pub struct ThreadView {
      pub should_be_following: bool,
      pub editing_message: Option<usize>,
      pub message_queue: MessageQueue,
@@ -2171,7 +2171,7 @@ index 50c7d42..427e1f7 100644
      pub turn_fields: TurnFields,
      pub discarded_partial_edits: HashSet<acp_v2::ToolCallId>,
      pub is_loading_contents: bool,
-@@ -982,7 +992,9 @@ impl ThreadView {
+@@ -983,7 +993,9 @@ impl ThreadView {
          }
  
          subscriptions.push(cx.observe(&message_editor, |this, editor, cx| {
@@ -2182,7 +2182,7 @@ index 50c7d42..427e1f7 100644
                  this._draft_resolve_task.take();
                  return;
              }
-@@ -1000,7 +1012,9 @@ impl ThreadView {
+@@ -1001,7 +1013,9 @@ impl ThreadView {
                      None
                  };
                  this.update(cx, |this, cx| {
@@ -2193,7 +2193,7 @@ index 50c7d42..427e1f7 100644
                          return;
                      }
                      this.thread.update(cx, |thread, cx| {
-@@ -1056,6 +1070,8 @@ impl ThreadView {
+@@ -1057,6 +1071,8 @@ impl ThreadView {
              should_be_following: false,
              editing_message: None,
              message_queue: MessageQueue::default(),
@@ -2202,7 +2202,7 @@ index 50c7d42..427e1f7 100644
              turn_fields: TurnFields::default(),
              discarded_partial_edits: HashSet::default(),
              is_loading_contents: false,
-@@ -1181,7 +1197,13 @@ impl ThreadView {
+@@ -1182,7 +1198,13 @@ impl ThreadView {
                  self.run_local_command(*command, window, cx);
              }
              MessageEditorEvent::InputAttempted { .. } => {}
@@ -2217,7 +2217,7 @@ index 50c7d42..427e1f7 100644
          }
      }
  
-@@ -1784,6 +1806,7 @@ impl ThreadView {
+@@ -1803,6 +1825,7 @@ impl ThreadView {
      }
  
      pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2225,7 +2225,7 @@ index 50c7d42..427e1f7 100644
          if self.message_editor.read(cx).editor().read(cx).read_only(cx) {
              self.handle_thread_error(
                  anyhow!(
-@@ -2819,6 +2842,207 @@ impl ThreadView {
+@@ -2833,6 +2856,207 @@ impl ThreadView {
          self.move_queued_message_to_main_editor(last_id, None, None, window, cx);
      }
  
@@ -2433,7 +2433,7 @@ index 50c7d42..427e1f7 100644
      // editor methods
  
      pub fn expand_message_editor(
-@@ -4993,6 +5217,8 @@ impl ThreadView {
+@@ -5007,6 +5231,8 @@ impl ThreadView {
              .bg(editor_bg_color)
              .justify_center()
              .on_action(cx.listener(Self::handle_message_editor_move_up))

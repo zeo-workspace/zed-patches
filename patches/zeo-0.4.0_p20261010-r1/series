@@ -78,6 +78,14 @@
 # sidebar.rs (0028-0030) and the keymaps (0035, 0043, 0044) are generated on
 # top of it (story 032).
 0049-agent-sidebar-pinned-section.patch
+# 0061: every agent server Zeo starts gets ZEO_THREAD=1 in its environment.
+# zeo-systray's hook fires for every Claude Code process on the machine, and
+# only a session Zeo started has a thread its tray link (0024) can open; the
+# marker reaches the hook through the adapter and Claude Code, which both pass
+# their environment on. Added in CustomAgentServer::connect, beside NO_BROWSER,
+# the one map every local start passes through. UNGROUPED like 0024; its tests
+# sit in 0057's lifecycle file, whose fixture spawns a real agent (story 050).
+0061-agent-mark-agent-servers-with-zeo-thread.patch
 
 # @feature: claude-agent-acp-plus
 0001-force-enable-claude-agent-acp-plus.patch
@@ -283,7 +291,16 @@
 # Selected and, under Archived, Delete Selected through 0042's prompt. No
 # migration, no store change. After 0042, whose panel and delete path it
 # changes, so it rides this flag BY DEPENDENCY (story 034).
-# 0053-agent-tasks-panel-polish.patch -- held out of -r1: story 034 still in progress
+0053-agent-tasks-panel-polish.patch
+# 0056: _claude/tasks version 2 (claude-agent-acp-plus >= 0.26.0) in Zeo -- a
+# tasks card row expands to show what the task runs and its last output lines;
+# Open Log saves a shell task's output and opens it read-only, Open Thread shows
+# a subagent's thread; a task's log is kept in Zeo's data directory (dir 0700,
+# file 0600, atomic replace, 1 MiB cap) with its history record, deleted with
+# it and swept when orphaned. Migration: HISTORY_MIGRATIONS step 4, log_bytes.
+# After 0053, the last task patch, whose card, panel, store and delete paths it
+# extends, so it rides this flag BY DEPENDENCY (story 041).
+0056-agent-task-output-and-logs.patch
 # 0043: while the agent waits on an answer to its question (0027's card,
 # 0030's pending state), Enter and the send chords do nothing in the
 # composer -- no send, no newline -- under the new question_pending key
@@ -307,6 +324,35 @@
 # the assistant-message path). Pure Zed, so it rides this flag BY CHOICE, like
 # 0014 and 0026 (story 020).
 0045-slash-command-opens-new-thread.patch
+# 0054: a Run button left of 0045's New Thread button opens a new thread with
+# the same agent and SENDS the clicked block's command (only that block's); the
+# markdown hook now takes a list of actions. Run's first message alone skips the
+# slash-command check, since a new session has advertised no commands yet.
+# Pure Zed, so it rides this flag BY CHOICE, like 0043 and 0045 (story 035).
+0054-slash-command-run-button.patch
+# 0055: Decline on an AskUserQuestion card asks "Skip this question?" only when
+# something was typed or picked (compared with what the card first showed); a
+# declined question leaves a muted "Skipped" line. Other forms are unchanged.
+# Pure Zed, so it rides this flag BY CHOICE, like 0043 and 0045 (story 035).
+0055-question-decline-asks-first.patch
+# 0059: boolean config options -- Fast mode today, Ultracode next -- are scoped
+# to the session they were flipped in: 0010's Shift-click no longer persists one
+# as the entry default, and 0036 neither records one nor restores a recorded one
+# on reopen. List options keep both. Pure Zed, so it rides this flag BY CHOICE.
+0059-agent-boolean-config-options-are-session-scoped.patch
+# 0060: entering the context ring sends _claude/usage/refresh to an agent that
+# advertises _claude/usage (claude-agent-acp-plus), bounded to one request in
+# flight and one per 5 s, and the tooltip's 5-hour, weekly and model-scoped rows
+# follow the thread while it is open. The 30 s passive poll is the adapter's.
+0060-agent-refresh-account-quota-on-ring-hover.patch
+# 0062: `git worktree add` is refused when the repository's own git config
+# names a program the checkout would run -- includeIf, a filter driver, a Git
+# LFS custom transfer agent, standalone agent or extension -- or cannot be read;
+# the error names the key and says to move it to the global config or remove
+# it, and nothing is created. VS Code's Claude extension (2.1.289-2.1.296)
+# refuses the same keys and switches filters off instead of refusing them.
+# Pure Zed, so it rides this flag BY CHOICE (PARITY-REPORT item 105).
+0062-git-refuse-worktree-when-repo-config-can-run-programs.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
@@ -319,6 +365,25 @@
 # REQUIRED_USE ties to it, and not claude-code-ide. 0050/0051 apply on top of it
 # unchanged, with or without it.
 0052-devtools-bridge.patch
+
+# @feature: ai-jail
+# @default: off
+# 0057: the Agent Sandbox settings (story 043) -- Zeo starts the Claude adapters
+# of a project through ai-jail, with a command it builds from user-only settings,
+# and refuses to start them when the jail is on and unusable. Its own group, after
+# devtools-bridge and before test; USE ai-jail is off by default, so the portable
+# builds skip it (@default: off). 0050/0051 apply on top of it, with or without it.
+0057-agent-sandbox-settings.patch
+
+# @feature: browser-extension
+# 0058: the browser sidebar (story 045) -- zeo-browser, a local Chrome/Firefox
+# extension, shows and drives the same agent thread through the new
+# zeo-browser-host native-messaging relay and a v2 session protocol on 0052's
+# devtools bridge socket, after a one-time approval in Zeo. Its own group, after
+# devtools-bridge and ai-jail and before test: USE browser-extension (default on)
+# needs devtools-bridge, which the ebuild's REQUIRED_USE ties to it. It applies on
+# top of 0052 with or without 0057, and 0050/0051 apply on top of it unchanged.
+0058-browser-extension.patch
 
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
