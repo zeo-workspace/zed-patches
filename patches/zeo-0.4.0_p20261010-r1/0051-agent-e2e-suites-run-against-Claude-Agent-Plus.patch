@@ -242,10 +242,10 @@ index 9fe0e17..a5b2721 100644
              }
          })
 diff --git a/crates/agent_servers/src/agent_servers.rs b/crates/agent_servers/src/agent_servers.rs
-index 6de17a2..be3970e 100644
+index d07ab6f..2ce8763 100644
 --- a/crates/agent_servers/src/agent_servers.rs
 +++ b/crates/agent_servers/src/agent_servers.rs
-@@ -6,6 +6,8 @@ pub mod thread_config_store;
+@@ -10,6 +10,8 @@ pub mod thread_config_store;
  
  #[cfg(any(test, feature = "test-support"))]
  pub mod e2e_tests;

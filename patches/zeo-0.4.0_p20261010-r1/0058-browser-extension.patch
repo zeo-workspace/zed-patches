@@ -125,7 +125,7 @@ index 0d66c5b..8cf7886 100644
      "crates/zlog",
      "crates/zlog_settings",
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 5748fb9..c1be0f5 100644
+index 6927107..bbad7f4 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -8,6 +8,8 @@ mod diff;
@@ -138,10 +138,10 @@ index 5748fb9..c1be0f5 100644
  pub mod notices;
  pub mod prompt_capabilities;
 diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
-index bf648d3..6bdc8a6 100644
+index ce73495..fba0004 100644
 --- a/crates/acp_thread/src/connection.rs
 +++ b/crates/acp_thread/src/connection.rs
-@@ -859,7 +859,7 @@ mod test_support {
+@@ -873,7 +873,7 @@ mod test_support {
      use gpui::{AppContext as _, WeakEntity};
      use parking_lot::Mutex;
  
@@ -150,7 +150,7 @@ index bf648d3..6bdc8a6 100644
  
      use super::*;
  
-@@ -917,6 +917,7 @@ mod test_support {
+@@ -931,6 +931,7 @@ mod test_support {
          receipt_prompt: Arc<Mutex<Option<Vec<acp_v2::ContentBlock>>>>,
          next_truncate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
          set_title_calls: Arc<Mutex<Vec<(acp_v2::SessionId, SharedString)>>>,
@@ -158,7 +158,7 @@ index bf648d3..6bdc8a6 100644
          supports_receipt_submissions: bool,
          supports_retry: bool,
          supports_load_session: bool,
-@@ -947,6 +948,7 @@ mod test_support {
+@@ -961,6 +962,7 @@ mod test_support {
                  receipt_prompt: Default::default(),
                  next_truncate: Default::default(),
                  set_title_calls: Default::default(),
@@ -166,7 +166,7 @@ index bf648d3..6bdc8a6 100644
                  permission_requests: HashMap::default(),
                  sessions: Arc::default(),
                  supports_receipt_submissions: false,
-@@ -994,6 +996,11 @@ mod test_support {
+@@ -1008,6 +1010,11 @@ mod test_support {
              self.receipt_prompt.lock().take()
          }
  
@@ -178,7 +178,7 @@ index bf648d3..6bdc8a6 100644
          pub fn take_set_title_calls(&self) -> Vec<(acp_v2::SessionId, SharedString)> {
              std::mem::take(&mut *self.set_title_calls.lock())
          }
-@@ -1230,9 +1237,10 @@ mod test_support {
+@@ -1244,9 +1251,10 @@ mod test_support {
                      } else {
                          None
                      };
@@ -190,7 +190,7 @@ index bf648d3..6bdc8a6 100644
                                  .update(cx, |thread, cx| {
                                      thread.request_tool_call_authorization(
                                          tool_call.clone().into(),
-@@ -1242,6 +1250,7 @@ mod test_support {
+@@ -1256,6 +1264,7 @@ mod test_support {
                                      )
                                  })??
                                  .await;
@@ -6655,7 +6655,7 @@ index c132e27..b46b20b 100644
      selection: Option<&thread_view::PermissionSelection>,
      is_allow: bool,
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index c9525ff..4c260c4 100644
+index 9568638..b502e9e 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -1276,7 +1276,7 @@ impl ThreadView {
@@ -7006,7 +7006,7 @@ index c9525ff..4c260c4 100644
      pub fn cancel_generation(&mut self, cx: &mut Context<Self>) {
          self.thread_retry_status.take();
          self.thread_error.take();
-@@ -14694,6 +14810,7 @@ pub(crate) fn open_link(
+@@ -14726,6 +14842,7 @@ pub(crate) fn open_link(
              MentionUri::TerminalSelection { .. } => {}
              MentionUri::GitDiff { .. } => {}
              MentionUri::MergeConflict { .. } => {}

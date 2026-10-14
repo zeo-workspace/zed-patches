@@ -2037,6 +2037,15 @@ src_prepare() {
 			# typed or picked, and leaves a "Skipped" line (story 035). Pure Zed,
 			# BY CHOICE.
 			"${FILESDIR}/0055-question-decline-asks-first.patch"
+			# 0059: boolean config options (Fast mode, Ultracode) are
+			# session-scoped: no Shift-click default, and a reopened thread does
+			# not restore them from 0036's record. Pure Zed, BY CHOICE.
+			"${FILESDIR}/0059-agent-boolean-config-options-are-session-scoped.patch"
+			# 0060: hovering the context ring asks the adapter for the account
+			# quota now (_claude/usage/refresh) and the tooltip follows the
+			# answer live. Gated on the adapter advertising _claude/usage; an
+			# older adapter is never sent the request. Pure Zed, BY CHOICE.
+			"${FILESDIR}/0060-agent-refresh-account-quota-on-ring-hover.patch"
 		)
 	fi
 

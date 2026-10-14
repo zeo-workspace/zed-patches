@@ -327,6 +327,16 @@
 # declined question leaves a muted "Skipped" line. Other forms are unchanged.
 # Pure Zed, so it rides this flag BY CHOICE, like 0043 and 0045 (story 035).
 0055-question-decline-asks-first.patch
+# 0059: boolean config options -- Fast mode today, Ultracode next -- are scoped
+# to the session they were flipped in: 0010's Shift-click no longer persists one
+# as the entry default, and 0036 neither records one nor restores a recorded one
+# on reopen. List options keep both. Pure Zed, so it rides this flag BY CHOICE.
+0059-agent-boolean-config-options-are-session-scoped.patch
+# 0060: entering the context ring sends _claude/usage/refresh to an agent that
+# advertises _claude/usage (claude-agent-acp-plus), bounded to one request in
+# flight and one per 5 s, and the tooltip's 5-hour, weekly and model-scoped rows
+# follow the thread while it is open. The 30 s passive poll is the adapter's.
+0060-agent-refresh-account-quota-on-ring-hover.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch

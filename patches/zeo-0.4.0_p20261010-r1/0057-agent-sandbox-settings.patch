@@ -10782,10 +10782,10 @@ index a7e6306..6b8fc54 100644
  tempfile.workspace = true
 +workspace = { workspace = true, features = ["test-support"] }
 diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
-index 5356897..bb1bdd8 100644
+index 49c25a1..ade483c 100644
 --- a/crates/agent_servers/src/acp.rs
 +++ b/crates/agent_servers/src/acp.rs
-@@ -768,22 +768,35 @@ impl AgentSessionList for AcpSessionList {
+@@ -773,22 +773,35 @@ impl AgentSessionList for AcpSessionList {
      }
  }
  
@@ -10824,7 +10824,7 @@ index 5356897..bb1bdd8 100644
          cx,
      )
      .await?;
-@@ -986,6 +999,9 @@ impl AcpConnection {
+@@ -991,6 +1004,9 @@ impl AcpConnection {
          self.debug_log.subscribe()
      }
  
@@ -10834,7 +10834,7 @@ index 5356897..bb1bdd8 100644
      pub async fn stdio(
          agent_id: AgentId,
          project: Entity<Project>,
-@@ -995,6 +1011,30 @@ impl AcpConnection {
+@@ -1000,6 +1016,30 @@ impl AcpConnection {
          default_config_options: HashMap<String, AgentConfigOptionValue>,
          cx: &mut AsyncApp,
      ) -> Result<Self> {
@@ -10865,7 +10865,7 @@ index 5356897..bb1bdd8 100644
          let original_command = command.clone();
          let transport::StdioProcess {
              mut child,
-@@ -1002,7 +1042,7 @@ impl AcpConnection {
+@@ -1007,7 +1047,7 @@ impl AcpConnection {
              outgoing,
              stderr,
              debug_log,
@@ -10874,7 +10874,7 @@ index 5356897..bb1bdd8 100644
          let sessions = Rc::new(RefCell::new(HashMap::default()));
  
          let (release_channel, version): (Option<&str>, String) = cx.update(|cx| {
-@@ -1032,6 +1072,8 @@ impl AcpConnection {
+@@ -1037,6 +1077,8 @@ impl AcpConnection {
          let connection_future =
              connect_client_future("zed", transport, dispatch_tx.clone(), connection_tx);
          let io_task = cx.background_spawn(async move {
@@ -13035,10 +13035,10 @@ index b7b699b..173fd6d 100644
  mod devtools_delivery_tests;
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index ee9c327..c9525ff 100644
+index 6005a3c..9568638 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -6008,6 +6008,22 @@ impl ThreadView {
+@@ -6015,6 +6015,22 @@ impl ThreadView {
          )
      }
  
