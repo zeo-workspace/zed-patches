@@ -158,7 +158,38 @@ lock_answers() {
 	((port > 0 && port < 65536)) || return 1
 	# Passed as an argument rather than spliced into the string, so the guard above
 	# is the second line of defence and not the only one.
+	# shellcheck disable=SC2016  # $1 must expand in the child shell, not here
 	timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' _ "${port}" 2>/dev/null
+}
+
+# lock_is_ours <lock> -- whether the lock was written by a Zeo or Zed process.
+#
+# Asked of the process, not of the label. Until 2026-10-07 patch 0002 wrote
+# ideName "Zed"; since 039ca65 it writes the release channel's display name, so
+# a packaged Zeo writes "Zeo". A guard keyed on "Zed" skipped the running Zeo,
+# reported "no patched Zed is running", and exited 0 -- every live probe from
+# then on was silently static-only. The label is a display string that the
+# rebrand and the release channel are both free to change; the executable that
+# owns the lock's `pid` is what actually identifies us. Both app-editors/zeo and
+# zeo-bin install /usr/libexec/zeo-editor, a cargo build is target/*/zed, and
+# upstream packaging ships zed-editor. A binary replaced by an upgrade while it
+# runs reads back with a " (deleted)" suffix, which is still ours.
+#
+# The label survives only as a fallback, for a lock with no pid or a pid whose
+# /proc entry cannot be read (gone, another user's, hidden by a pid namespace).
+# There it accepts both names, because the one written depends on the build.
+lock_is_ours() {
+	local lock="$1" pid="" exe="" ide=""
+	pid="$(jq -r '.pid // ""' "${lock}" 2>/dev/null)" || pid=""
+	if [[ "${pid}" =~ ^[0-9]+$ ]] && exe="$(readlink "/proc/${pid}/exe" 2>/dev/null)" && [[ -n "${exe}" ]]; then
+		exe="${exe% (deleted)}"
+		case "${exe##*/}" in
+		zeo | zeo-editor | zed | zed-editor) return 0 ;;
+		*) return 1 ;;
+		esac
+	fi
+	ide="$(jq -r '.ideName // ""' "${lock}" 2>/dev/null)" || ide=""
+	[[ "${ide}" == "Zeo" || "${ide}" == "Zed" ]]
 }
 
 # probe_handshake <port> <token> -- the 101 must name the subprotocol back, and a
@@ -224,16 +255,16 @@ check_live() {
 	# own header already reserves: "0 contract intact (or not askable)".
 	#
 	# Ours AND answering, not merely answering: another IDE's live lock would
-	# otherwise be selected and then rejected by the ideName guard, skipping a
-	# probe a running Zed two entries later could have passed.
-	local candidate lock="" port token ide="" stale=0 foreign=0
+	# otherwise be selected and then rejected, skipping a probe a running Zeo two
+	# entries later could have passed. "Ours" is decided by lock_is_ours, from the
+	# owning process's executable rather than the ideName label.
+	local candidate lock="" port token stale=0 foreign=0
 	for candidate in "${locks[@]}"; do
 		if ! lock_answers "${candidate}"; then
 			stale=$((stale + 1))
 			continue
 		fi
-		ide="$(jq -r '.ideName // ""' "${candidate}" 2>/dev/null)" || ide=""
-		if [[ "${ide}" != "Zed" ]]; then
+		if ! lock_is_ours "${candidate}"; then
 			foreign=$((foreign + 1))
 			continue
 		fi
@@ -241,7 +272,7 @@ check_live() {
 		break
 	done
 	if [[ -z "${lock}" ]]; then
-		skip "$(printf '%d lock files, none of them ours and answering (%d stale, %d another IDE) -- no patched Zed is running' \
+		skip "$(printf '%d lock files, none of them ours and answering (%d stale, %d owned by a process that is not Zeo/Zed) -- no patched Zeo is running' \
 			"${#locks[@]}" "${stale}" "${foreign}")"
 		return 0
 	fi

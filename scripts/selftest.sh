@@ -1337,12 +1337,17 @@ while True:
 	printf '%s' "${pid}"
 }
 
-# make_lock <ide-dir> <port> [ideName] — one ~/.claude/ide lock file.
+# make_lock <ide-dir> <port> [ideName] [pid|none] — one ~/.claude/ide lock file.
+#
+# The default pid is 1 because its /proc/1/exe is root's and unreadable here, so
+# the script falls back to the ideName label -- the path every case written
+# before the executable check existed was exercising. `none` omits the field.
 make_lock() {
-	local dir="$1" port="$2" ide="${3:-Zed}"
+	local dir="$1" port="$2" ide="${3:-Zed}" pid="${4:-1}" pid_field
 	mkdir -p "${dir}"
-	printf '{"pid":1,"ideName":"%s","transport":"ws","useWebSocket":true,"authToken":"fixture-token","workspaceFolders":["/tmp"]}\n' \
-		"${ide}" >"${dir}/${port}.lock"
+	if [[ "${pid}" == none ]]; then pid_field=""; else pid_field="\"pid\":${pid},"; fi
+	printf '{%s"ideName":"%s","transport":"ws","useWebSocket":true,"authToken":"fixture-token","workspaceFolders":["/tmp"]}\n' \
+		"${pid_field}" "${ide}" >"${dir}/${port}.lock"
 }
 
 # run_protocol <config-dir> — check-protocol.sh against a fixture lock directory.
@@ -1452,6 +1457,70 @@ test_protocol_still_reports_drift_on_an_answering_lock() {
 	assert_status 1 "${status}" &&
 		assert_contains "${out}" "DRIFT" &&
 		assert_contains "${out}" "no websocket upgrade" && ok
+	rm -rf "${tmp}"
+}
+
+test_protocol_skips_a_zeo_label_on_a_foreign_process() {
+	case_start "protocol: a lock labelled Zeo whose pid is not a Zeo/Zed executable is skipped"
+	local tmp ide out status pid live
+	tmp="$(mktemp -d)"
+	ide="${tmp}/ide"
+	live="$(dead_port 64000)"
+	pid="$(start_listener "${live}" "${tmp}/ready")"
+	# The listener is python3: alive, readable, answering, and not us. The label
+	# says Zeo, which is exactly what the executable check must not believe.
+	make_lock "${ide}" "${live}" "Zeo" "${pid}"
+
+	out="$(run_protocol "${tmp}")"
+	status=$?
+	kill "${pid}" 2>/dev/null
+
+	assert_status 0 "${status}" &&
+		assert_contains "${out}" "1 owned by a process that is not Zeo/Zed" &&
+		assert_not_contains "${out}" "port ${live}:" && ok
+	rm -rf "${tmp}"
+}
+
+test_protocol_trusts_the_executable_over_the_label() {
+	case_start "protocol: a lock whose pid runs zeo-editor is probed whatever its ideName says"
+	local tmp ide out status pid fake live
+	tmp="$(mktemp -d)"
+	ide="${tmp}/ide"
+	live="$(dead_port 64000)"
+	pid="$(start_listener "${live}" "${tmp}/ready")"
+	# A copy of sleep named zeo-editor: /proc/<pid>/exe resolves to that name,
+	# which is all the check reads. Started directly, not through a substitution,
+	# so no pipe is held open by the background child.
+	cp "$(command -v sleep)" "${tmp}/zeo-editor"
+	"${tmp}/zeo-editor" 30 >/dev/null 2>&1 &
+	fake=$!
+	make_lock "${ide}" "${live}" "Visual Studio Code" "${fake}"
+
+	out="$(run_protocol "${tmp}")"
+	status=$?
+	kill "${pid}" "${fake}" 2>/dev/null
+
+	# The listener does not speak websocket, so reaching the probe means DRIFT:
+	# what this case proves is that the probe was reached at all.
+	assert_contains "${out}" "port ${live}:" &&
+		assert_not_contains "${out}" "not Zeo/Zed" && ok
+	rm -rf "${tmp}"
+}
+
+test_protocol_falls_back_to_either_label_without_a_pid() {
+	case_start "protocol: a lock with no pid falls back to the label, and Zeo counts as ours"
+	local tmp ide out status pid live
+	tmp="$(mktemp -d)"
+	ide="${tmp}/ide"
+	live="$(dead_port 64000)"
+	pid="$(start_listener "${live}" "${tmp}/ready")"
+	make_lock "${ide}" "${live}" "Zeo" none
+
+	out="$(run_protocol "${tmp}")"
+	status=$?
+	kill "${pid}" 2>/dev/null
+
+	assert_contains "${out}" "port ${live}:" && ok
 	rm -rf "${tmp}"
 }
 
@@ -2652,6 +2721,9 @@ main() {
 		test_protocol_skips_when_no_lock_answers
 		test_protocol_refuses_a_lock_name_that_is_not_a_port
 		test_protocol_still_reports_drift_on_an_answering_lock
+		test_protocol_skips_a_zeo_label_on_a_foreign_process
+		test_protocol_trusts_the_executable_over_the_label
+		test_protocol_falls_back_to_either_label_without_a_pid
 
 		test_status_installed_agreeing_is_ok
 		test_status_installed_behind_is_drift
