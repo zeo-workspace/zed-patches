@@ -1573,6 +1573,14 @@ inherit cargo check-reqs desktop flag-o-matic llvm-r1 toolchain-funcs xdg
 # when those two gain an arm64 build; nothing else here is amd64-bound.
 DESCRIPTION="Zeo - the Zed editor, rebranded, with the bentoo patch series"
 HOMEPAGE="https://github.com/zeo-workspace/zeo https://zed.dev"
+# The Firefox build of zeo-browser (story 045), installed system-wide so Firefox
+# loads it without a manual step. Built reproducibly from zed/zeo-browser
+# (`npm run build` -> dist/zeo-browser-firefox.zip, renamed .xpi); the release
+# story publishes it as a zeo-workspace/zeo release asset under this name.
+# cargo_src_unpack hands it to unpack, which skips an .xpi and leaves it in
+# DISTDIR for src_install.
+ZEO_BROWSER_PV="0.1.0"
+
 SRC_URI="
 	https://github.com/zed-industries/zed/archive/${EGIT_COMMIT}.tar.gz -> zed-${EGIT_COMMIT}.tar.gz
 	amd64? (
@@ -1583,7 +1591,10 @@ SRC_URI="
 		https://github.com/zed-industries/livekit-rust-sdks/releases/download/webrtc-${WEBRTC_COMMIT}/webrtc-linux-arm64-release.zip ->
 			webrtc-${WEBRTC_COMMIT}-linux-arm64-release.zip
 	)
-	${CARGO_CRATE_URIS}"
+	${CARGO_CRATE_URIS}
+	browser-extension? (
+		https://github.com/zeo-workspace/zeo/releases/download/zeo-browser-${ZEO_BROWSER_PV}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi
+	)"
 
 # The upstream tarball unpacks to zed-<commit>; ${PN} is "zeo" here, so the
 # directory must be named explicitly rather than derived from it.
@@ -1639,18 +1650,22 @@ KEYWORDS="~amd64"
 # Each installs a binary under a name app-editors/zed uses -- collab,
 # zed-extension, zed-remote-server -- and renaming Zed's server infrastructure is
 # not what a rebrand of the editor is for.
-IUSE="+X ai-jail +claude-agent-acp-plus +claude-agent-acp-tui +claude-code-ide
-	+devtools-bridge inspector +mimalloc neovim screen-capture test tracy +wayland"
+IUSE="+X ai-jail +browser-extension +claude-agent-acp-plus +claude-agent-acp-tui
+	+claude-code-ide +devtools-bridge inspector +mimalloc neovim screen-capture test
+	tracy +wayland"
 # BENTOO-DIVERGENCE: REQUIRED_USE - the || ( X wayland ) clause, which follows
 # from the X and wayland flags this overlay adds (see the IUSE tag). ::gentoo
 # exposes neither, so it has nothing to constrain. ai-jail? requires the agent
 # it wraps, and the group 0057 is generated on top of (devtools-bridge's 0052).
 # devtools-bridge? requires the group 0052 is generated on top of.
+# browser-extension? requires devtools-bridge: the browser reaches Zeo through
+# 0052's bridge socket, and 0058 is generated on top of it.
 # test? requires the adapter flags the test-only patches (0050, 0051) are
 # generated on top of.
 REQUIRED_USE="
 	|| ( X wayland )
 	ai-jail? ( claude-agent-acp-plus devtools-bridge )
+	browser-extension? ( devtools-bridge )
 	devtools-bridge? ( claude-agent-acp-plus )
 	test? ( claude-agent-acp-plus claude-code-ide )
 "
@@ -2267,6 +2282,12 @@ src_install() {
 	newicon -s 512 crates/zed/resources/app-icon-zeo.png "${APP_ID}.png"
 	newicon -s 1024 crates/zed/resources/app-icon-zeo@2x.png "${APP_ID}.png"
 	domenu "${S}/${APP_ID}.desktop"
+
+	if use browser-extension; then
+		# System scope, keyed by Firefox's application ID: every profile loads it.
+		insinto "/usr/$(get_libdir)/mozilla/extensions/{ec8030f7-c20a-464f-9b0e-13a3a9e97384}"
+		newins "${DISTDIR}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi" zeo-browser@zeo.dev.xpi
+	fi
 }
 
 src_test () {

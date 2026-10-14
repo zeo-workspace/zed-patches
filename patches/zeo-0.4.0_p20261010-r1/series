@@ -349,6 +349,16 @@
 # builds skip it (@default: off). 0050/0051 apply on top of it, with or without it.
 0057-agent-sandbox-settings.patch
 
+# @feature: browser-extension
+# 0058: the browser sidebar (story 045) -- zeo-browser, a local Chrome/Firefox
+# extension, shows and drives the same agent thread through the new
+# zeo-browser-host native-messaging relay and a v2 session protocol on 0052's
+# devtools bridge socket, after a one-time approval in Zeo. Its own group, after
+# devtools-bridge and ai-jail and before test: USE browser-extension (default on)
+# needs devtools-bridge, which the ebuild's REQUIRED_USE ties to it. It applies on
+# top of 0052 with or without 0057, and 0050/0051 apply on top of it unchanged.
+0058-browser-extension.patch
+
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
 # ebuild applies them under USE=test alone. They are generated on top of every
