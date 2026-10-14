@@ -42,10 +42,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
 diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
-index 5356897..16a1c24 100644
+index 53a82ed..d4990ec 100644
 --- a/crates/agent_servers/src/acp.rs
 +++ b/crates/agent_servers/src/acp.rs
-@@ -1674,9 +1674,13 @@ impl AcpConnection {
+@@ -1780,9 +1780,13 @@ impl AcpConnection {
                          return None;
                      }
                      let config_id = option.config_id.0.as_ref();

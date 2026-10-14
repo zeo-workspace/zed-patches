@@ -72,7 +72,7 @@ touch that file.)
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 912fcf8..f8bddb3 100644
+index 393517e..461b821 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -462,11 +462,13 @@ dependencies = [
@@ -3419,7 +3419,7 @@ index 0000000..498f40f
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 947b414..14d97c1 100644
+index 1d59119..a340b53 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -25,6 +25,7 @@ mod model_selector;

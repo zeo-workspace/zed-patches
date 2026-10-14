@@ -84,7 +84,7 @@ its own unit, integration and Playwright suites in zeo-devtools.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 21f1957..c986a62 100644
+index 9dc4d35..c630b3b 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -5008,6 +5008,32 @@ dependencies = [
@@ -120,7 +120,7 @@ index 21f1957..c986a62 100644
  [[package]]
  name = "diagnostics"
  version = "0.1.0"
-@@ -22475,6 +22501,7 @@ dependencies = [
+@@ -22473,6 +22499,7 @@ dependencies = [
   "debugger_tools",
   "debugger_ui",
   "dev_container",
@@ -149,10 +149,10 @@ index 5d1d0bb..8f4a491 100644
  edit_prediction = { path = "crates/edit_prediction" }
  edit_prediction_context = { path = "crates/edit_prediction_context" }
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index 882a211..d76f265 100644
+index c03170a..9d0b00e 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -3068,4 +3068,10 @@
+@@ -3075,4 +3075,10 @@
        "enabled": false,
      },
    },
@@ -164,7 +164,7 @@ index 882a211..d76f265 100644
 +  },
  }
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 6329fbb..6927107 100644
+index 90d643f..76f98f7 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -7,6 +7,8 @@ pub mod content;
@@ -177,7 +177,7 @@ index 6329fbb..6927107 100644
  pub mod prompt_capabilities;
  mod submission;
 diff --git a/crates/acp_thread/src/mention.rs b/crates/acp_thread/src/mention.rs
-index 3fdd66a..3841073 100644
+index b4304a6..8c02576 100644
 --- a/crates/acp_thread/src/mention.rs
 +++ b/crates/acp_thread/src/mention.rs
 @@ -74,6 +74,16 @@ pub enum MentionUri {
@@ -528,10 +528,10 @@ index 0000000..68fb3f2
 +    assert_eq!(restored.name(), uri.name(), "the same chip label");
 +}
 diff --git a/crates/agent/src/thread.rs b/crates/agent/src/thread.rs
-index 9b38311..3cd25c3 100644
+index 777933d..e5754ae 100644
 --- a/crates/agent/src/thread.rs
 +++ b/crates/agent/src/thread.rs
-@@ -485,6 +485,24 @@ impl UserMessage {
+@@ -484,6 +484,24 @@ impl UserMessage {
                              let label = format!("{} ({})", name, source);
                              write!(&mut skills_context, "\nSkill: {}\n{}\n", label, content).ok();
                          }
@@ -557,10 +557,10 @@ index 9b38311..3cd25c3 100644
  
                      language_model::MessageContent::Text(uri.as_link().to_string())
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 0d70217..cae44a3 100644
+index b5871e1..a0447c0 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2449,6 +2449,34 @@ impl AgentPanel {
+@@ -2450,6 +2450,34 @@ impl AgentPanel {
          );
      }
  
@@ -595,7 +595,7 @@ index 0d70217..cae44a3 100644
      fn set_selected_agent_and_persist(&mut self, agent: Agent, cx: &mut Context<Self>) {
          if self.selected_agent != agent {
              self.selected_agent = agent.clone();
-@@ -7509,6 +7537,19 @@ impl AgentPanel {
+@@ -7510,6 +7538,19 @@ impl AgentPanel {
          self.set_base_view(thread.into(), true, window, cx);
      }
  
@@ -638,7 +638,7 @@ index 5fa6989..1fa5eb3 100644
          Either::Left((output, _)) => Some(output),
          Either::Right(((), _)) => None,
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 7a10341..b7b699b 100644
+index d8babd2..6fc9ad2 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -11,6 +11,7 @@ mod config_options;
@@ -685,10 +685,10 @@ index 7a10341..b7b699b 100644
  mod tests {
      use super::*;
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 9bec686..6005a3c 100644
+index 324cbce..ce96357 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -14682,6 +14682,20 @@ pub(crate) fn open_link(
+@@ -14700,6 +14700,20 @@ pub(crate) fn open_link(
                  );
              }
              MentionUri::Selection { abs_path: None, .. } => {}
@@ -8036,10 +8036,10 @@ index 0000000..9661076
 +    );
 +}
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index 53e31bd..bec14b4 100644
+index 95876b8..388898c 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -245,6 +245,7 @@ impl VsCodeSettings {
+@@ -246,6 +246,7 @@ impl VsCodeSettings {
              modeline_lines: None,
              feature_flags: None,
              instrumentation: None,
@@ -8048,10 +8048,10 @@ index 53e31bd..bec14b4 100644
      }
  
 diff --git a/crates/settings_content/src/settings_content.rs b/crates/settings_content/src/settings_content.rs
-index 88083da..6cd8ded 100644
+index c97679d..7975d2b 100644
 --- a/crates/settings_content/src/settings_content.rs
 +++ b/crates/settings_content/src/settings_content.rs
-@@ -334,6 +334,23 @@ pub struct SettingsContent {
+@@ -335,6 +335,23 @@ pub struct SettingsContent {
      /// Settings for developer-oriented instrumentation tools (profilers,
      /// tracers, etc.) that can be toggled at runtime.
      pub instrumentation: Option<InstrumentationSettingsContent>,
@@ -8075,7 +8075,7 @@ index 88083da..6cd8ded 100644
  }
  
  /// Configuration for developer-oriented instrumentation tools that collect
-@@ -411,7 +428,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
+@@ -412,7 +429,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
          journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,
          node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
          title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,

@@ -78,7 +78,7 @@ name are invalid. The terminal environment is one helper,
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index f8bddb3..21f1957 100644
+index 461b821..9dc4d35 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -3046,6 +3046,32 @@ version = "0.7.6"
@@ -114,7 +114,7 @@ index f8bddb3..21f1957 100644
  [[package]]
  name = "cli"
  version = "0.1.0"
-@@ -22430,6 +22456,7 @@ dependencies = [
+@@ -22428,6 +22454,7 @@ dependencies = [
   "channel",
   "chrono",
   "clap",
@@ -2271,7 +2271,7 @@ index 0000000..25f28f3
 +    }
 +}
 diff --git a/crates/project/src/project.rs b/crates/project/src/project.rs
-index 9e8fc89..75daeaf 100644
+index fcbe245..d7c2187 100644
 --- a/crates/project/src/project.rs
 +++ b/crates/project/src/project.rs
 @@ -255,6 +255,10 @@ pub struct Project {

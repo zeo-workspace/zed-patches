@@ -314,7 +314,7 @@ index 0000000..eb9f1ff
 +    }
 +}
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index f351519..7e25ad1 100644
+index 55b6c93..e89cdc7 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -1,3 +1,4 @@
@@ -1064,7 +1064,7 @@ index f351519..7e25ad1 100644
  
          let section_start = entries
              .get(..current_position)?
-@@ -5791,6 +6059,27 @@ impl Sidebar {
+@@ -5822,6 +6090,27 @@ impl Sidebar {
          }
      }
  
@@ -1092,7 +1092,7 @@ index f351519..7e25ad1 100644
      fn rename_selected_thread(
          &mut self,
          _: &RenameSelectedThread,
-@@ -5844,7 +6133,7 @@ impl Sidebar {
+@@ -5875,7 +6164,7 @@ impl Sidebar {
                  }
                  ListEntry::Thread(thread) => Sidebar::thread_display_time(&thread.metadata),
                  ListEntry::Terminal(terminal) => terminal.metadata.created_at,
@@ -1101,7 +1101,7 @@ index f351519..7e25ad1 100644
              }
          }
  
-@@ -5902,21 +6191,34 @@ impl Sidebar {
+@@ -5933,21 +6222,34 @@ impl Sidebar {
                      current_header_key = Some(key.clone());
                      None
                  }
@@ -1146,7 +1146,7 @@ index f351519..7e25ad1 100644
                              })
                          }
                      }?;
-@@ -5931,7 +6233,10 @@ impl Sidebar {
+@@ -5962,7 +6264,10 @@ impl Sidebar {
                          status: thread.status,
                          metadata: thread.metadata.clone(),
                          workspace,
@@ -1158,7 +1158,7 @@ index f351519..7e25ad1 100644
                          worktrees: thread
                              .worktrees
                              .iter()
-@@ -6277,6 +6582,13 @@ impl Sidebar {
+@@ -6308,6 +6613,13 @@ impl Sidebar {
          let session_id_for_delete = thread.metadata.session_id.clone();
          let focus_handle = self.focus_handle.clone();
          let rename_title_editor = is_renaming.then(|| self.render_rename_title_editor(cx));
@@ -1172,7 +1172,7 @@ index f351519..7e25ad1 100644
  
          let id = SharedString::from(format!("thread-entry-{}", ix));
  
-@@ -6293,10 +6605,14 @@ impl Sidebar {
+@@ -6324,10 +6636,14 @@ impl Sidebar {
  
          let is_remote = thread.workspace.is_remote(cx);
  
@@ -1191,7 +1191,7 @@ index f351519..7e25ad1 100644
  
          let (icon, icon_svg) = if is_draft {
              (IconName::Circle, None)
-@@ -6321,6 +6637,9 @@ impl Sidebar {
+@@ -6352,6 +6668,9 @@ impl Sidebar {
                  this.custom_icon_from_external_svg(svg)
              })
              .worktrees(worktrees)
@@ -1201,7 +1201,7 @@ index f351519..7e25ad1 100644
              .timestamp(timestamp)
              .highlight_positions(thread.highlight_positions.to_vec())
              .title_generating(title_generating)
-@@ -6374,6 +6693,32 @@ impl Sidebar {
+@@ -6405,6 +6724,32 @@ impl Sidebar {
                          })
                      });
  
@@ -1234,7 +1234,7 @@ index f351519..7e25ad1 100644
                  let contextual_action: Option<AnyElement> = if is_running {
                      Some(
                          IconButton::new("stop-thread", IconName::Stop)
-@@ -6441,6 +6786,7 @@ impl Sidebar {
+@@ -6472,6 +6817,7 @@ impl Sidebar {
                      h_flex()
                          .gap_0p5()
                          .child(rename_button)
@@ -1242,7 +1242,7 @@ index f351519..7e25ad1 100644
                          .when_some(contextual_action, |this, action| this.child(action)),
                  )
              })
-@@ -6484,6 +6830,13 @@ impl Sidebar {
+@@ -6515,6 +6861,13 @@ impl Sidebar {
              ThreadEntryWorkspace::Open(workspace) => Some(workspace.clone()),
              ThreadEntryWorkspace::Closed { .. } => None,
          };
@@ -1256,7 +1256,7 @@ index f351519..7e25ad1 100644
  
          let is_zed_thread = thread.metadata.agent_id.as_ref() == ZED_AGENT_ID.as_ref();
          let can_open_as_markdown = thread.is_live || is_zed_thread;
-@@ -6500,9 +6853,19 @@ impl Sidebar {
+@@ -6531,9 +6884,19 @@ impl Sidebar {
                      let sidebar = sidebar.clone();
                      let active_workspace = active_workspace.clone();
                      let thread_workspace = thread_workspace.clone();
@@ -1276,7 +1276,7 @@ index f351519..7e25ad1 100644
                      ContextMenu::build(_window, cx, move |mut menu, _window, _cx| {
                          menu = menu.entry("Rename Title", None, {
                              let sidebar = sidebar.clone();
-@@ -6548,16 +6911,16 @@ impl Sidebar {
+@@ -6579,16 +6942,16 @@ impl Sidebar {
                              menu = menu.entry("Open Thread as Markdown", None, {
                                  let session_id = session_id.clone();
                                  let markdown_title = markdown_title.clone();
@@ -1297,7 +1297,7 @@ index f351519..7e25ad1 100644
                                                  window,
                                                  cx,
                                              )
-@@ -6582,6 +6945,19 @@ impl Sidebar {
+@@ -6613,6 +6976,19 @@ impl Sidebar {
                              });
                          }
  
@@ -1317,7 +1317,7 @@ index f351519..7e25ad1 100644
                          menu.separator().entry("Archive Thread", None, {
                              let session_id = session_id.clone();
                              move |window, cx| {
-@@ -6786,7 +7162,7 @@ impl Sidebar {
+@@ -6817,7 +7193,7 @@ impl Sidebar {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -1326,7 +1326,7 @@ index f351519..7e25ad1 100644
              self.set_group_expanded(&key, true, cx);
              self.selection = None;
              if let Some(workspace) = self.workspace_for_group(&key, cx) {
-@@ -6812,7 +7188,7 @@ impl Sidebar {
+@@ -6843,7 +7219,7 @@ impl Sidebar {
      ) {
          cx.stop_propagation();
  
@@ -1335,7 +1335,7 @@ index f351519..7e25ad1 100644
              self.set_group_expanded(&key, true, cx);
              self.selection = None;
              if let Some(workspace) = self.workspace_for_group(&key, cx) {
-@@ -7110,22 +7486,39 @@ impl Sidebar {
+@@ -7141,22 +7517,39 @@ impl Sidebar {
          });
      }
  
@@ -1384,7 +1384,7 @@ index f351519..7e25ad1 100644
      fn workspace_for_group(&self, key: &ProjectGroupKey, cx: &App) -> Option<Entity<Workspace>> {
          let mw = self.multi_workspace.upgrade()?;
          let mw = mw.read(cx);
-@@ -7167,17 +7560,14 @@ impl Sidebar {
+@@ -7198,17 +7591,14 @@ impl Sidebar {
          Some(multi_workspace.project_group_key_for_workspace(multi_workspace.workspace(), cx))
      }
  
@@ -1409,7 +1409,7 @@ index f351519..7e25ad1 100644
      }
  
      fn cycle_project_impl(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-@@ -7185,12 +7575,26 @@ impl Sidebar {
+@@ -7216,12 +7606,26 @@ impl Sidebar {
              return;
          };
  
@@ -1438,7 +1438,7 @@ index f351519..7e25ad1 100644
  
          let next_pos = match current_pos {
              Some(pos) => {
-@@ -7203,7 +7607,7 @@ impl Sidebar {
+@@ -7234,7 +7638,7 @@ impl Sidebar {
              None => 0,
          };
  
@@ -1447,7 +1447,7 @@ index f351519..7e25ad1 100644
          let Some(ListEntry::ProjectHeader { key, .. }) = self.contents.entries.get(header_entry_ix)
          else {
              return;
-@@ -7303,7 +7707,7 @@ impl Sidebar {
+@@ -7334,7 +7738,7 @@ impl Sidebar {
                  let workspace = terminal.workspace.clone();
                  self.activate_terminal_entry(metadata, workspace, true, window, cx);
              }
@@ -1456,7 +1456,7 @@ index f351519..7e25ad1 100644
          }
      }
  
-@@ -7975,6 +8379,7 @@ impl Render for Sidebar {
+@@ -8006,6 +8410,7 @@ impl Render for Sidebar {
              .on_action(cx.listener(Self::unfold_all))
              .on_action(cx.listener(Self::cancel))
              .on_action(cx.listener(Self::archive_selected_thread))
@@ -4003,7 +4003,7 @@ index 0000000..4bb603c
 +#[path = "sidebar_pinned_markdown_tests.rs"]
 +mod markdown;
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
-index 4f22a0e..7944252 100644
+index 6ec961c..8d5165e 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
 +++ b/crates/sidebar/src/sidebar_tests.rs
 @@ -51,7 +51,7 @@ fn set_max_idle_retained_threads(max_idle_retained_threads: usize, cx: &mut App)
@@ -4166,7 +4166,7 @@ index 4f22a0e..7944252 100644
      multi_workspace: &Entity<MultiWorkspace>,
      cx: &mut gpui::VisualTestContext,
  ) -> (Entity<Sidebar>, Entity<AgentPanel>) {
-@@ -4585,7 +4600,11 @@ async fn test_background_thread_completion_triggers_notification(cx: &mut TestAp
+@@ -4661,7 +4676,11 @@ async fn test_background_thread_completion_triggers_notification(cx: &mut TestAp
      );
  }
  
@@ -4179,7 +4179,7 @@ index 4f22a0e..7944252 100644
      sidebar.update_in(cx, |sidebar, window, cx| {
          window.focus(&sidebar.filter_editor.focus_handle(cx), cx);
          sidebar.filter_editor.update(cx, |editor, cx| {
-@@ -5767,7 +5786,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
+@@ -5843,7 +5862,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
                      thread.metadata.thread_id,
                      thread.metadata.display_title(),
                  )),
@@ -4190,7 +4190,7 @@ index 4f22a0e..7944252 100644
              })
              .expect("sidebar should have a thread entry")
      });
-@@ -5853,7 +5874,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
+@@ -5929,7 +5950,9 @@ async fn test_rename_thread_from_sidebar_updates_title_override(cx: &mut TestApp
              .iter()
              .find_map(|entry| match entry {
                  ListEntry::Thread(thread) => Some(thread),
@@ -4201,7 +4201,7 @@ index 4f22a0e..7944252 100644
              })
              .expect("renamed thread should match the search");
          let title = thread.metadata.display_title();
-@@ -5892,7 +5915,9 @@ async fn test_rename_selected_thread_action_renames_selected_thread(cx: &mut Tes
+@@ -5968,7 +5991,9 @@ async fn test_rename_selected_thread_action_renames_selected_thread(cx: &mut Tes
              .enumerate()
              .find_map(|(ix, entry)| match entry {
                  ListEntry::Thread(thread) => Some((ix, thread.metadata.thread_id)),
@@ -4212,7 +4212,7 @@ index 4f22a0e..7944252 100644
              })
              .expect("sidebar should have a thread entry")
      });
-@@ -7995,6 +8020,9 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
+@@ -8071,6 +8096,9 @@ async fn test_clicking_worktree_thread_does_not_briefly_render_as_separate_proje
                          terminal.metadata.title
                      );
                  }

@@ -419,10 +419,10 @@ index 0000000..5f74176
 +    );
 +}
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 006eb61..a8d12d5 100644
+index 03d8ad3..4844a24 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -34,6 +34,7 @@ use crate::unicode_confusables;
+@@ -35,6 +35,7 @@ use crate::unicode_confusables;
  
  use db::kvp::KeyValueStore;
  use gpui::List;
@@ -430,7 +430,7 @@ index 006eb61..a8d12d5 100644
  use gpui::Stateful;
  use gpui::TaskExt;
  use heapless::Vec as ArrayVec;
-@@ -55,7 +56,7 @@ use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
+@@ -56,7 +57,7 @@ use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
  
  use super::elicitation::{
      ElicitationCard, ElicitationCardHandlers, ElicitationFormState, QuestionQueue,
@@ -439,7 +439,7 @@ index 006eb61..a8d12d5 100644
  };
  use super::*;
  
-@@ -628,6 +629,9 @@ pub struct ThreadView {
+@@ -629,6 +630,9 @@ pub struct ThreadView {
      pub new_server_version_available: Option<SharedString>,
      pub resumed_without_history: bool,
      elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
@@ -449,7 +449,7 @@ index 006eb61..a8d12d5 100644
      question_queue: QuestionQueue,
      pub _cancel_task: Option<Task<()>>,
      _save_task: Option<Task<()>>,
-@@ -1083,6 +1087,7 @@ impl ThreadView {
+@@ -1084,6 +1088,7 @@ impl ThreadView {
              is_loading_contents: false,
              new_server_version_available: None,
              elicitation_form_states: HashMap::default(),
@@ -457,7 +457,7 @@ index 006eb61..a8d12d5 100644
              question_queue: QuestionQueue::default(),
              _cancel_task: None,
              _save_task: None,
-@@ -3430,12 +3435,113 @@ impl ThreadView {
+@@ -3444,12 +3449,113 @@ impl ThreadView {
          }
      }
  
@@ -572,7 +572,7 @@ index 006eb61..a8d12d5 100644
          self.respond_to_elicitation(
              elicitation_id,
              acp_v2::CreateElicitationResponse::new(acp_v2::ElicitationAction::Decline),
-@@ -7509,6 +7615,10 @@ impl ThreadView {
+@@ -7526,6 +7632,10 @@ impl ThreadView {
              AgentThreadEntry::Elicitation(elicitation_id) => {
                  let thread = self.thread.read(cx);
                  if let Some((_, elicitation)) = thread.elicitation(elicitation_id)
@@ -583,7 +583,7 @@ index 006eb61..a8d12d5 100644
                      && should_render_elicitation(elicitation)
                      && !Self::renders_elicitation_as_card(elicitation, cx)
                  {
-@@ -7674,6 +7784,43 @@ impl ThreadView {
+@@ -7691,6 +7801,43 @@ impl ThreadView {
          .render(cx)
      }
  
@@ -627,7 +627,7 @@ index 006eb61..a8d12d5 100644
      fn elicitation_card_handlers(&self, cx: &Context<Self>) -> ElicitationCardHandlers {
          let view = cx.entity().downgrade();
  
-@@ -14651,6 +14798,14 @@ fn strip_leading_command(text: &str, command_name: &str) -> String {
+@@ -14669,6 +14816,14 @@ fn strip_leading_command(text: &str, command_name: &str) -> String {
  
  #[cfg(test)]
  mod tests {

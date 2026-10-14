@@ -54,10 +54,10 @@ Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
 ---
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index f7f8c80..021b0b3 100644
+index acbf155..5d1c090 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2331,6 +2331,72 @@ impl AgentPanel {
+@@ -2332,6 +2332,72 @@ impl AgentPanel {
          self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
      }
  
@@ -130,7 +130,7 @@ index f7f8c80..021b0b3 100644
      fn set_selected_agent_and_persist(&mut self, agent: Agent, cx: &mut Context<Self>) {
          if self.selected_agent != agent {
              self.selected_agent = agent.clone();
-@@ -7619,6 +7685,12 @@ pub(crate) fn scroll_to_root_tool_call(
+@@ -7620,6 +7686,12 @@ pub(crate) fn scroll_to_root_tool_call(
  #[cfg(test)]
  mod tests {
      use super::*;
@@ -713,7 +713,7 @@ index 0000000..a7fa618
 +    );
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 70ac4fb..c2dd7c2 100644
+index f1135a3..e3b8c34 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -1081,6 +1081,23 @@ fn update_active_language_model_from_settings(cx: &mut App) {
@@ -741,19 +741,19 @@ index 70ac4fb..c2dd7c2 100644
  mod tests {
      use super::*;
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 427e1f7..3a65bbf 100644
+index c64f926..c4f84c4 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -2,7 +2,7 @@ use crate::{
-     DEFAULT_THREAD_TITLE, RecallNewerMessage, RecallOlderMessage, SelectPermissionGranularity,
+@@ -3,7 +3,7 @@ use crate::{
      conversation_view::sent_history::{Recall, SentMessageHistory},
      conversation_view::thread_search_bar::{ThreadSearchBar, ThreadSearchBarEvent},
+     entry_view_state::TERMINAL_CONTENT_TOP_PADDING,
 -    open_abs_path_at_point, project_path_for_file_link,
 +    open_abs_path_at_point, project_path_for_file_link, slash_command_in_code_block,
      thread_metadata_store::{ThreadId, ThreadMetadataStore},
  };
  use agent_client_protocol::schema::v2 as acp_v2;
-@@ -7403,7 +7403,7 @@ impl ThreadView {
+@@ -7420,7 +7420,7 @@ impl ThreadView {
                                      div()
                                          .id(("assistant-message-chunk", chunk_ix))
                                          .child(self.render_message_content(
@@ -762,7 +762,7 @@ index 427e1f7..3a65bbf 100644
                                          ))
                                          .into_any_element()
                                  })
-@@ -8851,11 +8851,15 @@ impl ThreadView {
+@@ -8868,11 +8868,15 @@ impl ThreadView {
          cx.notify();
      }
  
@@ -778,7 +778,7 @@ index 427e1f7..3a65bbf 100644
          window: &Window,
          cx: &Context<Self>,
      ) -> Div {
-@@ -8865,9 +8869,19 @@ impl ThreadView {
+@@ -8882,9 +8886,19 @@ impl ThreadView {
                  .enumerate()
                  .filter(|(_, block)| block.visible_content(cx))
                  .map(|(block_ix, block)| {
@@ -801,7 +801,7 @@ index 427e1f7..3a65bbf 100644
                      div()
                          .id(("message-content-block", block_ix))
                          .debug_selector(move || {
-@@ -8971,11 +8985,9 @@ impl ThreadView {
+@@ -8988,11 +9002,9 @@ impl ThreadView {
                                      this.track_scroll(&scroll_handle)
                                  })
                                  .overflow_hidden()
@@ -816,7 +816,7 @@ index 427e1f7..3a65bbf 100644
                          )
                          .when(is_constrained, |this| {
                              this.child(div().absolute().inset_0().size_full().bg(linear_gradient(
-@@ -13103,6 +13115,49 @@ impl ThreadView {
+@@ -13121,6 +13133,49 @@ impl ThreadView {
          })
      }
  

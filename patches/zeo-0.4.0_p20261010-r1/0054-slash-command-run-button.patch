@@ -63,10 +63,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 021b0b3..0d70217 100644
+index 5d1c090..b5871e1 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2331,6 +2331,87 @@ impl AgentPanel {
+@@ -2332,6 +2332,87 @@ impl AgentPanel {
          self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
      }
  
@@ -154,7 +154,7 @@ index 021b0b3..0d70217 100644
      /// Opens a new thread for `agent` with `text` in its composer -- never sent:
      /// the operator reviews it and sends it. An agent that is no longer
      /// configured opens nothing and says so. `source_session` is the session whose
-@@ -2344,39 +2425,10 @@ impl AgentPanel {
+@@ -2345,39 +2426,10 @@ impl AgentPanel {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -196,7 +196,7 @@ index 021b0b3..0d70217 100644
          log::info!(
              "opening a prefilled thread: agent {agent_id}, source session {source_session}, command length {}",
              text.len()
-@@ -7691,6 +7743,12 @@ mod tests {
+@@ -7692,6 +7744,12 @@ mod tests {
      mod slash_command_button_tests;
  
      mod slash_command_contract_tests;
@@ -1116,7 +1116,7 @@ index 0000000..d99f46a
 +    assert_sent_new_thread(&panel, &source, &source_agent, "/compact", &mut cx);
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index c2dd7c2..7a10341 100644
+index e3b8c34..d8babd2 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -637,6 +637,12 @@ pub enum AgentInitialContent {
@@ -1133,10 +1133,10 @@ index c2dd7c2..7a10341 100644
  }
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 3a65bbf..006eb61 100644
+index c4f84c4..03d8ad3 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -829,6 +829,7 @@ impl ThreadView {
+@@ -830,6 +830,7 @@ impl ThreadView {
          let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
  
          let mut should_auto_submit = false;
@@ -1144,7 +1144,7 @@ index 3a65bbf..006eb61 100644
          let mut show_external_source_prompt_warning = false;
  
          let message_editor = cx.new(|cx| {
-@@ -859,6 +860,11 @@ impl ThreadView {
+@@ -860,6 +861,11 @@ impl ThreadView {
                          should_auto_submit = auto_submit;
                          Some(blocks)
                      }
@@ -1156,7 +1156,7 @@ index 3a65bbf..006eb61 100644
                      AgentInitialContent::FromExternalSource(prompt) => {
                          show_external_source_prompt_warning = true;
                          // SECURITY: Be explicit about not auto submitting prompt from external source.
-@@ -1131,7 +1137,14 @@ impl ThreadView {
+@@ -1132,7 +1138,14 @@ impl ThreadView {
              });
  
          if should_auto_submit {
@@ -1171,7 +1171,7 @@ index 3a65bbf..006eb61 100644
          }
          this
      }
-@@ -8852,8 +8865,9 @@ impl ThreadView {
+@@ -8869,8 +8882,9 @@ impl ThreadView {
      }
  
      /// `offers_slash_commands` is set only for an agent's message: a code block
@@ -1183,7 +1183,7 @@ index 3a65bbf..006eb61 100644
      fn render_message_content(
          &self,
          entry_ix: usize,
-@@ -13118,43 +13132,40 @@ impl ThreadView {
+@@ -13136,43 +13150,40 @@ impl ThreadView {
      fn slash_command_action(
          &self,
          cx: &App,
@@ -1257,7 +1257,7 @@ index 3a65bbf..006eb61 100644
          }
      }
  
-@@ -13848,6 +13859,71 @@ impl ThreadView {
+@@ -13866,6 +13877,71 @@ impl ThreadView {
      }
  }
  

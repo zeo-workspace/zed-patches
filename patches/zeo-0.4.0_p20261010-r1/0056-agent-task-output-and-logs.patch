@@ -68,10 +68,10 @@ BY DEPENDENCY after 0053, the last task patch: it extends 0037's card,
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 0bc2cbc..ed54106 100644
+index 1f0a667..e354527 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
-@@ -3675,6 +3675,20 @@ pub struct AgentTask {
+@@ -3670,6 +3670,20 @@ pub struct AgentTask {
      pub usage: Option<AgentTaskUsage>,
      pub last_tool: Option<SharedString>,
      pub summary: Option<SharedString>,
@@ -92,7 +92,7 @@ index 0bc2cbc..ed54106 100644
  }
  
  #[derive(Deserialize)]
-@@ -3698,6 +3712,12 @@ struct WireTask {
+@@ -3693,6 +3707,12 @@ struct WireTask {
      usage: Option<WireTaskUsage>,
      last_tool: Option<String>,
      summary: Option<String>,
@@ -105,7 +105,7 @@ index 0bc2cbc..ed54106 100644
  }
  
  #[derive(Deserialize)]
-@@ -3751,6 +3771,10 @@ impl From<WireTask> for AgentTask {
+@@ -3746,6 +3766,10 @@ impl From<WireTask> for AgentTask {
              }),
              last_tool: task.last_tool.map(SharedString::from),
              summary: task.summary.map(SharedString::from),
@@ -116,7 +116,7 @@ index 0bc2cbc..ed54106 100644
          }
      }
  }
-@@ -4710,6 +4734,17 @@ impl AcpThread {
+@@ -4744,6 +4768,17 @@ impl AcpThread {
              .stop_task(self.session_id(), task_id, cx)
      }
  
@@ -134,7 +134,7 @@ index 0bc2cbc..ed54106 100644
      /// Resolves to `false` when the agent had nothing to move to the background.
      pub fn background_task(&self, tool_call_id: &str, cx: &mut App) -> Task<Result<bool>> {
          self.connection
-@@ -4971,10 +5006,14 @@ impl AcpThread {
+@@ -5005,10 +5040,14 @@ impl AcpThread {
                  {
                      match serde_json::from_value::<WireTasksSnapshot>(payload.clone()) {
                          Ok(snapshot) => self.apply_tasks_snapshot(snapshot, cx),
@@ -151,7 +151,7 @@ index 0bc2cbc..ed54106 100644
                          ),
                      }
                  }
-@@ -8639,12 +8678,15 @@ mod tests {
+@@ -8791,12 +8830,15 @@ mod tests {
              "utilization": 0.40,
          })));
          for blank in ["", "   ", "\t\n"] {
@@ -173,7 +173,7 @@ index 0bc2cbc..ed54106 100644
          }
          assert!(
              usage.is_empty(),
-@@ -21509,7 +21551,12 @@ mod tests {
+@@ -22210,7 +22252,12 @@ mod tests {
          });
  
          thread.read_with(cx, |thread, _| {
@@ -187,7 +187,7 @@ index 0bc2cbc..ed54106 100644
              let compaction = compaction_entries(thread)
                  .pop()
                  .expect("the compaction entry survives the enrichment frame");
-@@ -24954,4 +25001,6 @@ mod tests {
+@@ -25685,4 +25732,6 @@ mod tests {
  
      include!("acp_thread_tasks_tests.rs");
      include!("acp_thread_tasks_review_tests.rs");
@@ -601,7 +601,7 @@ index 0000000..bc94905
 +    );
 +}
 diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
-index 5ff310f..bf648d3 100644
+index 1585826..c2282bc 100644
 --- a/crates/acp_thread/src/connection.rs
 +++ b/crates/acp_thread/src/connection.rs
 @@ -1,4 +1,4 @@
@@ -610,7 +610,7 @@ index 5ff310f..bf648d3 100644
  use agent_client_protocol::schema::{MaybeUndefined, v1 as acp_v1, v2 as acp_v2};
  use anyhow::Result;
  use chrono::{DateTime, Utc};
-@@ -135,6 +135,19 @@ pub trait AgentConnection {
+@@ -139,6 +139,19 @@ pub trait AgentConnection {
          Task::ready(Err(anyhow::Error::msg("Closing sessions is not supported")))
      }
  
@@ -704,10 +704,10 @@ index 0000000..63eb65f
 +  ]
 +}
 diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
-index 2dd0e96..5356897 100644
+index f5cf0ea..53a82ed 100644
 --- a/crates/agent_servers/src/acp.rs
 +++ b/crates/agent_servers/src/acp.rs
-@@ -62,6 +62,9 @@ const EXIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
+@@ -64,6 +64,9 @@ const EXIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
  const CLAUDE_TASKS_CAPABILITY: &str = "_claude/tasks";
  const CLAUDE_TASKS_STOP_METHOD: &str = "_claude/tasks/stop";
  const CLAUDE_TASKS_BACKGROUND_METHOD: &str = "_claude/tasks/background";
@@ -717,7 +717,7 @@ index 2dd0e96..5356897 100644
  
  async fn exited_load_error_after_drain(
      status: ExitStatus,
-@@ -234,6 +237,31 @@ async fn send_task_request(
+@@ -236,6 +239,31 @@ async fn send_task_request(
          .map_err(failed)
  }
  
@@ -749,7 +749,7 @@ index 2dd0e96..5356897 100644
  async fn drain_foreground_queue(dispatch_tx: &mpsc::UnboundedSender<ForegroundWork>) -> Result<()> {
      // The SDK response can precede application of the old session's queued replay.
      let (acknowledgment, received) = futures::channel::oneshot::channel();
-@@ -1395,14 +1423,21 @@ impl AcpConnection {
+@@ -1501,14 +1529,21 @@ impl AcpConnection {
  
      /// Keyed on the capability alone: the entry id is whatever the user named it, and
      /// the agent's self-reported name differs between the fork and the published package.
@@ -773,7 +773,7 @@ index 2dd0e96..5356897 100644
      }
  
      fn open_or_create_session(
-@@ -2591,6 +2626,38 @@ impl AgentConnection for AcpConnection {
+@@ -2694,6 +2729,38 @@ impl AgentConnection for AcpConnection {
              .spawn(async move { request.await.map(|_| ()) })
      }
  
@@ -812,7 +812,7 @@ index 2dd0e96..5356897 100644
      fn background_task(
          self: Rc<Self>,
          session_id: &acp_v2::SessionId,
-@@ -2980,6 +3047,17 @@ pub mod test_support {
+@@ -3077,6 +3144,17 @@ pub mod test_support {
                  .background_task(session_id, tool_call_id, cx)
          }
  
@@ -830,7 +830,7 @@ index 2dd0e96..5356897 100644
          fn request_elicitations(&self) -> Option<Entity<ElicitationStore>> {
              self.inner.request_elicitations()
          }
-@@ -7786,6 +7864,7 @@ exit 7
+@@ -9979,6 +10057,7 @@ exit 7
      }
  
      include!("acp_task_actions_tests.rs");
@@ -2884,10 +2884,10 @@ index 0000000..a64f9e2
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 519354b..f7f8c80 100644
+index e2ca78f..acbf155 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -1579,6 +1579,30 @@ impl AgentPanel {
+@@ -1580,6 +1580,30 @@ impl AgentPanel {
                      window,
                      cx,
                  ),
@@ -2918,7 +2918,7 @@ index 519354b..f7f8c80 100644
              },
          );
  
-@@ -1835,6 +1859,16 @@ impl AgentPanel {
+@@ -1836,6 +1860,16 @@ impl AgentPanel {
          else {
              return;
          };
@@ -2935,7 +2935,7 @@ index 519354b..f7f8c80 100644
          let message = format!("{error:#}");
          log::error!(
              "agent panel: opening task {task_id} of session {session_id} from the tasks card \
-@@ -1845,6 +1879,184 @@ impl AgentPanel {
+@@ -1846,6 +1880,184 @@ impl AgentPanel {
          });
      }
  
@@ -3120,7 +3120,7 @@ index 519354b..f7f8c80 100644
      fn open_thread_at_tool_call(
          &mut self,
          session_id: &acp_v2::SessionId,
-@@ -7367,6 +7579,11 @@ impl AgentPanel {
+@@ -7368,6 +7580,11 @@ impl AgentPanel {
      }
  }
  
@@ -3133,7 +3133,7 @@ index 519354b..f7f8c80 100644
  /// returns its index, or `None` when the root thread has no such entry: a nested
  /// subagent's tool call lives in its own thread, not among the root's entries.
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index fd7bf56..01f5d1d 100644
+index ca8cdbe..c73c58c 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -92,7 +92,11 @@ pub use crate::message_editor::MessageEditorEvent;

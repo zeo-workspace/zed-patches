@@ -109,95 +109,9 @@ on only the names given that way, and unjailed_agent_carries_the_zeo_thread_mark
 checks an unjailed start. They live here because this fixture is the one that
 spawns a real agent script and reads back its environment (story 050).
 ---
- Cargo.lock                                    |   44 +
- Cargo.toml                                    |    2 +
- assets/settings/default.json                  |   22 +
- crates/agent_sandbox/Cargo.toml               |   50 +
- crates/agent_sandbox/src/agent_sandbox.rs     |   52 +
- crates/agent_sandbox/src/command.rs           |  175 ++
- crates/agent_sandbox/src/command_tests.rs     |  325 ++++
- crates/agent_sandbox/src/confirm.rs           |  570 ++++++
- crates/agent_sandbox/src/confirm_tests.rs     |  236 +++
- crates/agent_sandbox/src/launch.rs            | 1104 +++++++++++
- crates/agent_sandbox/src/launch_tests.rs      | 1670 ++++++++++++++++
- crates/agent_sandbox/src/memory.rs            |   15 +
- crates/agent_sandbox/src/memory/client.rs     |  578 ++++++
- crates/agent_sandbox/src/memory/scope.rs      |  292 +++
- crates/agent_sandbox/src/memory_tests.rs      |  787 ++++++++
- crates/agent_sandbox/src/probe.rs             |  387 ++++
- crates/agent_sandbox/src/probe_tests.rs       |  531 ++++++
- crates/agent_sandbox/src/project_keys.rs      |  115 ++
- crates/agent_sandbox/src/roundtrip_tests.rs   |  313 +++
- crates/agent_sandbox/src/scope_tests.rs       |  358 ++++
- crates/agent_sandbox/src/settings.rs          |  205 ++
- crates/agent_sandbox/src/settings_tests.rs    |  366 ++++
- crates/agent_sandbox/src/test_log_capture.rs  |   97 +
- crates/agent_sandbox/src/validate.rs          |  678 +++++++
- crates/agent_sandbox/src/validate_tests.rs    |  635 +++++++
- .../test-data/ai-jail-2.8.1-help.txt          |  131 ++
- crates/agent_sandbox/tests/real_ai_jail.rs    |  581 ++++++
- crates/agent_servers/Cargo.toml               |    4 +
- crates/agent_servers/src/acp.rs               |   50 +-
- crates/agent_servers/src/acp/transport.rs     |  170 +-
- crates/agent_servers/src/agent_servers.rs     |    4 +
- crates/agent_servers/src/custom.rs            |  129 +-
- .../src/sandbox_hook_lifecycle_tests.rs       |  289 +++
- .../agent_servers/src/sandbox_hook_tests.rs   |  395 ++++
- crates/agent_servers/src/test_log_capture.rs  |   56 +-
- crates/agent_ui/Cargo.toml                    |    1 +
- crates/agent_ui/src/agent_jail_status.rs      |  140 ++
- .../agent_ui/src/agent_jail_status_tests.rs   |  559 ++++++
- crates/agent_ui/src/agent_panel.rs            |   13 +-
- crates/agent_ui/src/agent_sandbox_actions.rs  |  213 +++
- crates/agent_ui/src/agent_ui.rs               |    5 +
- .../src/conversation_view/thread_view.rs      |   16 +
- crates/project/src/agent_server_store.rs      |  143 ++
- crates/remote_server/Cargo.toml               |    2 +-
- crates/settings/src/vscode_import.rs          |    2 +
- .../settings_content/src/settings_content.rs  |   72 +-
- crates/settings_ui/Cargo.toml                 |    6 +
- crates/settings_ui/src/page_data.rs           |   41 +-
- crates/settings_ui/src/pages.rs               |    2 +
- .../settings_ui/src/pages/agent_jail_page.rs  | 1672 +++++++++++++++++
- .../src/pages/agent_jail_page_tests.rs        | 1059 +++++++++++
- crates/zed/Cargo.toml                         |    1 +
- crates/zed/src/main.rs                        |    1 +
- crates/zed_actions/src/lib.rs                 |    4 +
- 54 files changed, 15335 insertions(+), 33 deletions(-)
- create mode 100644 crates/agent_sandbox/Cargo.toml
- create mode 100644 crates/agent_sandbox/src/agent_sandbox.rs
- create mode 100644 crates/agent_sandbox/src/command.rs
- create mode 100644 crates/agent_sandbox/src/command_tests.rs
- create mode 100644 crates/agent_sandbox/src/confirm.rs
- create mode 100644 crates/agent_sandbox/src/confirm_tests.rs
- create mode 100644 crates/agent_sandbox/src/launch.rs
- create mode 100644 crates/agent_sandbox/src/launch_tests.rs
- create mode 100644 crates/agent_sandbox/src/memory.rs
- create mode 100644 crates/agent_sandbox/src/memory/client.rs
- create mode 100644 crates/agent_sandbox/src/memory/scope.rs
- create mode 100644 crates/agent_sandbox/src/memory_tests.rs
- create mode 100644 crates/agent_sandbox/src/probe.rs
- create mode 100644 crates/agent_sandbox/src/probe_tests.rs
- create mode 100644 crates/agent_sandbox/src/project_keys.rs
- create mode 100644 crates/agent_sandbox/src/roundtrip_tests.rs
- create mode 100644 crates/agent_sandbox/src/scope_tests.rs
- create mode 100644 crates/agent_sandbox/src/settings.rs
- create mode 100644 crates/agent_sandbox/src/settings_tests.rs
- create mode 100644 crates/agent_sandbox/src/test_log_capture.rs
- create mode 100644 crates/agent_sandbox/src/validate.rs
- create mode 100644 crates/agent_sandbox/src/validate_tests.rs
- create mode 100644 crates/agent_sandbox/test-data/ai-jail-2.8.1-help.txt
- create mode 100644 crates/agent_sandbox/tests/real_ai_jail.rs
- create mode 100644 crates/agent_servers/src/sandbox_hook_lifecycle_tests.rs
- create mode 100644 crates/agent_servers/src/sandbox_hook_tests.rs
- create mode 100644 crates/agent_ui/src/agent_jail_status.rs
- create mode 100644 crates/agent_ui/src/agent_jail_status_tests.rs
- create mode 100644 crates/agent_ui/src/agent_sandbox_actions.rs
- create mode 100644 crates/settings_ui/src/pages/agent_jail_page.rs
- create mode 100644 crates/settings_ui/src/pages/agent_jail_page_tests.rs
 
 diff --git a/Cargo.lock b/Cargo.lock
-index c986a62..398b177 100644
+index c630b3b..2f60e45 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -368,6 +368,39 @@ dependencies = [
@@ -277,7 +191,7 @@ index c986a62..398b177 100644
   "agent_servers",
   "agent_settings",
   "agent_skills",
-@@ -16506,6 +16544,7 @@ name = "settings_ui"
+@@ -16503,6 +16541,7 @@ name = "settings_ui"
  version = "0.1.0"
  dependencies = [
   "agent",
@@ -285,7 +199,7 @@ index c986a62..398b177 100644
   "agent_settings",
   "agent_skills",
   "anyhow",
-@@ -16538,6 +16577,7 @@ dependencies = [
+@@ -16535,6 +16574,7 @@ dependencies = [
   "language_models",
   "log",
   "menu",
@@ -293,7 +207,7 @@ index c986a62..398b177 100644
   "paths",
   "picker",
   "platform_title_bar",
-@@ -16548,13 +16588,16 @@ dependencies = [
+@@ -16545,13 +16585,16 @@ dependencies = [
   "rodio",
   "schemars 1.0.4",
   "search",
@@ -310,7 +224,7 @@ index c986a62..398b177 100644
   "theme",
   "theme_settings",
   "ui",
-@@ -22464,6 +22507,7 @@ dependencies = [
+@@ -22462,6 +22505,7 @@ dependencies = [
   "activity_indicator",
   "agent",
   "agent-client-protocol",
@@ -339,10 +253,10 @@ index 8f4a491..0d66c5b 100644
  agent_settings = { path = "crates/agent_settings" }
  agent_skills = { path = "crates/agent_skills" }
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index d76f265..88bffb7 100644
+index 9d0b00e..b4d5e49 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -3074,4 +3074,26 @@
+@@ -3081,4 +3081,26 @@
    "devtools_bridge": {
      "enabled": true,
    },
@@ -10788,10 +10702,10 @@ index a7e6306..6b8fc54 100644
  tempfile.workspace = true
 +workspace = { workspace = true, features = ["test-support"] }
 diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
-index 49c25a1..ade483c 100644
+index 29ccf5d..8c35c55 100644
 --- a/crates/agent_servers/src/acp.rs
 +++ b/crates/agent_servers/src/acp.rs
-@@ -773,22 +773,35 @@ impl AgentSessionList for AcpSessionList {
+@@ -774,22 +774,35 @@ impl AgentSessionList for AcpSessionList {
      }
  }
  
@@ -10812,7 +10726,7 @@ index 49c25a1..ade483c 100644
      project: Entity<Project>,
      command: AgentServerCommand,
      agent_server_store: WeakEntity<AgentServerStore>,
-     default_mode: Option<acp::SessionModeId>,
+     default_mode: Option<acp_v2::SessionConfigValueId>,
      default_config_options: HashMap<String, AgentConfigOptionValue>,
 +    launch: StdioLaunch,
      cx: &mut AsyncApp,
@@ -10830,7 +10744,7 @@ index 49c25a1..ade483c 100644
          cx,
      )
      .await?;
-@@ -991,6 +1004,9 @@ impl AcpConnection {
+@@ -1097,6 +1110,9 @@ impl AcpConnection {
          self.debug_log.subscribe()
      }
  
@@ -10840,7 +10754,7 @@ index 49c25a1..ade483c 100644
      pub async fn stdio(
          agent_id: AgentId,
          project: Entity<Project>,
-@@ -1000,6 +1016,30 @@ impl AcpConnection {
+@@ -1106,6 +1122,30 @@ impl AcpConnection {
          default_config_options: HashMap<String, AgentConfigOptionValue>,
          cx: &mut AsyncApp,
      ) -> Result<Self> {
@@ -10862,7 +10776,7 @@ index 49c25a1..ade483c 100644
 +        project: Entity<Project>,
 +        command: AgentServerCommand,
 +        agent_server_store: WeakEntity<AgentServerStore>,
-+        default_mode: Option<acp::SessionModeId>,
++        default_mode: Option<acp_v2::SessionConfigValueId>,
 +        default_config_options: HashMap<String, AgentConfigOptionValue>,
 +        launch: StdioLaunch,
 +        cx: &mut AsyncApp,
@@ -10871,7 +10785,7 @@ index 49c25a1..ade483c 100644
          let original_command = command.clone();
          let transport::StdioProcess {
              mut child,
-@@ -1007,7 +1047,7 @@ impl AcpConnection {
+@@ -1113,7 +1153,7 @@ impl AcpConnection {
              outgoing,
              stderr,
              debug_log,
@@ -10880,7 +10794,7 @@ index 49c25a1..ade483c 100644
          let sessions = Rc::new(RefCell::new(HashMap::default()));
  
          let (release_channel, version): (Option<&str>, String) = cx.update(|cx| {
-@@ -1037,6 +1077,8 @@ impl AcpConnection {
+@@ -1143,6 +1183,8 @@ impl AcpConnection {
          let connection_future =
              connect_client_future("zed", transport, dispatch_tx.clone(), connection_tx);
          let io_task = cx.background_spawn(async move {
@@ -11103,7 +11017,7 @@ index e2499bd..fc3e793 100644
 +    }
  }
 diff --git a/crates/agent_servers/src/agent_servers.rs b/crates/agent_servers/src/agent_servers.rs
-index 6de17a2..d07ab6f 100644
+index 68fc849..77503d4 100644
 --- a/crates/agent_servers/src/agent_servers.rs
 +++ b/crates/agent_servers/src/agent_servers.rs
 @@ -1,6 +1,10 @@
@@ -11118,20 +11032,19 @@ index 6de17a2..d07ab6f 100644
  pub mod thread_config_store;
  
 diff --git a/crates/agent_servers/src/custom.rs b/crates/agent_servers/src/custom.rs
-index 5b17ea7..3ac8993 100644
+index 79acc66..123795d 100644
 --- a/crates/agent_servers/src/custom.rs
 +++ b/crates/agent_servers/src/custom.rs
-@@ -1,7 +1,9 @@
+@@ -1,6 +1,8 @@
 +use crate::acp::StdioLaunch;
  use crate::{AgentServer, AgentServerDelegate, load_proxy_env};
  use acp_thread::AgentConnection;
- use agent_client_protocol::schema::v1 as acp;
  use agent_client_protocol::schema::v2 as acp_v2;
 +use agent_sandbox::launch::{self, LaunchDecision, LaunchError, LaunchRecord, LaunchRegistry};
  use anyhow::{Context as _, Result};
  use collections::HashSet;
  use fs::Fs;
-@@ -260,20 +262,63 @@ impl AgentServer for CustomAgentServer {
+@@ -264,20 +266,63 @@ impl AgentServer for CustomAgentServer {
                      extra_env.insert("GEMINI_API_KEY".into(), api_key);
                  }
              }
@@ -11209,7 +11122,7 @@ index 5b17ea7..3ac8993 100644
              let connection = crate::acp::connect(
                  agent_id,
                  project,
-@@ -281,6 +326,10 @@ impl AgentServer for CustomAgentServer {
+@@ -285,6 +330,10 @@ impl AgentServer for CustomAgentServer {
                  store.clone(),
                  default_mode,
                  default_config_options,
@@ -11220,7 +11133,7 @@ index 5b17ea7..3ac8993 100644
                  cx,
              )
              .await?;
-@@ -293,6 +342,58 @@ impl AgentServer for CustomAgentServer {
+@@ -297,6 +346,58 @@ impl AgentServer for CustomAgentServer {
      }
  }
  
@@ -12796,7 +12709,7 @@ index 0000000..1a9c116
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index cae44a3..e168e12 100644
+index a0447c0..b12c528 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -723,6 +723,7 @@ pub fn init(cx: &mut App) {
@@ -12807,7 +12720,7 @@ index cae44a3..e168e12 100644
  }
  
  fn format_selection_for_terminal(
-@@ -1152,6 +1153,8 @@ pub struct AgentPanel {
+@@ -1153,6 +1154,8 @@ pub struct AgentPanel {
      _active_draft_reclaim_observation: Option<Subscription>,
      _thread_metadata_store_subscription: Subscription,
      _settings_subscription: Subscription,
@@ -12816,7 +12729,7 @@ index cae44a3..e168e12 100644
      retained_thread_subscriptions: HashMap<ThreadId, Subscription>,
      last_context_source: Option<AgentContextSource>,
      /// The floating list of the live tasks of every conversation this panel holds.
-@@ -1541,6 +1544,8 @@ impl AgentPanel {
+@@ -1542,6 +1545,8 @@ impl AgentPanel {
              // The tasks card's `enabled` and `position` are read when the panel renders.
              cx.notify();
          });
@@ -12825,7 +12738,7 @@ index cae44a3..e168e12 100644
  
          cx.on_release(|this, cx| {
              this.dismiss_all_terminal_notifications(cx);
-@@ -1643,6 +1648,7 @@ impl AgentPanel {
+@@ -1644,6 +1649,7 @@ impl AgentPanel {
              _active_draft_reclaim_observation: None,
              _thread_metadata_store_subscription,
              _settings_subscription,
@@ -12833,7 +12746,7 @@ index cae44a3..e168e12 100644
              retained_thread_subscriptions: HashMap::default(),
              last_context_source: None,
              tasks_card,
-@@ -6939,7 +6945,12 @@ impl AgentPanel {
+@@ -6940,7 +6946,12 @@ impl AgentPanel {
                  .active_conversation_view()
                  .and_then(|conversation_view| conversation_view.read(cx).root_thread_view())
                  .and_then(|thread_view| {
@@ -13067,7 +12980,7 @@ index 0000000..51b1d6b
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index b7b699b..173fd6d 100644
+index 6fc9ad2..8a55068 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -1,9 +1,11 @@
@@ -13093,10 +13006,10 @@ index b7b699b..173fd6d 100644
  mod devtools_delivery_tests;
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 6005a3c..9568638 100644
+index ce96357..48969a3 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -6015,6 +6015,22 @@ impl ThreadView {
+@@ -6029,6 +6029,22 @@ impl ThreadView {
          )
      }
  
@@ -13302,10 +13215,10 @@ index e17f376..2ea80d4 100644
          fs.remove_dir(
              &npx_install_dir(registry_id),
 diff --git a/crates/remote_server/Cargo.toml b/crates/remote_server/Cargo.toml
-index 30ca632..ccba124 100644
+index c18909b..2fb46ea 100644
 --- a/crates/remote_server/Cargo.toml
 +++ b/crates/remote_server/Cargo.toml
-@@ -87,7 +87,7 @@ acp_thread.workspace = true
+@@ -86,7 +86,7 @@ acp_thread.workspace = true
  action_log.workspace = true
  agent = { workspace = true, features = ["test-support"] }
  agent-client-protocol.workspace = true
@@ -13315,10 +13228,10 @@ index 30ca632..ccba124 100644
  clock = { workspace = true, features = ["test-support"] }
  editor = { workspace = true, features = ["test-support"] }
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index bec14b4..406c875 100644
+index 388898c..f03a939 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
-@@ -246,6 +246,8 @@ impl VsCodeSettings {
+@@ -247,6 +247,8 @@ impl VsCodeSettings {
              feature_flags: None,
              instrumentation: None,
              devtools_bridge: None,
@@ -13328,7 +13241,7 @@ index bec14b4..406c875 100644
      }
  
 diff --git a/crates/settings_content/src/settings_content.rs b/crates/settings_content/src/settings_content.rs
-index 6cd8ded..cd5ca47 100644
+index 7975d2b..6e29b30 100644
 --- a/crates/settings_content/src/settings_content.rs
 +++ b/crates/settings_content/src/settings_content.rs
 @@ -100,6 +100,7 @@ macro_rules! settings_overrides {
@@ -13339,7 +13252,7 @@ index 6cd8ded..cd5ca47 100644
  use std::sync::Arc;
  pub use util::serde::default_true;
  
-@@ -338,6 +339,75 @@ pub struct SettingsContent {
+@@ -339,6 +340,75 @@ pub struct SettingsContent {
      /// Settings for the devtools bridge: the unix socket a dev-server page
      /// sends element selections to.
      pub devtools_bridge: Option<DevtoolsBridgeSettingsContent>,
@@ -13415,7 +13328,7 @@ index 6cd8ded..cd5ca47 100644
  }
  
  /// Configuration for the devtools bridge, which listens on
-@@ -428,7 +498,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
+@@ -429,7 +499,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
          journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,
          node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
          title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
@@ -16319,6 +16232,3 @@ index 149991a..e030c30 100644
  #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema)]
  #[serde(rename_all = "snake_case")]
  pub enum OpenSettingsAtTarget {
--- 
-2.56.0
-
