@@ -11787,6 +11787,18 @@ index 796efb7..cff7b56 100644
 +        );
 +    }
 +}
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index ef55b79..3cf57c4 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -6009,6 +6009,7 @@ mod tests {
+                 "debug_panel",
+                 "debugger",
+                 "dev",
++                "devtools_bridge",
+                 "diagnostics",
+                 "edit_prediction",
+                 "editor",
 diff --git a/crates/zeo_browser_host/Cargo.toml b/crates/zeo_browser_host/Cargo.toml
 new file mode 100644
 index 0000000..d57496c

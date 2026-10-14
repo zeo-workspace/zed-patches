@@ -16217,6 +16217,19 @@ index b1a7977..4132e69 100644
          snippet_provider::init(cx);
          edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
          let prompt_builder = PromptBuilder::load(app_state.fs.clone(), stdout_is_a_pty(), cx);
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 7930d72..ef55b79 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -5983,6 +5983,8 @@ mod tests {
+                 "action",
+                 "activity_indicator",
+                 "agent",
++                "agent_memory",
++                "agent_sandbox",
+                 "agent_tasks_panel",
+                 "agents_sidebar",
+                 "app_menu",
 diff --git a/crates/zed_actions/src/lib.rs b/crates/zed_actions/src/lib.rs
 index 149991a..e030c30 100644
 --- a/crates/zed_actions/src/lib.rs
