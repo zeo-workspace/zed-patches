@@ -1576,7 +1576,8 @@ HOMEPAGE="https://github.com/zeo-workspace/zeo https://zed.dev"
 # The Firefox build of zeo-browser (story 045), installed system-wide so Firefox
 # loads it without a manual step. Built reproducibly from zed/zeo-browser
 # (`npm run build` -> dist/zeo-browser-firefox.zip, renamed .xpi); the release
-# story publishes it as a zeo-workspace/zeo release asset under this name.
+# story publishes it as an asset of the zeo-workspace/zeo-browser release v<PV>,
+# under this name (moved there from zeo-workspace/zeo on 2026-10-15, same bytes).
 # cargo_src_unpack hands it to unpack, which skips an .xpi and leaves it in
 # DISTDIR for src_install.
 ZEO_BROWSER_PV="0.1.0"
@@ -1593,7 +1594,7 @@ SRC_URI="
 	)
 	${CARGO_CRATE_URIS}
 	browser-extension? (
-		https://github.com/zeo-workspace/zeo/releases/download/zeo-browser-${ZEO_BROWSER_PV}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi
+		https://github.com/zeo-workspace/zeo-browser/releases/download/v${ZEO_BROWSER_PV}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi
 	)"
 
 # The upstream tarball unpacks to zed-<commit>; ${PN} is "zeo" here, so the
