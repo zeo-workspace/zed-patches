@@ -1573,15 +1573,6 @@ inherit cargo check-reqs desktop flag-o-matic llvm-r1 toolchain-funcs xdg
 # when those two gain an arm64 build; nothing else here is amd64-bound.
 DESCRIPTION="Zeo - the Zed editor, rebranded, with the bentoo patch series"
 HOMEPAGE="https://github.com/zeo-workspace/zeo https://zed.dev"
-# The Firefox build of zeo-browser (story 045), installed system-wide so Firefox
-# loads it without a manual step. Built reproducibly from zed/zeo-browser
-# (`npm run build` -> dist/zeo-browser-firefox.zip, renamed .xpi); the release
-# story publishes it as an asset of the zeo-workspace/zeo-browser release v<PV>,
-# under this name (moved there from zeo-workspace/zeo on 2026-10-15, same bytes).
-# cargo_src_unpack hands it to unpack, which skips an .xpi and leaves it in
-# DISTDIR for src_install.
-ZEO_BROWSER_PV="0.1.0"
-
 SRC_URI="
 	https://github.com/zed-industries/zed/archive/${EGIT_COMMIT}.tar.gz -> zed-${EGIT_COMMIT}.tar.gz
 	amd64? (
@@ -1592,10 +1583,7 @@ SRC_URI="
 		https://github.com/zed-industries/livekit-rust-sdks/releases/download/webrtc-${WEBRTC_COMMIT}/webrtc-linux-arm64-release.zip ->
 			webrtc-${WEBRTC_COMMIT}-linux-arm64-release.zip
 	)
-	${CARGO_CRATE_URIS}
-	browser-extension? (
-		https://github.com/zeo-workspace/zeo-browser/releases/download/v${ZEO_BROWSER_PV}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi
-	)"
+	${CARGO_CRATE_URIS}"
 
 # The upstream tarball unpacks to zed-<commit>; ${PN} is "zeo" here, so the
 # directory must be named explicitly rather than derived from it.
@@ -1732,6 +1720,7 @@ RDEPEND="
 	!app-editors/zed-bin
 	!app-editors/zeo-bin
 	ai-jail? ( || ( sys-apps/ai-jail sys-apps/ai-jail-bin ) )
+	browser-extension? ( www-plugins/zeo-browser )
 	claude-agent-acp-plus? ( >=dev-util/claude-agent-acp-plus-0.26.0 )
 	claude-agent-acp-tui? ( dev-util/claude-agent-acp-tui )
 	claude-code-ide? ( dev-util/claude-code )
@@ -2326,10 +2315,6 @@ src_install() {
 		newins "${manifests}"/dev.zeo.browser_host.chrome.json dev.zeo.browser_host.json
 		insinto "/usr/$(get_libdir)/mozilla/native-messaging-hosts"
 		newins "${manifests}"/dev.zeo.browser_host.firefox.json dev.zeo.browser_host.json
-
-		# System scope, keyed by Firefox's application ID: every profile loads it.
-		insinto "/usr/$(get_libdir)/mozilla/extensions/{ec8030f7-c20a-464f-9b0e-13a3a9e97384}"
-		newins "${DISTDIR}/zeo-browser-firefox-${ZEO_BROWSER_PV}.xpi" zeo-browser@zeo.dev.xpi
 	fi
 }
 
@@ -2381,7 +2366,8 @@ pkg_postinst() {
 		elog ""
 		elog "The browser sidebar (zeo-browser) talks to this Zeo through"
 		elog "/usr/libexec/zeo-browser-host, installed with its Chrome, Chromium and"
-		elog "Firefox host manifests. Firefox loads the add-on from the system scope;"
+		elog "Firefox host manifests. Firefox loads the add-on, installed by"
+		elog "www-plugins/zeo-browser, from the system scope;"
 		elog "on Chrome or Chromium build and load it yourself:"
 		elog ""
 		elog "    cd zeo-browser && npm ci && npm run build"

@@ -1,0 +1,390 @@
+From 61d2836893a865b4e86a6a1d3ddedd24c5927cd2 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Wed, 14 Oct 2026 03:48:56 -0300
+Subject: [PATCH] feat(agent): make boolean config options session-scoped
+
+A switch -- Fast mode today, Ultracode once the adapter exposes it as one --
+now applies to the session it was flipped in and nothing else. Two things
+used to carry it further, and both are removed for booleans only:
+
+  * 0010's Shift-click persisted a switch as the entry's default, so every
+    new thread started with it. Defaults are a feature of the list options
+    (model, mode, effort), where "from now on" is a real choice; a toggle
+    has no default to set. The switch tooltip now says "Applies to this
+    session only" instead of teaching the gesture.
+
+  * 0036 recorded each thread's last state and replayed it on reopen, so a
+    thread left with a switch on came back with it on. `snapshot` no longer
+    records booleans, and a boolean already sitting in a record written
+    before this patch is ignored on load, so no existing thread re-arms one.
+
+Why the scope matters: Ultracode tells the model that token cost is not a
+constraint and runs standing multi-agent orchestration. Claude Code's CLI
+(`/effort ultracode on|off`, "this session only") and the VS Code extension
+both keep it per session. Carried into new threads, or re-armed on reopen,
+it would spend on work nobody asked to run that way.
+
+What still applies to a switch: a `default_config_options` boolean written
+by hand in settings.json, on a new session and -- because nothing is
+recorded for it -- on a reopened one, exactly as before 0036. Only the UI
+stops writing one.
+
+Not changed: the native agent's thinking-mode button keeps 0010's
+Shift-click; it is not an ACP config option.
+
+Tests: `load_ignores_a_recorded_toggle` (red without the load-side filter:
+`web_search: true` was sent), the snapshot test now pins that booleans are
+skipped, and the recorder and round-trip tests that asserted a recorded
+boolean were rewritten to the new contract -- the round trip now expects the
+entry default on reopen. agent_servers 150 passed; config_options 6 passed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/agent_servers/src/acp/v1.rs b/crates/agent_servers/src/acp/v1.rs
+index 15263ae..32bdf05 100644
+--- a/crates/agent_servers/src/acp/v1.rs
++++ b/crates/agent_servers/src/acp/v1.rs
+@@ -1190,9 +1190,13 @@ impl AcpConnection {
+                         return None;
+                     }
+                     let config_id = option.config_id.0.as_ref();
++                    // A boolean in a record written before toggles became
++                    // session-scoped is ignored, so an old thread does not
++                    // re-arm a switch on reopen (see `snapshot`).
+                     let recorded_value = recorded
+                         .as_ref()
+-                        .and_then(|recorded| recorded.options.get(config_id));
++                        .and_then(|recorded| recorded.options.get(config_id))
++                        .filter(|value| !matches!(value, RecordedValue::Bool(_)));
+                     if let Some(recorded_value) = recorded_value
+                         && !recorded_is_offered(option, recorded_value)
+                         && !dropped_warned.contains(&option.config_id)
+diff --git a/crates/agent_servers/src/acp/v1/recorder_tests.rs b/crates/agent_servers/src/acp/v1/recorder_tests.rs
+index dc02398..46bc562 100644
+--- a/crates/agent_servers/src/acp/v1/recorder_tests.rs
++++ b/crates/agent_servers/src/acp/v1/recorder_tests.rs
+@@ -20,7 +20,11 @@ fn script() -> AgentScript {
+             boolean("web_search", false),
+         ]),
+         rejected_values: vec![("model", serde_json::json!("haiku"))],
+-        side_effect: Some(("model", "opus", boolean("fast_mode", false))),
++        side_effect: Some((
++            "model",
++            "opus",
++            select("speed", "normal", &["normal", "fast"]),
++        )),
+         ..Default::default()
+     }
+ }
+@@ -58,7 +62,11 @@ async fn recorder_ignores_a_rejected_pick_and_records_an_accepted_one(
+     let after_pick = recorded(PLUS, "rec-pick", cx).expect("an accepted pick is recorded");
+     assert_eq!(recorded_id(&after_pick, "model").as_deref(), Some("opus"));
+     assert_eq!(recorded_id(&after_pick, "effort").as_deref(), Some("high"));
+-    assert_eq!(recorded_bool(&after_pick, "web_search"), Some(false));
++    assert_eq!(
++        recorded_bool(&after_pick, "web_search"),
++        None,
++        "a toggle is session-scoped and never recorded (patch 0059)"
++    );
+ 
+     assert!(
+         agent
+@@ -87,7 +95,7 @@ async fn recorder_records_options_that_appear_as_a_side_effect(cx: &mut gpui::Te
+         .expect("accepted pick");
+ 
+     let config = recorded(PLUS, "rec-side", cx).expect("recorded");
+-    assert_eq!(recorded_bool(&config, "fast_mode"), Some(false));
++    assert_eq!(recorded_id(&config, "speed").as_deref(), Some("normal"));
+     assert_eq!(recorded_id(&config, "model").as_deref(), Some("opus"));
+ }
+ 
+@@ -111,7 +119,11 @@ async fn recorder_records_a_config_option_update_from_the_agent(cx: &mut gpui::T
+     let config = recorded(PLUS, "rec-update", cx).expect("an agent update is recorded");
+     assert_eq!(recorded_id(&config, "model").as_deref(), Some("haiku"));
+     assert_eq!(recorded_id(&config, "effort").as_deref(), Some("low"));
+-    assert_eq!(recorded_bool(&config, "web_search"), Some(true));
++    assert_eq!(
++        recorded_bool(&config, "web_search"),
++        None,
++        "a toggle the agent reports is not recorded either"
++    );
+ }
+ 
+ #[gpui::test]
+@@ -120,7 +132,8 @@ async fn recorder_records_the_defaults_a_new_session_adopted_but_not_a_rejected_
+ ) {
+     // R1.6, with the hostile half from the design's gotcha: the default for
+     // `model` is rejected and reverted, so the optimistic `haiku` must never
+-    // reach the record; the accepted `web_search` default must.
++    // reach the record. The accepted `web_search` default is a toggle, which
++    // is session-scoped and not recorded (patch 0059).
+     let project = init(cx).await;
+     let agent = ConfigAgent::connect(script(), project, cx).await;
+     agent.set_defaults(
+@@ -134,7 +147,7 @@ async fn recorder_records_the_defaults_a_new_session_adopted_but_not_a_rejected_
+     let _thread = agent.new_session(cx).await;
+ 
+     let config = recorded(PLUS, "rec-created", cx).expect("a new session's defaults are recorded");
+-    assert_eq!(recorded_bool(&config, "web_search"), Some(true));
++    assert_eq!(recorded_bool(&config, "web_search"), None);
+     assert_eq!(
+         recorded_id(&config, "model").as_deref(),
+         Some("sonnet"),
+diff --git a/crates/agent_servers/src/acp/v1/restore_options_tests.rs b/crates/agent_servers/src/acp/v1/restore_options_tests.rs
+index 4950ff0..472954c 100644
+--- a/crates/agent_servers/src/acp/v1/restore_options_tests.rs
++++ b/crates/agent_servers/src/acp/v1/restore_options_tests.rs
+@@ -375,3 +375,33 @@ async fn thread_config_store_corrupt_record_is_logged_and_load_applies_defaults(
+         "the read failure must be logged with the agent and the session id"
+     );
+ }
++
++#[gpui::test]
++async fn load_ignores_a_recorded_toggle(cx: &mut gpui::TestAppContext) {
++    // Toggles are session-scoped (patch 0059). A record written before that
++    // still holds `web_search: true`; reopening the thread must not re-arm it,
++    // while the select it was recorded beside is still restored.
++    let project = init(cx).await;
++    let agent = ConfigAgent::connect(plus_script(), project, cx).await;
++    record(
++        PLUS,
++        "s-old-toggle",
++        recorded_config(
++            None,
++            vec![
++                ("model", RecordedValue::Id("opus".into())),
++                ("web_search", RecordedValue::Bool(true)),
++            ],
++        ),
++        cx,
++    )
++    .await;
++
++    let _thread = agent.load("s-old-toggle", cx).await;
++
++    assert_eq!(
++        agent.config_requests(),
++        vec![wire("model", serde_json::json!("opus"))],
++        "the recorded toggle is not sent; the agent's own value stands"
++    );
++}
+diff --git a/crates/agent_servers/src/acp/v1/round_trip_tests.rs b/crates/agent_servers/src/acp/v1/round_trip_tests.rs
+index df1cda0..22591fe 100644
+--- a/crates/agent_servers/src/acp/v1/round_trip_tests.rs
++++ b/crates/agent_servers/src/acp/v1/round_trip_tests.rs
+@@ -76,9 +76,10 @@ async fn round_trip_two_agents_sharing_a_session_id_restore_their_own_state(
+ async fn round_trip_restores_picked_and_agent_reported_values_after_a_restart(
+     cx: &mut gpui::TestAppContext,
+ ) {
+-    // R1.9, R2.1, R2.3: after the restart only the changed options are sent;
+-    // `web_search`, recorded at the value the agent restores, is skipped even
+-    // though the entry default differs.
++    // R1.9, R2.1, R2.3: after the restart only the changed options are sent.
++    // `web_search` is a toggle, which is session-scoped and not recorded
++    // (patch 0059), so the reopened thread gets the entry default, as a new
++    // thread would.
+     let project = init(cx).await;
+     {
+         let agent = ConfigAgent::connect(script(PLUS), project.clone(), cx).await;
+@@ -109,6 +110,7 @@ async fn round_trip_restores_picked_and_agent_reported_values_after_a_restart(
+         vec![
+             wire("effort", serde_json::json!("low")),
+             wire("model", serde_json::json!("opus")),
++            wire("web_search", serde_json::json!(true)),
+         ]
+     );
+     assert_eq!(
+@@ -121,7 +123,7 @@ async fn round_trip_restores_picked_and_agent_reported_values_after_a_restart(
+     );
+     assert_eq!(
+         agent.option_value("s-trip", "web_search"),
+-        Some(serde_json::json!(false))
++        Some(serde_json::json!(true))
+     );
+ }
+ 
+diff --git a/crates/agent_servers/src/thread_config_store.rs b/crates/agent_servers/src/thread_config_store.rs
+index da5b063..8185fa4 100644
+--- a/crates/agent_servers/src/thread_config_store.rs
++++ b/crates/agent_servers/src/thread_config_store.rs
+@@ -47,7 +47,11 @@ pub fn key(agent_id: &AgentId, session_id: &acp_v2::SessionId) -> Result<String>
+ 
+ /// Reads a thread's record. A read or parse failure is logged with both ids
+ /// and reads as "no record", so it never blocks loading the thread.
+-pub fn read(agent_id: &AgentId, session_id: &acp_v2::SessionId, cx: &App) -> Option<RecordedConfig> {
++pub fn read(
++    agent_id: &AgentId,
++    session_id: &acp_v2::SessionId,
++    cx: &App,
++) -> Option<RecordedConfig> {
+     let result = key(agent_id, session_id).and_then(|key| {
+         let raw = KeyValueStore::global(cx).scoped(NAMESPACE).read(&key)?;
+         raw.map(|raw| {
+@@ -117,9 +121,14 @@ pub fn delete(agent_id: &AgentId, session_id: &acp_v2::SessionId, cx: &App) -> T
+     })
+ }
+ 
+-/// Captures the current mode and the select and boolean options of a
+-/// session. Any other option kind has no value this record can replay, so it
+-/// is skipped.
++/// Captures the current mode and the select options of a session.
++///
++/// Boolean options are skipped on purpose: a toggle is scoped to the session
++/// it was flipped in. It has no default to set (no Shift-click), and a
++/// reopened thread must not re-arm it -- a switch such as Ultracode tells the
++/// model that token cost is no constraint, and Claude Code keeps it "this
++/// session only". Any other option kind has no value this record can replay,
++/// so it is skipped too.
+ pub fn snapshot(
+     options: &[acp_v2::SessionConfigOption],
+     mode: Option<&acp::SessionModeId>,
+@@ -131,9 +140,6 @@ pub fn snapshot(
+                 acp_v2::SessionConfigKind::Select(select) => {
+                     RecordedValue::Id(select.current_value.0.to_string())
+                 }
+-                acp_v2::SessionConfigKind::Boolean(boolean) => {
+-                    RecordedValue::Bool(boolean.current_value)
+-                }
+                 _ => return None,
+             };
+             Some((option.config_id.0.to_string(), value))
+diff --git a/crates/agent_servers/src/thread_config_store_tests.rs b/crates/agent_servers/src/thread_config_store_tests.rs
+index f471d4a..e4c858b 100644
+--- a/crates/agent_servers/src/thread_config_store_tests.rs
++++ b/crates/agent_servers/src/thread_config_store_tests.rs
+@@ -213,7 +213,7 @@ fn recorded_config_reads_and_writes_the_documented_json_shape() {
+ // ---------------------------------------------------------------- snapshot
+ 
+ #[test]
+-fn snapshot_keeps_select_boolean_and_mode_and_skips_other_kinds() {
++fn snapshot_keeps_select_and_mode_and_skips_booleans_and_other_kinds() {
+     let mut options = v2_options(vec![
+         acp::SessionConfigOption::select(
+             "model",
+@@ -256,12 +256,16 @@ fn snapshot_keeps_select_boolean_and_mode_and_skips_other_kinds() {
+     assert_eq!(recorded.mode.as_deref(), Some("plan"));
+     assert_eq!(id_of(&recorded, "model").as_deref(), Some("opus"));
+     assert_eq!(id_of(&recorded, "effort").as_deref(), Some("high"));
+-    assert_eq!(bool_of(&recorded, "fast_mode"), Some(false));
++    assert_eq!(
++        bool_of(&recorded, "fast_mode"),
++        None,
++        "a toggle is session-scoped and is not recorded"
++    );
+     assert!(
+         !recorded.options.contains_key("_slider"),
+-        "only select and boolean options are recorded"
++        "only select options are recorded"
+     );
+-    assert_eq!(recorded.options.len(), 3);
++    assert_eq!(recorded.options.len(), 2);
+ }
+ 
+ #[test]
+diff --git a/crates/agent_ui/src/config_options.rs b/crates/agent_ui/src/config_options.rs
+index 320ceb9..4d810f5 100644
+--- a/crates/agent_ui/src/config_options.rs
++++ b/crates/agent_ui/src/config_options.rs
+@@ -23,7 +23,7 @@ use util::ResultExt as _;
+ use zed_actions::agent::ToggleModelSelector;
+ 
+ use crate::set_as_default::{
+-    SET_AS_DEFAULT_HINT, default_hint_footer, default_marker, persists_default,
++    SESSION_ONLY_HINT, default_hint_footer, default_marker, persists_default,
+ };
+ use crate::ui::documentation_aside_side;
+ use crate::{
+@@ -294,8 +294,6 @@ impl Render for ConfigOptionsView {
+ struct ConfigOptionSelector {
+     config_options: Rc<dyn AgentSessionConfigOptions>,
+     config_id: acp::SessionConfigId,
+-    agent_server: Rc<dyn AgentServer>,
+-    fs: Arc<dyn Fs>,
+     picker_handle: Option<PopoverMenuHandle<Picker<ConfigOptionPickerDelegate>>>,
+     picker: Option<Entity<Picker<ConfigOptionPickerDelegate>>>,
+     setting_value: bool,
+@@ -327,8 +325,6 @@ impl ConfigOptionSelector {
+         let (picker_handle, picker) = if is_select {
+             let config_options = config_options.clone();
+             let config_id = config_id.clone();
+-            let agent_server = agent_server.clone();
+-            let fs = fs.clone();
+             let picker = cx.new(move |picker_cx| {
+                 let delegate = ConfigOptionPickerDelegate::new(
+                     config_options,
+@@ -355,8 +351,6 @@ impl ConfigOptionSelector {
+         Self {
+             config_options,
+             config_id,
+-            agent_server,
+-            fs,
+             picker_handle,
+             picker,
+             setting_value: false,
+@@ -592,11 +586,11 @@ impl Render for ConfigOptionSelector {
+                                 .color(Color::Muted),
+                         );
+                     }
+-                    // A switch has no menu to carry the footer the other
+-                    // surfaces use, so the tooltip is where the gesture is
+-                    // taught.
++                    // A switch is scoped to this session: it has no default
++                    // to set, and a reopened thread does not restore it
++                    // (`thread_config_store::snapshot` skips booleans).
+                     content = content.child(
+-                        Label::new(SET_AS_DEFAULT_HINT)
++                        Label::new(SESSION_ONLY_HINT)
+                             .size(LabelSize::Small)
+                             .color(Color::Muted),
+                     );
+@@ -605,8 +599,6 @@ impl Render for ConfigOptionSelector {
+ 
+                 let config_id = self.config_id.clone();
+                 let config_options = self.config_options.clone();
+-                let agent_server = self.agent_server.clone();
+-                let fs = self.fs.clone();
+                 let current_value = boolean.current_value;
+                 let toggle_state = if current_value {
+                     ToggleState::Selected
+@@ -630,7 +622,7 @@ impl Render for ConfigOptionSelector {
+                         .label_size(LabelSize::Small)
+                         .label_color(Color::Muted)
+                         .disabled(self.setting_value)
+-                        .on_click(move |state, window, cx| {
++                        .on_click(move |state, _window, cx| {
+                             if !config_options.config_options().iter().any(|option| {
+                                 option.config_id == config_id
+                                     && matches!(&option.kind, acp::SessionConfigKind::Boolean(_))
+@@ -639,15 +631,6 @@ impl Render for ConfigOptionSelector {
+                             }
+ 
+                             let next_value = matches!(state, ToggleState::Selected);
+-                            if persists_default(window) {
+-                                agent_server.set_default_config_option(
+-                                    config_id.0.as_ref(),
+-                                    Some(AgentConfigOptionValue::Boolean(next_value)),
+-                                    fs.clone(),
+-                                    cx,
+-                                );
+-                            }
+-
+                             let task = config_options.set_config_option(
+                                 config_id.clone(),
+                                 acp::SessionConfigOptionValue::boolean(next_value),
+diff --git a/crates/agent_ui/src/set_as_default.rs b/crates/agent_ui/src/set_as_default.rs
+index a633d24..25b9ad2 100644
+--- a/crates/agent_ui/src/set_as_default.rs
++++ b/crates/agent_ui/src/set_as_default.rs
+@@ -30,6 +30,11 @@ const DEFAULT_MARKER_TOOLTIP: &str = "Default for new threads";
+ /// honours it.
+ pub(crate) const SET_AS_DEFAULT_HINT: &str = "Shift-click to set as default";
+ 
++/// The tooltip line of a boolean switch. Toggles have no default: a pick
++/// applies to the session in front of you and nothing else, so the
++/// Shift-click gesture the menus teach does not exist for them.
++pub(crate) const SESSION_ONLY_HINT: &str = "Applies to this session only";
++
+ /// The marker on the entry that is the persisted default.
+ ///
+ /// Deliberately not the check mark: the check says "this is what the thread is
