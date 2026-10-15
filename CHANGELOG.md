@@ -31,6 +31,57 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.5.0_p20261014] — 2026-10-14 (tagged)
+
+The release train (story 048) ships as Zeo 0.5.0 on Zed `c403bc6af`, the snapshot
+`0.4.0_p20261014` already packaged.
+
+### Added
+
+- `0053`–`0062` join the series, each recorded in `zeo/CHANGELOG.md` 0.5.0:
+  - `0053`, tasks panel polish (story 034);
+  - `0054` and `0055`, the Run button and the conditional Decline (035);
+  - `0056`, task output and logs (041);
+  - `0057`, ai-jail settings, USE `ai-jail` (043);
+  - `0058`, the browser extension, USE `browser-extension`, which needs `devtools-bridge` (045);
+  - `0059`, session-scoped switches;
+  - `0060`, the quota refresh on ring hover;
+  - `0061`, `ZEO_THREAD` for zeo-systray (050);
+  - `0062`, the worktree config screen.
+
+  `0059`, `0060` and `0062` are pure Zed and ride `claude-agent-acp-plus` BY CHOICE.
+- `release/next/` held the candidate ebuild while the train ran; it is shipped now.
+
+### Changed
+
+- The train's series, built on `93d745668`, was carried onto `c403bc6af` by
+  cherry-pick:
+  - the 49 shared patches come from `main`'s refreshed `0.4.0_p20261014`;
+  - `0053`–`0062` were rebased, with one resolved conflict in `0058`, where upstream
+    added `cancel_calls` beside `authorization_outcomes` in `connection.rs`'s test
+    support;
+  - one type rename was needed in `0057`'s `stdio_with`
+    (`acp::SessionModeId` → `acp_v2::SessionConfigValueId`).
+- `0057` and `0058` now add the action namespaces they register (`agent_sandbox`,
+  `agent_memory`, `devtools_bridge`) to `zed::tests::test_action_namespaces`. The
+  release gate's nextest run failed on it, 4413/4414. Each patch lists its own
+  names in its own hunk, so `0058` still applies without `0057`.
+
+### Verification
+
+- verify 59/59; check-sync in sync with the overlay.
+- nextest 4414/4414 (20 skipped).
+- `ebuild prepare` run as user for zeo (default USE) and zeo-bin.
+- `pkgcheck` shows only the existing `llvm-r1` deprecation.
+- osv-scanner reports nothing new against `0.4.0_p20261012-r1`, and CRATES equals
+  the `Cargo.lock` registry set.
+- The portable `.deb` and `zeo-bin` start in a Debian 12 container and in a VM
+  without AVX-512.
+- A GUI check of the release build on Xvfb: hub
+  `docs/assets/048-release-0.5.0_p20261014/`.
+- Releases `v0.5.0_p20261014` and `zeo-browser-0.1.0` on `zeo-workspace/zeo` were
+  downloaded back and checked against `SHA256SUMS`.
+
 ## [0.4.0_p20261014] — 2026-10-14 (untagged)
 
 ### Changed
