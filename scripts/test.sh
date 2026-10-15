@@ -57,10 +57,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # The crates the series touches -- what a regression from a patch can break.
 CRATES=(acp_thread agent agent_servers agent_settings agent_tasks_panel agent_ui
-	auto_update claude_code_ide cli client extension_host feature_flags icons
-	install_cli markdown oauth_callback_server onboarding paths project
-	recent_projects release_channel remote_server settings settings_content
-	settings_ui sidebar title_bar ui workspace zed zed_credentials_provider)
+	auto_update claude_code_ide cli client devtools_bridge extension_host
+	feature_flags icons install_cli markdown oauth_callback_server onboarding paths
+	project recent_projects release_channel remote_server settings settings_content
+	settings_ui sidebar title_bar ui workspace zed zed_credentials_provider
+	zeo_browser_host)
 
 # The Claude Agent (Plus) half of the e2e suites, 0051's zeo_plus_e2e_tests module.
 E2E_PLUS_FILTER='test(/^zeo_plus_e2e_tests::/)'
