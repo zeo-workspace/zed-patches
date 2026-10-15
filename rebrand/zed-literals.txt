@@ -3,7 +3,7 @@ crates/acp_thread/src/acp_thread.rs	"a version this Zed does not know cannot be 
 crates/agent/src/agent.rs	"Zed Agent"
 crates/agent/src/templates.rs	"You are the Zed coding agent"
 crates/agent/src/tools/terminal_tool.rs	"Could not select a Linux Zed release for WSL sandboxing"
-crates/agent_servers/src/acp.rs	"Authorize Zed in your browser"
+crates/agent_servers/src/acp/v1.rs	"Authorize Zed in your browser"
 crates/agent_ui/src/agent_configuration/configure_context_server_modal.rs	"Timed out waiting for context server `{}` to start. Check the Zed log for details."
 crates/agent_ui/src/agent_panel.rs	"Zed Agent"
 crates/agent_ui/src/agent_ui.rs	"Zed Agent"
