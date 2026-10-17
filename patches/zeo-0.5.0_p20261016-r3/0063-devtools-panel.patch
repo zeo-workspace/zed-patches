@@ -108,6 +108,14 @@ What Zeo does:
   search header -- this Zed has no filter menu -- composing with the text
   filter and 0049's pinned section.
 
+It also extends 0065's drag guard (story 036) to the devtools-only view:
+drop_thread_row and thread_row_drag test Sidebar::is_filtering instead of
+the filter text alone, because that view shows only part of a project's
+order, and a drop there would record only the visible threads and erase
+the hidden ones' places. 0065's ThreadEntry test fixture gains is_devtools,
+and sidebar_organization_filter_tests.rs gains the two devtools-only drop
+tests and their helpers.
+
 USE devtools-panel (default on) needs browser-extension. Applies on top of 0058
 with or without 0057; 0050/0051 apply on top of it unchanged.
 
@@ -115,10 +123,10 @@ Story 055 (zed/.epic/stories/055-devtools-panel-mvp), branch story/055.
 ---
 
 diff --git a/assets/settings/default.json b/assets/settings/default.json
-index b4d5e49..0d373e6 100644
+index e9c089e..4101322 100644
 --- a/assets/settings/default.json
 +++ b/assets/settings/default.json
-@@ -3075,6 +3075,24 @@
+@@ -3077,6 +3077,24 @@
        "enabled": false,
      },
    },
@@ -144,7 +152,7 @@ index b4d5e49..0d373e6 100644
    // that receives element selections from a dev-server page and hands them to
    // the agent panel. Turning it off stops listening and removes the socket.
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index b12c528..f6a2212 100644
+index 5b63220..de5b7dd 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -3818,6 +3818,58 @@ impl AgentPanel {
@@ -11519,7 +11527,7 @@ index 2e2e088..e7ac1f0 100644
      let mut fifth = Client::hello(&bridge.dir);
      let busy = fifth.line().expect("an answer");
 diff --git a/crates/settings/src/vscode_import.rs b/crates/settings/src/vscode_import.rs
-index f03a939..c938b56 100644
+index 65be438..056327b 100644
 --- a/crates/settings/src/vscode_import.rs
 +++ b/crates/settings/src/vscode_import.rs
 @@ -551,6 +551,7 @@ impl VsCodeSettings {
@@ -11603,6 +11611,28 @@ index 787849a..ae70e43 100644
  /// When to scan content of linked directories.
  #[derive(
      Copy,
+diff --git a/crates/sidebar/src/organization.rs b/crates/sidebar/src/organization.rs
+index 55c7c53..643a3e9 100644
+--- a/crates/sidebar/src/organization.rs
++++ b/crates/sidebar/src/organization.rs
+@@ -335,7 +335,7 @@ impl Sidebar {
+     ) {
+         // A filtered list shows part of the order, and recording it would drop every hidden
+         // thread's place. The drag-offer gate is not enough: text typed mid-drag gets past it.
+-        if self.has_filter_query(cx) {
++        if self.is_filtering(cx) {
+             return;
+         }
+         // Without the store no drag is offered, so there is nothing to report.
+@@ -407,7 +407,7 @@ impl Sidebar {
+         thread: &ThreadEntry,
+         cx: &mut Context<Self>,
+     ) -> AnyElement {
+-        if ThreadOrganizationStore::try_global(cx).is_none() || self.has_filter_query(cx) {
++        if ThreadOrganizationStore::try_global(cx).is_none() || self.is_filtering(cx) {
+             return row;
+         }
+         let Some(origin) = row_origin(&self.contents.entries, ix) else {
 diff --git a/crates/sidebar/src/pinned_section.rs b/crates/sidebar/src/pinned_section.rs
 index eb9f1ff..c72ded3 100644
 --- a/crates/sidebar/src/pinned_section.rs
@@ -11624,7 +11654,7 @@ index eb9f1ff..c72ded3 100644
              apply_live_row_state(
                  &mut row,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 1d38eed..8c1ada9 100644
+index 26e1935..9c0aa94 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -6,6 +6,7 @@ use action_log::DiffStats;
@@ -11635,9 +11665,9 @@ index 1d38eed..8c1ada9 100644
  use agent_ui::terminal_thread_metadata_store::{
      TerminalThreadMetadata, TerminalThreadMetadataStore, terminal_title_prefix,
  };
-@@ -92,6 +93,9 @@ mod sidebar_tests;
+@@ -98,6 +99,9 @@ mod sidebar_organization_filter_tests;
  #[cfg(test)]
- mod sidebar_pinned_tests;
+ mod sidebar_organization_tests;
  
 +#[cfg(test)]
 +mod sidebar_devtools_tests;
@@ -11645,7 +11675,7 @@ index 1d38eed..8c1ada9 100644
  gpui::actions!(
      agents_sidebar,
      [
-@@ -376,6 +380,9 @@ struct ThreadEntry {
+@@ -382,6 +386,9 @@ struct ThreadEntry {
      /// `Some` only on a row of the Pinned section, which names the thread's project because it
      /// sits outside its project group.
      pinned_project_label: Option<SharedString>,
@@ -11655,7 +11685,7 @@ index 1d38eed..8c1ada9 100644
  }
  
  #[derive(Clone)]
-@@ -934,6 +941,10 @@ pub struct Sidebar {
+@@ -940,6 +947,10 @@ pub struct Sidebar {
      cross_channel_import_channels: Vec<SharedString>,
      /// Never serialized: the Pinned section's collapsed state lasts for the session.
      pinned_collapsed: bool,
@@ -11666,7 +11696,7 @@ index 1d38eed..8c1ada9 100644
  }
  
  impl Sidebar {
-@@ -1021,6 +1032,20 @@ impl Sidebar {
+@@ -1027,6 +1038,20 @@ impl Sidebar {
          })
          .detach();
  
@@ -11687,7 +11717,7 @@ index 1d38eed..8c1ada9 100644
          cx.observe(
              &TerminalThreadMetadataStore::global(cx),
              |this, _store, cx| {
-@@ -1087,6 +1112,8 @@ impl Sidebar {
+@@ -1093,6 +1118,8 @@ impl Sidebar {
              import_banners_use_verbose_labels: None,
              cross_channel_import_channels: Vec::new(),
              pinned_collapsed: false,
@@ -11696,7 +11726,7 @@ index 1d38eed..8c1ada9 100644
          }
      }
  
-@@ -1589,6 +1616,14 @@ impl Sidebar {
+@@ -1595,6 +1622,14 @@ impl Sidebar {
              .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone());
  
          let query = self.filter_editor.read(cx).text(cx);
@@ -11711,7 +11741,7 @@ index 1d38eed..8c1ada9 100644
  
          let previous = mem::take(&mut self.contents);
  
-@@ -1778,6 +1813,9 @@ impl Sidebar {
+@@ -1784,6 +1819,9 @@ impl Sidebar {
                      .has_notification
                      .then_some(terminal.metadata.terminal_id)
              }));
@@ -11721,7 +11751,7 @@ index 1d38eed..8c1ada9 100644
              if group_key.path_list().paths().is_empty() {
                  continue;
              }
-@@ -1785,7 +1823,7 @@ impl Sidebar {
+@@ -1791,7 +1829,7 @@ impl Sidebar {
              let label = group_key.display_name(&path_detail_map);
  
              let is_collapsed = self.is_group_collapsed(group_key, cx);
@@ -11730,7 +11760,7 @@ index 1d38eed..8c1ada9 100644
  
              let is_active = active_workspace
                  .as_ref()
-@@ -1821,6 +1859,7 @@ impl Sidebar {
+@@ -1827,6 +1865,7 @@ impl Sidebar {
                          // pass below downgrades them to `Empty` if no draft
                          // label can be derived.
                          let draft = row.is_draft().then_some(DraftKind::WithContent);
@@ -11738,7 +11768,7 @@ index 1d38eed..8c1ada9 100644
                          Arc::new(ThreadEntry {
                              metadata: row,
                              icon,
-@@ -1835,6 +1874,7 @@ impl Sidebar {
+@@ -1841,6 +1880,7 @@ impl Sidebar {
                              worktrees,
                              diff_stats: DiffStats::default(),
                              pinned_project_label: None,
@@ -11746,7 +11776,7 @@ index 1d38eed..8c1ada9 100644
                          })
                      };
  
-@@ -1948,6 +1988,11 @@ impl Sidebar {
+@@ -1954,6 +1994,11 @@ impl Sidebar {
                      if thread.draft != Some(DraftKind::Empty) {
                          return true;
                      }
@@ -11758,7 +11788,7 @@ index 1d38eed..8c1ada9 100644
                      if pending_activation.is_some() {
                          return false;
                      }
-@@ -1990,6 +2035,18 @@ impl Sidebar {
+@@ -1996,6 +2041,18 @@ impl Sidebar {
                      let b_time = Self::thread_display_time(&b.metadata);
                      b_time.cmp(&a_time)
                  });
@@ -11777,7 +11807,7 @@ index 1d38eed..8c1ada9 100644
              } else {
                  for info in live_infos {
                      if info.status == AgentThreadStatus::Running {
-@@ -2106,7 +2163,10 @@ impl Sidebar {
+@@ -2112,7 +2169,10 @@ impl Sidebar {
                      }
                  }
  
@@ -11789,8 +11819,8 @@ index 1d38eed..8c1ada9 100644
                  {
                      continue;
                  }
-@@ -2139,6 +2199,10 @@ impl Sidebar {
-                     &mut current_thread_ids,
+@@ -2147,6 +2207,10 @@ impl Sidebar {
+                     cx,
                  );
              } else {
 +                if devtools_only && threads.is_empty() {
@@ -11800,7 +11830,7 @@ index 1d38eed..8c1ada9 100644
                  let has_terminal_notifications = terminals
                      .iter()
                      .any(|t| notified_terminals.contains(&t.metadata.terminal_id));
-@@ -2180,7 +2244,8 @@ impl Sidebar {
+@@ -2188,7 +2252,8 @@ impl Sidebar {
                      has_threads,
                  });
  
@@ -11810,7 +11840,7 @@ index 1d38eed..8c1ada9 100644
                      continue;
                  }
  
-@@ -2203,6 +2268,7 @@ impl Sidebar {
+@@ -2213,6 +2278,7 @@ impl Sidebar {
                  path_detail_map: &path_detail_map,
                  branch_by_path: &branch_by_path,
                  resolve_agent_icon: &resolve_agent_icon,
@@ -11818,7 +11848,7 @@ index 1d38eed..8c1ada9 100644
                  new_live_statuses: &mut new_live_statuses,
                  notified_threads: &mut notified_threads,
              },
-@@ -2210,7 +2276,16 @@ impl Sidebar {
+@@ -2220,7 +2286,16 @@ impl Sidebar {
          );
          // Like a group's rows, a pinned row the filter drops is not registered below, so the
          // header is decided by, and reports notifications of, only the rows that are shown.
@@ -11836,7 +11866,7 @@ index 1d38eed..8c1ada9 100644
          if !pinned_rows.is_empty() {
              // Registered even while the section is collapsed, so the retains below keep the
              // notifications its header reports.
-@@ -2226,7 +2301,7 @@ impl Sidebar {
+@@ -2236,7 +2311,7 @@ impl Sidebar {
              project_header_indices.push(entries.len());
              entries.push(ListEntry::PinnedHeader { has_notifications });
              // Like a project group, a collapsed section still shows what the filter matches.
@@ -11845,7 +11875,7 @@ index 1d38eed..8c1ada9 100644
                  entries.extend(pinned_rows.into_iter().map(ListEntry::Thread));
              }
          }
-@@ -2563,7 +2638,7 @@ impl Sidebar {
+@@ -2573,7 +2648,7 @@ impl Sidebar {
      ) -> AnyElement {
          let host = key.host();
  
@@ -11854,7 +11884,7 @@ index 1d38eed..8c1ada9 100644
  
          let id_prefix = if is_sticky { "sticky-" } else { "" };
          let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
-@@ -2749,7 +2824,7 @@ impl Sidebar {
+@@ -2759,7 +2834,7 @@ impl Sidebar {
                  cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                      if event.modifiers().secondary() {
                          this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
@@ -11863,7 +11893,7 @@ index 1d38eed..8c1ada9 100644
                          this.toggle_collapse(&key_for_toggle, window, cx);
                      }
                  }),
-@@ -2802,7 +2877,7 @@ impl Sidebar {
+@@ -2813,7 +2888,7 @@ impl Sidebar {
              SharedString::from(format!("{id_prefix}project-header-new-thread-{ix}")),
              IconName::Plus,
          )
@@ -11872,7 +11902,7 @@ index 1d38eed..8c1ada9 100644
              let color = cx.theme().colors();
              button
                  .hover_background(color.element_background)
-@@ -3112,7 +3187,7 @@ impl Sidebar {
+@@ -3123,7 +3198,7 @@ impl Sidebar {
              .with_handle(menu_handle)
              .trigger(
                  IconButton::new(trigger_id, IconName::Ellipsis)
@@ -11881,7 +11911,7 @@ index 1d38eed..8c1ada9 100644
                          let color = cx.theme().colors();
                          button
                              .hover_background(color.element_background)
-@@ -3494,7 +3569,7 @@ impl Sidebar {
+@@ -3512,7 +3587,7 @@ impl Sidebar {
                          .color(Color::Accent),
                  )
              })
@@ -11890,7 +11920,7 @@ index 1d38eed..8c1ada9 100644
                  this.child(
                      Icon::new(disclosure_icon)
                          .size(IconSize::Small)
-@@ -3503,7 +3578,7 @@ impl Sidebar {
+@@ -3521,7 +3596,7 @@ impl Sidebar {
              })
              .cursor_pointer()
              .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
@@ -11899,7 +11929,7 @@ index 1d38eed..8c1ada9 100644
                      this.set_pinned_collapsed(!this.pinned_collapsed, cx);
                  }
              }))
-@@ -3727,6 +3802,28 @@ impl Sidebar {
+@@ -3745,6 +3820,28 @@ impl Sidebar {
          !self.filter_editor.read(cx).text(cx).is_empty()
      }
  
@@ -11928,7 +11958,7 @@ index 1d38eed..8c1ada9 100644
      fn start_renaming_entry(
          &mut self,
          ix: usize,
-@@ -6745,6 +6842,9 @@ impl Sidebar {
+@@ -6768,6 +6865,9 @@ impl Sidebar {
              .when_some(thread.pinned_project_label.clone(), |this, label| {
                  this.project_name(label)
              })
@@ -11938,7 +11968,7 @@ index 1d38eed..8c1ada9 100644
              .timestamp(timestamp)
              .highlight_positions(thread.highlight_positions.to_vec())
              .title_generating(title_generating)
-@@ -7833,6 +7933,8 @@ impl Sidebar {
+@@ -7857,6 +7957,8 @@ impl Sidebar {
          let has_query = self.has_filter_query(cx);
          let message = if has_query {
              "No threads match your search."
@@ -11947,7 +11977,7 @@ index 1d38eed..8c1ada9 100644
          } else {
              "No threads yet"
          };
-@@ -7939,6 +8041,20 @@ impl Sidebar {
+@@ -7963,6 +8065,20 @@ impl Sidebar {
                                      && !self.filter_editor.focus_handle(cx).is_focused(window),
                                  |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
                              )
@@ -12240,6 +12270,124 @@ index 0000000..cc3699c
 +        "R8.1: badged from memory"
 +    );
 +}
+diff --git a/crates/sidebar/src/sidebar_organization_filter_tests.rs b/crates/sidebar/src/sidebar_organization_filter_tests.rs
+index 48c8d98..4112c3f 100644
+--- a/crates/sidebar/src/sidebar_organization_filter_tests.rs
++++ b/crates/sidebar/src/sidebar_organization_filter_tests.rs
+@@ -1,9 +1,10 @@
+-// A thread drop while the list is filtered records nothing (R5.1, R2.11, R2.2).
++// A thread drop while the list is filtered records nothing (R5.1 extended to the devtools-only
++// view, R2.11, R2.2).
+ //
+ // `set_manual_order` replaces a project's whole order, and a filtered list shows only part of
+-// it: a drop there would take every hidden thread out of the order. The search text is
+-// covered over a Manual project whose hidden thread must keep its slot, and over a Recent
+-// project that must stay Recent.
++// it: a drop there would take every hidden thread out of the order. Both filters are covered —
++// the devtools-only view and the search text — each over a Manual project whose hidden thread
++// must keep its slot, and over a Recent project that must stay Recent.
+ 
+ use super::*;
+ use crate::sidebar_tests::{
+@@ -74,6 +75,18 @@ fn thread(session: &str, title: &str, minute: u32, cx: &mut VisualTestContext) -
+     })
+ }
+ 
++/// Marks `thread_id` as a devtools thread, the way 0063 records it.
++fn mark_devtools(thread_id: ThreadId, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| {
++            store
++                .set_devtools_root(thread_id, PathBuf::from(ALPHA), cx)
++                .expect("fixture: a saved thread can carry the mark");
++        })
++    });
++    cx.run_until_parked();
++}
++
+ /// Seeds a Manual order straight into the store (a fixture, not the code under test).
+ fn record_order(order: &[ThreadId], cx: &mut VisualTestContext) {
+     cx.update(|_, cx| {
+@@ -85,6 +98,13 @@ fn record_order(order: &[ThreadId], cx: &mut VisualTestContext) {
+     cx.run_until_parked();
+ }
+ 
++fn devtools_only(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) {
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.set_devtools_only(true, window, cx)
++    });
++    cx.run_until_parked();
++}
++
+ // ── Reading the store and the sidebar ──────────────────────────────────────
+ 
+ fn mode(cx: &mut VisualTestContext) -> SortMode {
+@@ -144,6 +164,53 @@ fn drop_on(
+     cx.run_until_parked();
+ }
+ 
++// ── The devtools-only view ─────────────────────────────────────────────────
++
++// R2.11, R5.1: the hidden editor thread keeps its slot, and so does every shown one.
++#[gpui::test]
++async fn devtools_only_drop_keeps_the_hidden_threads_in_place(cx: &mut TestAppContext) {
++    let (sidebar, cx) = alpha_window(cx).await;
++    let editor = thread("s-editor", "Editor thread", 3, cx);
++    let first = thread("s-first", "First devtools", 2, cx);
++    let second = thread("s-second", "Second devtools", 1, cx);
++    mark_devtools(first, cx);
++    mark_devtools(second, cx);
++    record_order(&[editor, first, second], cx);
++    devtools_only(&sidebar, cx);
++    let before = visible_entries_as_strings(&sidebar, cx);
++    assert!(
++        !before.iter().any(|line| line.contains("Editor thread")),
++        "fixture: the devtools-only view hides the editor thread"
++    );
++
++    drop_on(&sidebar, second, first, cx);
++
++    assert_eq!(
++        slots(&[editor, first, second], cx),
++        vec![Some(0), Some(1), Some(2)],
++        "a drop in the devtools-only view records nothing: the hidden thread keeps its slot"
++    );
++    assert_eq!(mode(cx), SortMode::Manual, "the mode is unchanged");
++    assert_eq!(visible_entries_as_strings(&sidebar, cx), before);
++}
++
++// R2.2: a Recent project shown through the devtools-only view stays Recent.
++#[gpui::test]
++async fn devtools_only_drop_leaves_a_recent_project_recent(cx: &mut TestAppContext) {
++    let (sidebar, cx) = alpha_window(cx).await;
++    let _editor = thread("s-editor", "Editor thread", 3, cx);
++    let first = thread("s-first", "First devtools", 2, cx);
++    let second = thread("s-second", "Second devtools", 1, cx);
++    mark_devtools(first, cx);
++    mark_devtools(second, cx);
++    devtools_only(&sidebar, cx);
++
++    drop_on(&sidebar, second, first, cx);
++
++    assert_eq!(mode(cx), SortMode::Recent, "nothing recorded");
++    assert_eq!(slots(&[first, second], cx), vec![None, None]);
++}
++
+ // ── The search text ────────────────────────────────────────────────────────
+ 
+ // R5.1: text typed while the pointer is held gets past the drag-offer gate; the drop itself
+diff --git a/crates/sidebar/src/sidebar_organization_tests.rs b/crates/sidebar/src/sidebar_organization_tests.rs
+index 5d35420..243b354 100644
+--- a/crates/sidebar/src/sidebar_organization_tests.rs
++++ b/crates/sidebar/src/sidebar_organization_tests.rs
+@@ -573,6 +573,7 @@ mod pure {
+             worktrees: Vec::new(),
+             diff_stats: DiffStats::default(),
+             pinned_project_label: pinned_label.map(|label| SharedString::from(label.to_string())),
++            is_devtools: false,
+         }))
+     }
+ 
 diff --git a/crates/sidebar/src/sidebar_tests.rs b/crates/sidebar/src/sidebar_tests.rs
 index c9d25e3..e6ed40d 100644
 --- a/crates/sidebar/src/sidebar_tests.rs
@@ -12513,10 +12661,10 @@ index 0000000..137512d
 +    );
 +}
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 3cf57c4..b74408c 100644
+index de703f4..a466efd 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -6009,6 +6009,7 @@ mod tests {
+@@ -6010,6 +6010,7 @@ mod tests {
                  "debug_panel",
                  "debugger",
                  "dev",

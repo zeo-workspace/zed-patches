@@ -78,6 +78,17 @@
 # sidebar.rs (0028-0030) and the keymaps (0035, 0043, 0044) are generated on
 # top of it (story 032).
 0049-agent-sidebar-pinned-section.patch
+# 0065: drag to reorder in the threads sidebar -- a project header onto
+# another header (this window's order, through upstream's
+# move_project_group_up/down), a thread inside its project group (records the
+# order shown and switches the project to Manual, kept in 0048's store), a
+# pinned thread inside 0049's Pinned section -- and "Sort by Recent" in a
+# Manual project's header menu. A Zeo feature with no adapter dependency, so
+# UNGROUPED and unconditional; right after 0049 because it consumes 0048's
+# store and 0049's Pinned section, and the claude-agent-acp-plus patches that
+# also edit sidebar.rs (0028-0030) and 0063 are generated on top of it.
+# Numbered 0065 because 0064 was the last number taken (story 036).
+0065-agent-sidebar-drag-reorder.patch
 # 0061: every agent server Zeo starts gets ZEO_THREAD=1 in its environment.
 # zeo-systray's hook fires for every Claude Code process on the machine, and
 # only a session Zeo started has a thread its tray link (0024) can open; the
