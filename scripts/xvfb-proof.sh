@@ -12,13 +12,15 @@
 #
 # Steps use live-proof.py's JSON format -- an array of one-key objects:
 #   {"type": "<text>"} | {"key": ["<keysym>", ...]} | {"chord": ["<mod>", ..., "<key>"]} |
-#   {"click": [x, y]} | {"rclick": [x, y]} | {"move": [x, y]} | {"sleep": <seconds, at most 60>} |
-#   {"shot": "<path.png>"}
+#   {"click": [x, y]} | {"rclick": [x, y]} | {"move": [x, y]} | {"drag": [x1, y1, x2, y2]} |
+#   {"sleep": <seconds, at most 60>} | {"shot": "<path.png>"}
 # A one-character key name that is not an ASCII letter or digit ("/", "é") is
 # sent as its keysym, as live-proof.py does, and so is each such part of an
 # xdotool combination ("ctrl+/"); a key name xdotool does not know fails the
-# step instead of being dropped. What still differs from live-proof.py: focus and
-# drag are rejected, coordinates must be whole pixels, a chord needs two or more
+# step instead of being dropped. A drag presses button 1 at x1,y1 and glides to
+# x2,y2 through 18 moves before releasing, as live-proof.py's does: a press then a
+# single jump reads as a click. What still differs from live-proof.py: focus is
+# rejected, coordinates must be whole pixels, a chord needs two or more
 # names, and a "key" name may also be an xdotool combination ("ctrl+shift+p"),
 # which live-proof.py rejects -- use "chord" in a script meant for both. A "window" field
 # beside "shot" is accepted and ignored: the capture is always the whole screen.
@@ -113,20 +115,23 @@ parse_args() {
 # accepted beside "shot" because live-proof.py reads it there.
 # shellcheck disable=SC2016  # jq program, not shell
 readonly STEP_CHECK='
-def kinds: ["type", "key", "chord", "click", "rclick", "move", "sleep", "shot"];
-def point: type == "array" and length == 2 and all(.[]; type == "number" and . >= 0 and . == floor);
+def kinds: ["type", "key", "chord", "click", "rclick", "move", "drag", "sleep", "shot"];
+def pixels($n): type == "array" and length == $n and all(.[]; type == "number" and . >= 0 and . == floor);
+def point: pixels(2);
 def check($k; $v):
   if $k == "type" then ($v | type == "string" and length > 0) // false
   elif $k == "key" then ($v | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) // false
   elif $k == "chord" then ($v | type == "array" and length >= 2 and all(.[]; type == "string" and length > 0)) // false
   elif $k == "click" or $k == "rclick" or $k == "move" then ($v | point) // false
+  elif $k == "drag" then ($v | pixels(4)) // false
   elif $k == "sleep" then ($v | type == "number" and . > 0 and . <= 60) // false
   elif $k == "shot" then ($v | type == "string" and length > 0) // false
   else false end;
 def need($k):
   {"type": "a non-empty string", "key": "a non-empty list of keysyms",
    "chord": "modifiers then a key, at least two keysyms",
-   "click": "[x, y] in whole pixels", "rclick": "[x, y] in whole pixels", "move": "[x, y] in whole pixels", "sleep": "seconds, above 0 and at most 60",
+   "click": "[x, y] in whole pixels", "rclick": "[x, y] in whole pixels", "move": "[x, y] in whole pixels",
+   "drag": "[x1, y1, x2, y2] in whole pixels", "sleep": "seconds, above 0 and at most 60",
    "shot": "a file path"}[$k];
 if type != "array" then "err\t0\t-\tthe step script is not a JSON array"
 else
@@ -488,6 +493,27 @@ xdo_key() {
 	[[ -z "${err}" ]] || printf '%s\n' "${err}" >&2
 }
 
+# Moves between a drag's press and its release. GPUI starts a drag only once
+# the pointer has moved past its threshold with the button held, so the glide
+# must arrive in steps; live-proof.py uses the same count.
+readonly DRAG_MOVES=18
+
+# xdo_drag <n> <x1> <y1> <x2> <y2> — press at x1,y1, glide to x2,y2, release;
+# the pauses are live-proof.py's. Any failing xdotool call fails the step.
+xdo_drag() {
+	local n="$1" x1="$2" y1="$3" x2="$4" y2="$5" i
+	xdo mousemove "${x1}" "${y1}" || die 1 "step ${n} (drag): xdotool failed moving to ${x1},${y1}"
+	xdo mousedown 1 || die 1 "step ${n} (drag): xdotool failed pressing at ${x1},${y1}"
+	sleep 0.12
+	for ((i = 1; i <= DRAG_MOVES; i++)); do
+		xdo mousemove "$((x1 + (x2 - x1) * i / DRAG_MOVES))" "$((y1 + (y2 - y1) * i / DRAG_MOVES))" ||
+			die 1 "step ${n} (drag): xdotool failed gliding to ${x2},${y2} (move ${i} of ${DRAG_MOVES})"
+	done
+	sleep 0.12
+	xdo mouseup 1 || die 1 "step ${n} (drag): xdotool failed releasing at ${x2},${y2}"
+	sleep 0.2
+}
+
 # editor_alive <n> <kind> — exit 1 unless Zeo is still running: a capture of
 # the screen it left behind would pass every check and prove nothing.
 editor_alive() {
@@ -516,7 +542,7 @@ take_shot() {
 }
 
 run_steps() {
-	local i k n kind value x y keys=()
+	local i k n kind value x y x2 y2 keys=()
 	for i in "${!STEP_KINDS[@]}"; do
 		n=$((i + 1))
 		kind="${STEP_KINDS[i]}"
@@ -552,6 +578,10 @@ run_steps() {
 			else
 				xdo mousemove "${x}" "${y}" || die 1 "step ${n} (move): xdotool failed at ${x},${y}"
 			fi
+			;;
+		drag)
+			read -r x y x2 y2 <<<"$(step_value "${i}" drag)"
+			xdo_drag "${n}" "${x}" "${y}" "${x2}" "${y2}"
 			;;
 		sleep)
 			# In the background and waited on: bash runs a signal trap only
