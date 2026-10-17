@@ -34,7 +34,9 @@ WASI_IDS = _ids(314, *range(321, 325), 352)  # 6
 RUSTLS_IDS = _ids(*range(346, 350))  # 4
 CLOSED = WASMTIME_IDS + WASI_IDS + RUSTLS_IDS  # 26
 # The reachable ones a user-facing changelog entry must name (story.md Summary).
-CHANGELOG_IDS = _ids(352, 314, 325, 326, 349)
+# The advisories story 049's task 1.3 found reachable in Zeo (Linux): 0352 affects only macOS/FreeBSD,
+# 0326 needs a collecting GC (only gc-null is compiled), so neither is claimed to users.
+CHANGELOG_IDS = _ids(314, 325, 359, 363, 364, 349)
 # wasm-tools crates 48.0.6 moves within their 0.254 line (R1.4, measured 2026-10-17).
 WASM_TOOLS = {"wasmparser", "wasm-encoder", "wasm-metadata", "wasmprinter", "wit-parser", "wit-component"}
 FIX_PATCH_RE = re.compile(r"^patches/([^/]+)/(\d{4})-wasmtime-48-0-6-rustls-0-23-46\.patch$")
