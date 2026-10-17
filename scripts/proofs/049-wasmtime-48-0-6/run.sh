@@ -91,7 +91,7 @@ jq -n --arg probe "${PROBE}" '{
 }' >"${ROOT}/settings.json"
 jq -n --arg proj "${PROJ}/" --arg out "${OUT}" '[
 	{"sleep": 10}, {"shot": ($out + "/049-0-started.png")},
-	{"chord": ["ctrl", "o"]}, {"sleep": 2}, {"type": $proj}, {"key": ["Return"]}, {"sleep": 5},
+	{"chord": ["ctrl", "o"]}, {"sleep": 2}, {"chord": ["ctrl", "a"]}, {"type": $proj}, {"key": ["Return"]}, {"sleep": 5},
 	{"chord": ["ctrl", "p"]}, {"sleep": 2}, {"type": "index.html"}, {"key": ["Return"]}, {"sleep": 20},
 	{"shot": ($out + "/049-1-index-html.png")}
 ]' >"${ROOT}/steps.json"
