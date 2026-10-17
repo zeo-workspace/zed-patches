@@ -1837,6 +1837,11 @@ src_prepare() {
 		"${FILESDIR}/0046-agent-default-agents-prefer-the-system-adapter.patch"
 		"${FILESDIR}/0048-agent-thread-organization-storage.patch"
 		"${FILESDIR}/0049-agent-sidebar-pinned-section.patch"
+		# 0065 (story 036) drags projects, threads and pinned threads in the
+		# agent sidebar to reorder them, plus "Sort by Recent". It consumes
+		# 0048's store and 0049's Pinned section, so it sits right after them;
+		# no flag gates it. 0028-0030 and 0063 are regenerated on top of it.
+		"${FILESDIR}/0065-agent-sidebar-drag-reorder.patch"
 		# 0061 starts every agent with ZEO_THREAD=1, so zeo-systray's hook can
 		# tell Zeo's sessions from any other Claude Code process and offer the
 		# tray link (0024) only for those. Ungrouped like 0024.
@@ -2103,6 +2108,8 @@ src_prepare() {
 	# `devtools: start` / `open in browser` actions and the thread-list badge.
 	# Its own group, after browser-extension and before test; it applies with or
 	# without 0057, and 0050/0051 on top of it.
+	# It also widens 0065's drag guards to its "Devtools threads only" view, so
+	# the two ship together.
 	if use devtools-panel; then
 		PATCHES+=( "${FILESDIR}/0063-devtools-panel.patch" )
 	fi
