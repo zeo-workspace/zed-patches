@@ -30,7 +30,8 @@ def entry_violations(text: str, number: str) -> list:
         return ["no ### Security group under ## [Unreleased]"]
     entries = re.split(r"\n(?=- )", m.group(1))
     for e in entries:
-        if all(i in e for i in CHANGELOG_IDS) and re.search(rf"\(patch {number}\)\s*$", e.strip()):
+        # zeo/CHANGELOG.md entries end "(patch NNNN)." -- the period is house style, optional here.
+        if all(i in e for i in CHANGELOG_IDS) and re.search(rf"\(patch {number}\)\.?\s*$", e.strip()):
             return []
     return [f"no Security entry names {', '.join(CHANGELOG_IDS)} and ends with (patch {number})"]
 
@@ -64,6 +65,10 @@ class HostileFixtures(unittest.TestCase):
         self.assertEqual(len(entry_violations("## [Unreleased]\n### Security\n" + GOOD.format(ids=v1), "0064")), 1)
         no_rustls = ", ".join(i for i in CHANGELOG_IDS if i != "RUSTSEC-2026-0349")
         self.assertEqual(len(entry_violations("## [Unreleased]\n### Security\n" + GOOD.format(ids=no_rustls), "0064")), 1)
+
+    def test_the_changelog_house_style_trailing_period_passes(self):
+        text = "## [Unreleased]\n### Security\n" + GOOD.format(ids=IDS).replace("(patch 0064)", "(patch 0064).")
+        self.assertEqual(entry_violations(text, "0064"), [])
 
     def test_a_well_formed_entry_passes(self):
         text = "## [Unreleased]\n### Added\n- x (patch 0063)\n\n### Security\n" + GOOD.format(ids=IDS) + "\n## [0.5.0]\n"
