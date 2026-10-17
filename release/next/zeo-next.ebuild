@@ -17,9 +17,9 @@ CRATES="
 	adler2@2.0.1
 	adler32@1.2.0
 	aes@0.8.4
-	agent-client-protocol-derive@3.3.0
-	agent-client-protocol-schema@1.11.0
-	agent-client-protocol@3.3.0
+	agent-client-protocol-derive@3.4.0
+	agent-client-protocol-schema@1.12.0
+	agent-client-protocol@3.4.0
 	ahash@0.8.12
 	aho-corasick@1.1.3
 	aliasable@0.1.3
@@ -127,10 +127,10 @@ CRATES="
 	bigdecimal@0.4.8
 	bincode@1.3.3
 	bindgen@0.72.1
+	bit-set@0.11.1
 	bit-set@0.8.0
-	bit-set@0.9.1
+	bit-vec@0.10.1
 	bit-vec@0.8.0
-	bit-vec@0.9.1
 	bit_field@0.10.3
 	bitflags@1.3.2
 	bitflags@2.13.1
@@ -168,9 +168,7 @@ CRATES="
 	cached_proc_macro_types@0.1.1
 	calloop-wayland-source@0.4.1
 	camino@1.2.6
-	cap-fs-ext@4.0.3
 	cap-primitives@4.0.3
-	cap-std@4.0.3
 	cargo-platform@0.3.2
 	cargo_metadata@0.23.1
 	cargo_toml@0.21.0
@@ -182,7 +180,7 @@ CRATES="
 	cexpr@0.6.0
 	cfg-expr@0.20.9
 	cfg-if@1.0.4
-	cfg_aliases@0.2.1
+	cfg_aliases@0.2.2
 	chacha20@0.10.1
 	chardetng@0.1.17
 	chrono@0.4.42
@@ -241,19 +239,19 @@ CRATES="
 	cpp_demangle@0.5.1
 	cpufeatures@0.2.17
 	cpufeatures@0.3.0
-	cranelift-assembler-x64-meta@0.135.1
-	cranelift-assembler-x64@0.135.1
-	cranelift-bforest@0.135.1
-	cranelift-bitset@0.135.1
-	cranelift-codegen-meta@0.135.1
-	cranelift-codegen-shared@0.135.1
-	cranelift-codegen@0.135.1
-	cranelift-control@0.135.1
-	cranelift-entity@0.135.1
-	cranelift-frontend@0.135.1
-	cranelift-isle@0.135.1
-	cranelift-native@0.135.1
-	cranelift-srcgen@0.135.1
+	cranelift-assembler-x64-meta@0.135.6
+	cranelift-assembler-x64@0.135.6
+	cranelift-bforest@0.135.6
+	cranelift-bitset@0.135.6
+	cranelift-codegen-meta@0.135.6
+	cranelift-codegen-shared@0.135.6
+	cranelift-codegen@0.135.6
+	cranelift-control@0.135.6
+	cranelift-entity@0.135.6
+	cranelift-frontend@0.135.6
+	cranelift-isle@0.135.6
+	cranelift-native@0.135.6
+	cranelift-srcgen@0.135.6
 	crash-context@0.8.0
 	crash-handler@0.8.0
 	crc-catalog@2.4.0
@@ -439,13 +437,11 @@ CRATES="
 	glob@0.3.3
 	globset@0.4.17
 	gloo-timers@0.3.0
-	glow@0.17.0
+	glow@0.18.0
 	glutin_wgl_sys@0.6.1
 	gobject-sys@0.21.5
 	goblin@0.9.3
 	gpu-allocator@0.28.0
-	gpu-descriptor-types@0.2.0
-	gpu-descriptor@0.3.2
 	granit-parser@1.0.0
 	group@0.12.1
 	guppy-workspace-hack@0.1.0
@@ -475,7 +471,6 @@ CRATES="
 	heed@0.21.0
 	hermit-abi@0.5.2
 	hex@0.4.3
-	hexf-parse@0.2.1
 	hkdf@0.12.4
 	hmac@0.12.1
 	home@0.5.11
@@ -562,7 +557,7 @@ CRATES="
 	jni@0.21.1
 	jni@0.22.4
 	jobserver@0.1.34
-	js-sys@0.3.97
+	js-sys@0.3.106
 	json5@1.3.1
 	jsonschema-regex@0.51.0
 	jsonschema-value@0.51.0
@@ -621,6 +616,8 @@ CRATES="
 	lyon_tessellation@1.0.16
 	mac-notification-sys@0.6.15
 	mach2@0.6.0
+	macro_rules_attribute-proc_macro@0.2.3
+	macro_rules_attribute@0.2.3
 	malloc_buf@0.0.6
 	manatee@0.8.0-alpha.5
 	maplit@1.0.2
@@ -659,7 +656,6 @@ CRATES="
 	moxcms@0.8.1
 	msvc_spectre_libs@0.1.3
 	multimap@0.8.3
-	naga@29.0.4
 	nanoid@0.4.0
 	native-tls@0.2.18
 	nbformat@1.2.0
@@ -721,6 +717,7 @@ CRATES="
 	objc2-quartz-core@0.3.2
 	objc2-screen-capture-kit@0.3.2
 	objc2-security@0.3.2
+	objc2-ui-kit@0.3.2
 	objc2-user-notifications@0.3.2
 	objc2@0.5.2
 	objc2@0.6.3
@@ -760,6 +757,7 @@ CRATES="
 	password-hash@0.4.2
 	paste@1.0.15
 	pastey@0.1.1
+	pastey@0.2.3
 	pathdiff@0.2.3
 	pathfinder_geometry@0.5.1
 	pathfinder_simd@0.5.6
@@ -854,8 +852,8 @@ CRATES="
 	pulldown-cmark-escape@0.10.1
 	pulldown-cmark@0.10.3
 	pulldown-cmark@0.13.4
-	pulley-interpreter@48.0.1
-	pulley-macros@48.0.1
+	pulley-interpreter@48.0.6
+	pulley-macros@48.0.6
 	pxfm@0.1.25
 	qoi@0.4.1
 	quick-error@1.2.3
@@ -944,7 +942,7 @@ CRATES="
 	rustls-platform-verifier-android@0.1.1
 	rustls-platform-verifier@0.7.0
 	rustls-webpki@0.103.15
-	rustls@0.23.45
+	rustls@0.23.46
 	rustversion@1.0.22
 	rusty-fork@0.3.1
 	rustybuzz@0.20.1
@@ -1233,41 +1231,41 @@ CRATES="
 	wasip2@1.0.1+wasi-0.2.4
 	wasip3@0.4.0+wasi-0.3.0-rc-2026-01-06
 	wasite@0.1.0
-	wasm-bindgen-futures@0.4.70
-	wasm-bindgen-macro-support@0.2.120
-	wasm-bindgen-macro@0.2.120
-	wasm-bindgen-shared@0.2.120
-	wasm-bindgen@0.2.120
+	wasm-bindgen-futures@0.4.79
+	wasm-bindgen-macro-support@0.2.129
+	wasm-bindgen-macro@0.2.129
+	wasm-bindgen-shared@0.2.129
+	wasm-bindgen@0.2.129
 	wasm-encoder@0.201.0
 	wasm-encoder@0.227.1
 	wasm-encoder@0.244.0
-	wasm-encoder@0.254.0
+	wasm-encoder@0.254.2
 	wasm-metadata@0.201.0
 	wasm-metadata@0.227.1
 	wasm-metadata@0.244.0
-	wasm-metadata@0.254.0
+	wasm-metadata@0.254.2
 	wasm-streams@0.4.2
 	wasmparser@0.201.0
 	wasmparser@0.227.1
 	wasmparser@0.244.0
-	wasmparser@0.254.0
-	wasmprinter@0.254.0
-	wasmtime-c-api-impl@48.0.1
-	wasmtime-environ@48.0.1
-	wasmtime-internal-c-api-macros@48.0.1
-	wasmtime-internal-component-macro@48.0.1
-	wasmtime-internal-component-util@48.0.1
-	wasmtime-internal-core@48.0.1
-	wasmtime-internal-cranelift@48.0.1
-	wasmtime-internal-fiber@48.0.1
-	wasmtime-internal-jit-debug@48.0.1
-	wasmtime-internal-jit-icache-coherence@48.0.1
-	wasmtime-internal-unwinder@48.0.1
-	wasmtime-internal-versioned-export-macros@48.0.1
-	wasmtime-internal-wit-bindgen@48.0.1
-	wasmtime-wasi-io@48.0.1
-	wasmtime-wasi@48.0.1
-	wasmtime@48.0.1
+	wasmparser@0.254.2
+	wasmprinter@0.254.2
+	wasmtime-c-api-impl@48.0.6
+	wasmtime-environ@48.0.6
+	wasmtime-internal-c-api-macros@48.0.6
+	wasmtime-internal-component-macro@48.0.6
+	wasmtime-internal-component-util@48.0.6
+	wasmtime-internal-core@48.0.6
+	wasmtime-internal-cranelift@48.0.6
+	wasmtime-internal-fiber@48.0.6
+	wasmtime-internal-jit-debug@48.0.6
+	wasmtime-internal-jit-icache-coherence@48.0.6
+	wasmtime-internal-unwinder@48.0.6
+	wasmtime-internal-versioned-export-macros@48.0.6
+	wasmtime-internal-wit-bindgen@48.0.6
+	wasmtime-wasi-io@48.0.6
+	wasmtime-wasi@48.0.6
+	wasmtime@48.0.6
 	wax@0.7.0
 	wayland-backend@0.3.15
 	wayland-client@0.31.11
@@ -1277,22 +1275,13 @@ CRATES="
 	wayland-protocols@0.32.9
 	wayland-scanner@0.31.7
 	wayland-sys@0.31.11
-	web-sys@0.3.97
+	web-sys@0.3.106
 	web-time@1.1.0
 	web_atoms@0.2.6
 	webpki-root-certs@1.0.9
 	webpki-roots@0.26.8
 	webpki-roots@1.0.8
 	weezl@0.1.10
-	wgpu-core-deps-apple@29.0.4
-	wgpu-core-deps-emscripten@29.0.4
-	wgpu-core-deps-wasm@29.0.4
-	wgpu-core-deps-windows-linux-android@29.0.4
-	wgpu-core@29.0.4
-	wgpu-hal@29.0.4
-	wgpu-naga-bridge@29.0.4
-	wgpu-types@29.0.4
-	wgpu@29.0.4
 	which@8.0.5
 	whoami@1.6.1
 	winapi-i686-pc-windows-gnu@0.4.0
@@ -1404,11 +1393,11 @@ CRATES="
 	wit-component@0.201.0
 	wit-component@0.227.1
 	wit-component@0.244.0
-	wit-component@0.254.0
+	wit-component@0.254.2
 	wit-parser@0.201.0
 	wit-parser@0.227.1
 	wit-parser@0.244.0
-	wit-parser@0.254.0
+	wit-parser@0.254.2
 	write16@1.0.0
 	writeable@0.6.4
 	x11@2.21.0
@@ -1484,6 +1473,8 @@ declare -A GIT_CRATES=(
 	[livekit-runtime]='https://github.com/zed-industries/livekit-rust-sdks;0a1c519cfce9b365229026b55de9b9dbdb6fed3c;livekit-rust-sdks-%commit%/livekit-runtime'
 	[livekit]='https://github.com/zed-industries/livekit-rust-sdks;0a1c519cfce9b365229026b55de9b9dbdb6fed3c;livekit-rust-sdks-%commit%/livekit'
 	[lsp-types]='https://github.com/zed-industries/lsp-types;f1783e63a7f4eb4397bf51d4148b4895a1f7ab16;lsp-types-%commit%'
+	[naga-types]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/naga-types'
+	[naga]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/naga'
 	[notify-types]='https://github.com/zed-industries/notify;d842f16b2716bd60f09caf3ae3a894237ab38f54;notify-%commit%/notify-types'
 	[notify]='https://github.com/zed-industries/notify;d842f16b2716bd60f09caf3ae3a894237ab38f54;notify-%commit%/notify'
 	[nvim-rs]='https://github.com/KillTheMule/nvim-rs;764dd270c642f77f10f3e19d05cc178a6cbe69f3;nvim-rs-%commit%'
@@ -1531,6 +1522,17 @@ declare -A GIT_CRATES=(
 	[wasm_thread]='https://github.com/zed-industries/wasm_thread;0cf96c7708dfb97ccf3da50347e25edcf75d6937;wasm_thread-%commit%'
 	[webrtc-sys-build]='https://github.com/zed-industries/livekit-rust-sdks;0a1c519cfce9b365229026b55de9b9dbdb6fed3c;livekit-rust-sdks-%commit%/webrtc-sys/build'
 	[webrtc-sys]='https://github.com/zed-industries/livekit-rust-sdks;0a1c519cfce9b365229026b55de9b9dbdb6fed3c;livekit-rust-sdks-%commit%/webrtc-sys'
+	[wgpu-core-deps-apple]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-core/platform-deps/apple'
+	[wgpu-core-deps-emscripten]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-core/platform-deps/emscripten'
+	[wgpu-core-deps-linux-android-bsd]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-core/platform-deps/linux-android-bsd'
+	[wgpu-core-deps-wasm]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-core/platform-deps/wasm'
+	[wgpu-core-deps-windows]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-core/platform-deps/windows'
+	[wgpu-core]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-core'
+	[wgpu-hal]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-hal'
+	[wgpu-naga-bridge]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-naga-bridge'
+	[wgpu-sync]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-sync'
+	[wgpu-types]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu-types'
+	[wgpu]='https://github.com/gfx-rs/wgpu;3b3506ea31154edc04de64debda0e780cba2639c;wgpu-%commit%/wgpu'
 	[windows-capture]='https://github.com/zed-industries/windows-capture;f0d6c1b6691db75461b732f6d5ff56eed002eeb9;windows-capture-%commit%'
 	[wprcontrol]='https://github.com/zed-industries/wprcontrol;cd811f7d744f65291e13131b1d907fda63ed91a1;wprcontrol-%commit%'
 	[xim-ctext]='https://github.com/zed-industries/xim-rs;16f35a2c881b815a2b6cdfd6687988e84f8447d8;xim-rs-%commit%/xim-ctext'
@@ -1548,9 +1550,13 @@ declare -A GIT_CRATES=(
 # rewrites the date and EGIT_COMMIT; a second version variable it could not
 # keep current would leave a new tarball under an old, already-manifested name).
 
-EGIT_COMMIT="c403bc6af644cd0ab60c90045ac6dc3436218809"
-LLVM_COMPAT=( 22 )
-RUST_MIN_VER="1.98.1"
+EGIT_COMMIT="2d4c4831943153f63ad0aeddf49c8f5a3d008e75"
+# LLVM 23 only, so it is the default slot: llvm-r1 would always prefer slot 22
+# (its newest stable) whenever 22 is listed. RUST_NEEDS_LLVM ties the Rust slot
+# to it, so this builds with Rust 1.99, one release past upstream's 1.98.1 pin
+# in rust-toolchain.toml -- the series' suites pass there (zed-patches test.sh).
+LLVM_COMPAT=( 23 )
+RUST_MIN_VER="1.99.0"
 RUST_NEEDS_LLVM=1
 WEBRTC_COMMIT="0001d84-4"
 
@@ -1621,6 +1627,12 @@ KEYWORDS="~amd64"
 # claude-agent-acp-plus group (0040's router, 0045's new thread), not
 # claude-code-ide.
 #
+# devtools-panel was added on 2026-10-15 (story 055): patch 0063, the Zeo half of
+# the zeo-devtools panel page -- devtools threads of the project, the
+# `devtools: start` / `devtools: open in browser` actions, and a badge and
+# filter in the thread list. On by default; it extends 0058's session code, so
+# it needs browser-extension.
+#
 # ai-jail was added on 2026-10-03, carried over from app-editors/zed when that
 # package stopped being part of this chain: it pulls in sys-apps/ai-jail, a
 # sandbox for AI coding agents. Since story 043 it also applies patch 0057, the
@@ -1640,8 +1652,8 @@ KEYWORDS="~amd64"
 # zed-extension, zed-remote-server -- and renaming Zed's server infrastructure is
 # not what a rebrand of the editor is for.
 IUSE="+X ai-jail +browser-extension +claude-agent-acp-plus +claude-agent-acp-tui
-	+claude-code-ide +devtools-bridge inspector +mimalloc neovim screen-capture test
-	tracy +wayland"
+	+claude-code-ide +devtools-bridge +devtools-panel inspector +mimalloc neovim
+	screen-capture test tracy +wayland"
 # BENTOO-DIVERGENCE: REQUIRED_USE - the || ( X wayland ) clause, which follows
 # from the X and wayland flags this overlay adds (see the IUSE tag). ::gentoo
 # exposes neither, so it has nothing to constrain. ai-jail? requires the agent
@@ -1649,12 +1661,15 @@ IUSE="+X ai-jail +browser-extension +claude-agent-acp-plus +claude-agent-acp-tui
 # devtools-bridge? requires the group 0052 is generated on top of.
 # browser-extension? requires devtools-bridge: the browser reaches Zeo through
 # 0052's bridge socket, and 0058 is generated on top of it.
+# devtools-panel? requires browser-extension: 0063 extends 0058's session code
+# and is generated on top of it.
 # test? requires the adapter flags the test-only patches (0050, 0051) are
 # generated on top of.
 REQUIRED_USE="
 	|| ( X wayland )
 	ai-jail? ( claude-agent-acp-plus devtools-bridge )
 	browser-extension? ( devtools-bridge )
+	devtools-panel? ( browser-extension )
 	devtools-bridge? ( claude-agent-acp-plus )
 	test? ( claude-agent-acp-plus claude-code-ide )
 "
@@ -1826,6 +1841,13 @@ src_prepare() {
 		# tell Zeo's sessions from any other Claude Code process and offer the
 		# tray link (0024) only for those. Ungrouped like 0024.
 		"${FILESDIR}/0061-agent-mark-agent-servers-with-zeo-thread.patch"
+		# 0064 moves wasmtime/wasmtime-wasi 48.0.1 -> 48.0.6 and rustls
+		# 0.23.45 -> 0.23.46 for 26 RustSec advisories, six of them reachable
+		# from an installed extension or any HTTPS connection. Cargo.toml and
+		# Cargo.lock only, so CRATES above lists the moved versions. A security
+		# fix for every build, so ungrouped; 0002, 0035, 0052, 0057 and 0058,
+		# which also edit Cargo.lock, are regenerated on top of it.
+		"${FILESDIR}/0064-wasmtime-48-0-6-rustls-0-23-46.patch"
 	)
 
 	if use claude-agent-acp-plus; then
@@ -2074,6 +2096,15 @@ src_prepare() {
 	# before test; it applies with or without 0057, and 0050/0051 on top of it.
 	if use browser-extension; then
 		PATCHES+=( "${FILESDIR}/0058-browser-extension.patch" )
+	fi
+
+	# 0063 (story 055): the devtools panel -- the zeo-devtools panel page drives
+	# devtools threads of its own project through 0058's v2 sessions, plus the
+	# `devtools: start` / `open in browser` actions and the thread-list badge.
+	# Its own group, after browser-extension and before test; it applies with or
+	# without 0057, and 0050/0051 on top of it.
+	if use devtools-panel; then
+		PATCHES+=( "${FILESDIR}/0063-devtools-panel.patch" )
 	fi
 
 	# 0050 and 0051 change tests only -- nothing in them reaches the binary -- so
