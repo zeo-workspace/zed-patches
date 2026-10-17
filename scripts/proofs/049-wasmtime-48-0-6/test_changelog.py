@@ -4,7 +4,7 @@
     [ZP_CHANGELOG=<zeo/CHANGELOG.md>] [ZP_REF=main] [ZP_PF=<PF>] [ZP_FIX_NUMBER=NNNN] python3 test_changelog.py
 
 The entry must sit in a `### Security` group of the Unreleased section, name the reachable
-wasmtime and rustls advisories (RUSTSEC-2026-0352, -0314, -0325, -0326, -0349) in ONE entry, and
+wasmtime and rustls advisories (RUSTSEC-2026-0314, -0325, -0359, -0363, -0364, -0349) in ONE entry, and
 end with `(patch NNNN)` where NNNN is the fix patch's number in the PF's directory on the ref.
 """
 
@@ -36,7 +36,7 @@ def entry_violations(text: str, number: str) -> list:
 
 
 IDS = ", ".join(CHANGELOG_IDS)
-GOOD = "- An extension could escape its sandbox or crash Zeo, and HTTPS could be weakened ({ids}); wasmtime 48.0.6 and rustls 0.23.46 fix them (patch 0064)\n"
+GOOD = "- An extension could crash Zeo or corrupt WebAssembly memory, and HTTPS could be weakened ({ids}); wasmtime 48.0.6 and rustls 0.23.46 fix them (patch 0064)\n"
 
 
 class HostileFixtures(unittest.TestCase):
@@ -54,13 +54,13 @@ class HostileFixtures(unittest.TestCase):
         self.assertEqual(len(entry_violations(text, "0064")), 1)
 
     def test_ids_split_across_entries_do_not_count(self):
-        text = ("## [Unreleased]\n### Security\n- RUSTSEC-2026-0352, RUSTSEC-2026-0314 (patch 0064)\n"
-                "- RUSTSEC-2026-0325, RUSTSEC-2026-0326, RUSTSEC-2026-0349 (patch 0064)\n")
+        text = ("## [Unreleased]\n### Security\n- RUSTSEC-2026-0314, RUSTSEC-2026-0325, RUSTSEC-2026-0359 (patch 0064)\n"
+                "- RUSTSEC-2026-0363, RUSTSEC-2026-0364, RUSTSEC-2026-0349 (patch 0064)\n")
         self.assertEqual(len(entry_violations(text, "0064")), 1)
 
-    # The v1 entry (wasmtime 48.0.4's three ids) names neither 0352 nor rustls's 0349.
-    def test_an_entry_without_0352_or_the_rustls_advisory_does_not_count(self):
-        v1 = "RUSTSEC-2026-0314, RUSTSEC-2026-0325, RUSTSEC-2026-0326"
+    # The v1/v2 entries (0352 and 0326 claimed reachable) miss 0359, 0363 and 0364; and rustls's 0349 is required.
+    def test_an_entry_with_the_superseded_ids_or_without_rustls_does_not_count(self):
+        v1 = "RUSTSEC-2026-0352, RUSTSEC-2026-0314, RUSTSEC-2026-0325, RUSTSEC-2026-0326, RUSTSEC-2026-0349"
         self.assertEqual(len(entry_violations("## [Unreleased]\n### Security\n" + GOOD.format(ids=v1), "0064")), 1)
         no_rustls = ", ".join(i for i in CHANGELOG_IDS if i != "RUSTSEC-2026-0349")
         self.assertEqual(len(entry_violations("## [Unreleased]\n### Security\n" + GOOD.format(ids=no_rustls), "0064")), 1)
