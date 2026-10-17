@@ -122,7 +122,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 23f4e9a..3c451c8 100644
+index 93d9081..3a99a00 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -450,6 +450,33 @@ dependencies = [
@@ -159,7 +159,7 @@ index 23f4e9a..3c451c8 100644
  [[package]]
  name = "agent_ui"
  version = "0.1.0"
-@@ -22443,6 +22470,7 @@ dependencies = [
+@@ -22420,6 +22447,7 @@ dependencies = [
   "agent_servers",
   "agent_settings",
   "agent_skills",
@@ -168,7 +168,7 @@ index 23f4e9a..3c451c8 100644
   "anyhow",
   "ashpd",
 diff --git a/Cargo.toml b/Cargo.toml
-index 770f7d0..d94aae0 100644
+index bc1ffe1..34495ed 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -9,6 +9,7 @@ members = [

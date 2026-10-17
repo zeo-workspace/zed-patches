@@ -86,6 +86,15 @@
 # the one map every local start passes through. UNGROUPED like 0024; its tests
 # sit in 0057's lifecycle file, whose fixture spawns a real agent (story 050).
 0061-agent-mark-agent-servers-with-zeo-thread.patch
+# 0064: wasmtime and wasmtime-wasi 48.0.1 -> 48.0.6 and rustls 0.23.45 ->
+# 0.23.46, floors raised in Cargo.toml, for the 26 RustSec advisories against
+# them -- six reachable from an installed extension or any HTTPS connection,
+# the rest closed by the same move; the header lists each with its reason.
+# Cargo.toml and Cargo.lock only, no source change. A security fix for every
+# build, so UNGROUPED and last of the ungrouped: 0002, 0035, 0052, 0057 and
+# 0058, which also edit Cargo.lock, are regenerated on top of it. Numbered 0064
+# because 0063 is claimed by the devtools panel (story 055) (story 049).
+0064-wasmtime-48-0-6-rustls-0-23-46.patch
 
 # @feature: claude-agent-acp-plus
 0001-force-enable-claude-agent-acp-plus.patch
