@@ -78,10 +78,10 @@ name are invalid. The terminal environment is one helper,
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index ff9802f..616e6eb 100644
+index 0b5f74f..449e769 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -3046,6 +3046,32 @@ version = "0.7.6"
+@@ -3022,6 +3022,32 @@ version = "0.7.6"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
  
@@ -114,7 +114,7 @@ index ff9802f..616e6eb 100644
  [[package]]
  name = "cli"
  version = "0.1.0"
-@@ -22487,6 +22513,7 @@ dependencies = [
+@@ -22464,6 +22490,7 @@ dependencies = [
   "channel",
   "chrono",
   "clap",
@@ -123,7 +123,7 @@ index ff9802f..616e6eb 100644
   "client",
   "clock",
 diff --git a/Cargo.toml b/Cargo.toml
-index d94aae0..1e0380e 100644
+index 34495ed..914592b 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -28,6 +28,7 @@ members = [
