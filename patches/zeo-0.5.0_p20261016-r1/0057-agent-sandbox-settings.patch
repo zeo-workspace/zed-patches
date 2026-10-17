@@ -111,7 +111,7 @@ spawns a real agent script and reads back its environment (story 050).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index de37a26..075da70 100644
+index 84cc648..dd3cde3 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -368,6 +368,39 @@ dependencies = [
@@ -191,7 +191,7 @@ index de37a26..075da70 100644
   "agent_servers",
   "agent_settings",
   "agent_skills",
-@@ -16522,6 +16560,7 @@ name = "settings_ui"
+@@ -16546,6 +16584,7 @@ name = "settings_ui"
  version = "0.1.0"
  dependencies = [
   "agent",
@@ -199,7 +199,7 @@ index de37a26..075da70 100644
   "agent_settings",
   "agent_skills",
   "anyhow",
-@@ -16554,6 +16593,7 @@ dependencies = [
+@@ -16578,6 +16617,7 @@ dependencies = [
   "language_models",
   "log",
   "menu",
@@ -207,7 +207,7 @@ index de37a26..075da70 100644
   "paths",
   "picker",
   "platform_title_bar",
-@@ -16564,13 +16604,16 @@ dependencies = [
+@@ -16588,13 +16628,16 @@ dependencies = [
   "rodio",
   "schemars 1.0.4",
   "search",
@@ -224,7 +224,7 @@ index de37a26..075da70 100644
   "theme",
   "theme_settings",
   "ui",
-@@ -22498,6 +22541,7 @@ dependencies = [
+@@ -22521,6 +22564,7 @@ dependencies = [
   "activity_indicator",
   "agent",
   "agent-client-protocol",
@@ -233,7 +233,7 @@ index de37a26..075da70 100644
   "agent_settings",
   "agent_skills",
 diff --git a/Cargo.toml b/Cargo.toml
-index 92aa267..0a716d9 100644
+index 11016d0..79913fb 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -6,6 +6,7 @@ members = [

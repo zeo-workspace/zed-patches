@@ -84,10 +84,10 @@ its own unit, integration and Playwright suites in zeo-devtools.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 449e769..de37a26 100644
+index 616e6eb..84cc648 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -4984,6 +4984,32 @@ dependencies = [
+@@ -5008,6 +5008,32 @@ dependencies = [
   "yaml-rust2",
  ]
  
@@ -120,7 +120,7 @@ index 449e769..de37a26 100644
  [[package]]
  name = "diagnostics"
  version = "0.1.0"
-@@ -22509,6 +22535,7 @@ dependencies = [
+@@ -22532,6 +22558,7 @@ dependencies = [
   "debugger_tools",
   "debugger_ui",
   "dev_container",
@@ -129,7 +129,7 @@ index 449e769..de37a26 100644
   "edit_prediction",
   "edit_prediction_ui",
 diff --git a/Cargo.toml b/Cargo.toml
-index 914592b..92aa267 100644
+index 1e0380e..11016d0 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -56,6 +56,7 @@ members = [
