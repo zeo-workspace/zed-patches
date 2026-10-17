@@ -74,7 +74,7 @@ Story 045 (zed/.epic/stories/045-browser-extension), branch dev-045.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 075da70..6afc7ea 100644
+index dd3cde3..095829e 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -561,6 +561,7 @@ dependencies = [
@@ -93,7 +93,7 @@ index 075da70..6afc7ea 100644
   "streaming_diff",
   "task",
   "telemetry",
-@@ -22916,6 +22918,18 @@ version = "0.3.3"
+@@ -22939,6 +22941,18 @@ version = "0.3.3"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
  
@@ -113,7 +113,7 @@ index 075da70..6afc7ea 100644
  name = "zerocopy"
  version = "0.8.27"
 diff --git a/Cargo.toml b/Cargo.toml
-index 0a716d9..2c4b17b 100644
+index 79913fb..229a2fd 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -250,6 +250,7 @@ members = [
