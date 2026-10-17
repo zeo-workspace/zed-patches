@@ -328,10 +328,10 @@ index 2742101..44d373c 100644
                  // A redraw is all this needs: the account section is built from the thread
                  // when the tooltip opens, so there is no per-turn state to recompute.
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 04c40cb..a4b9dfd 100644
+index b4dc14b..af841f7 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -443,7 +443,14 @@ fn apply_live_row_state(
+@@ -449,7 +449,14 @@ fn apply_live_row_state(
          && session_id
              .as_ref()
              .and_then(|sid| context.old_statuses.get(sid))
@@ -347,7 +347,7 @@ index 04c40cb..a4b9dfd 100644
      {
          notified_threads.insert(thread.metadata.thread_id);
      }
-@@ -2008,7 +2015,10 @@ impl Sidebar {
+@@ -2014,7 +2021,10 @@ impl Sidebar {
                          let old_status = old_statuses.get(&info.session_id).map(|(s, _)| *s);
                          new_live_statuses.insert(info.session_id.clone(), (info.status, thread_id));
                          if info.status == AgentThreadStatus::Completed
@@ -359,7 +359,7 @@ index 04c40cb..a4b9dfd 100644
                          {
                              notified_threads.insert(thread_id);
                          }
-@@ -6129,7 +6139,9 @@ impl Sidebar {
+@@ -6147,7 +6157,9 @@ impl Sidebar {
                      AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation => {
                          return;
                      }
@@ -370,7 +370,7 @@ index 04c40cb..a4b9dfd 100644
                  }
                  if thread.draft.is_some() {
                      let workspace = thread.workspace.clone();
-@@ -8630,6 +8642,9 @@ fn all_thread_infos_for_workspace(
+@@ -8654,6 +8666,9 @@ fn all_thread_infos_for_workspace(
              } else {
                  match thread.status() {
                      ThreadStatus::Generating => AgentThreadStatus::Running,
@@ -593,7 +593,7 @@ index 0000000..593574e
 +    assert_eq!(pinned_header_has_notifications(&sidebar, cx), Some(false));
 +}
 diff --git a/crates/sidebar/src/sidebar_pinned_tests.rs b/crates/sidebar/src/sidebar_pinned_tests.rs
-index 4bb603c..2c1641a 100644
+index ae1b2e4..b33851e 100644
 --- a/crates/sidebar/src/sidebar_pinned_tests.rs
 +++ b/crates/sidebar/src/sidebar_pinned_tests.rs
 @@ -2115,3 +2115,6 @@ async fn filter_shows_matches_of_a_collapsed_pinned_section(cx: &mut TestAppCont

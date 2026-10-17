@@ -1855,6 +1855,113 @@ test_xvfb_proof_drive_sends_every_step_to_the_private_display() {
 	rm -rf "${tmp}"
 }
 
+# drag_calls <log> — the xdotool calls of the run, one per line, without the DISPLAY prefix.
+drag_calls() {
+	sed -n 's/^DISPLAY=:90 xdotool //p' <<<"$1"
+}
+
+test_xvfb_proof_drag_dry_run_validates_and_prints_the_plan() {
+	case_start "xvfb-proof: --dry-run accepts a drag and prints it in the plan, starting nothing (036 2.1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"drag": [10, 20, 300, 400]}, {"sleep": 0.1}]')" --dry-run)"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_contains "${out}" "2 steps" &&
+		assert_contains "${out}" "1 drag 10 20 300 400" &&
+		assert_equal "" "$(stub_log "${tmp}")" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drag_bad_shapes_exit_1_naming_index_and_kind() {
+	case_start "xvfb-proof: a drag that is not four whole non-negative pixels exits 1 naming index and kind (036 2.1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	# Step 1 is valid and must not be reported; steps 2-6 are each wrong in one way.
+	printf '%s' '[{"drag": [0, 0, 5, 5]},
+		{"drag": [1, 2, 3]},
+		{"drag": [1, 2, 3, 4, 5]},
+		{"drag": [-1, 2, 3, 4]},
+		{"drag": [1.5, 2, 3, 4]},
+		{"drag": ["1", 2, 3, 4]}]' >"${tmp}/steps.json"
+	# No --dry-run: a broken script must stop before the display or Zeo exist.
+	out="$(run_xvfb_proof "${tmp}" --steps "${tmp}/steps.json")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_not_contains "${out}" "unknown kind" &&
+		assert_not_contains "${out}" "step 1 (drag)" &&
+		assert_contains "${out}" "step 2 (drag)" &&
+		assert_contains "${out}" "step 3 (drag)" &&
+		assert_contains "${out}" "step 4 (drag)" &&
+		assert_contains "${out}" "step 5 (drag)" &&
+		assert_contains "${out}" "step 6 (drag)" &&
+		assert_equal "" "$(stub_log "${tmp}")" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drag_presses_glides_and_releases() {
+	case_start "xvfb-proof: a drag presses at the start, glides through intermediate moves, releases at the end (036 2.1)"
+	local tmp out status log calls verdict
+	tmp="$(mktemp -d)"
+	out="$(run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"drag": [100, 200, 400, 800]}]')")"
+	status=$?
+	log="$(stub_log "${tmp}")"
+	calls="$(drag_calls "${log}")"
+	# One awk pass over the calls, in order. Tokens are scanned so a press or release chained
+	# onto a mousemove ("mousemove 100 200 mousedown 1") counts the same as a separate call.
+	verdict="$(awk '
+		{
+			for (i = 1; i <= NF; i++) {
+				if ($i == "mousemove" && i + 2 <= NF) {
+					x = $(i + 1); y = $(i + 2); i += 2
+					if (!down) { pre_x = x; pre_y = y }
+					else if (!up) {
+						moves++; last_x = x; last_y = y
+						if (x > 100 && x < 400 && y > 200 && y < 800) between++
+					}
+				} else if ($i == "mousedown" && $(i + 1) == "1") {
+					downs++; if (!down) { down = 1; press_x = pre_x; press_y = pre_y }
+				} else if ($i == "mouseup" && $(i + 1) == "1") {
+					ups++; if (down && !up) up = 1; else misorder = 1
+				}
+			}
+		}
+		END {
+			printf "downs=%d ups=%d misorder=%d press=%s,%s moves=%d between=%d last=%s,%s\n",
+				downs, ups, misorder, press_x, press_y, moves, between, last_x, last_y
+		}' <<<"${calls}")"
+	assert_status 0 "${status}" &&
+		assert_contains "${verdict}" "downs=1 ups=1 misorder=0" &&
+		assert_contains "${verdict}" "press=100,200" &&
+		assert_contains "${verdict}" "last=400,800" && {
+		local moves between
+		moves="$(sed -n 's/.* moves=\([0-9]*\).*/\1/p' <<<"${verdict}")"
+		between="$(sed -n 's/.* between=\([0-9]*\).*/\1/p' <<<"${verdict}")"
+		if [[ "${moves:-0}" -lt 18 ]]; then
+			no "a glide needs at least 18 moves between press and release, got ${moves:-0}: ${verdict}"
+			false
+		elif [[ "${between:-0}" -lt 1 ]]; then
+			no "no move lies strictly between the endpoints (a jump, read as a click): ${verdict}"
+			false
+		fi
+	} &&
+		assert_not_contains "${log}" "DISPLAY=:0 xdotool" &&
+		assert_contains "${out}" "drag" && ok
+	rm -rf "${tmp}"
+}
+
+test_xvfb_proof_drag_xdotool_failure_fails_the_step() {
+	case_start "xvfb-proof: a failing xdotool call fails the drag step with exit 1 naming index and kind (036 2.1)"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	out="$(XDOTOOL_STUB_FAIL=mousemove run_xvfb_proof "${tmp}" --steps "$(one_step "${tmp}" '[{"sleep": 0.01}, {"drag": [10, 20, 30, 40]}]')")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_not_contains "${out}" "unknown kind" &&
+		assert_contains "${out}" "step 2 (drag)" && ok
+	rm -rf "${tmp}"
+}
+
 test_xvfb_proof_drive_deletes_a_degenerate_capture() {
 	case_start "xvfb-proof: a capture under 200 px is deleted and exits 1 naming file and geometry (R3.2)"
 	local tmp out status
@@ -2775,6 +2882,11 @@ main() {
 		test_xvfb_proof_drive_detects_an_editor_that_died_mid_run
 		test_xvfb_proof_launch_isolates_bus_and_runtime_dir
 		test_xvfb_proof_lifecycle_spares_a_process_without_the_run_marker
+
+		test_xvfb_proof_drag_dry_run_validates_and_prints_the_plan
+		test_xvfb_proof_drag_bad_shapes_exit_1_naming_index_and_kind
+		test_xvfb_proof_drag_presses_glides_and_releases
+		test_xvfb_proof_drag_xdotool_failure_fails_the_step
 
 		test_release_patches_skips_default_off_groups
 	)
