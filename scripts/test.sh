@@ -57,7 +57,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # The crates the series touches -- what a regression from a patch can break.
 CRATES=(acp_thread agent agent_servers agent_settings agent_tasks_panel agent_ui
-	auto_update claude_code_ide cli client devtools_bridge extension_host
+	auto_update claude_code_ide cli client devtools_bridge epic_panel extension_host
 	feature_flags icons install_cli markdown oauth_callback_server onboarding paths
 	project recent_projects release_channel remote_server settings settings_content
 	settings_ui sidebar title_bar ui workspace zed zed_credentials_provider
