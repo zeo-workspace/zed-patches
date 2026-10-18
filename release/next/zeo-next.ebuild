@@ -1633,6 +1633,12 @@ KEYWORDS="~amd64"
 # filter in the thread list. On by default; it extends 0058's session code, so
 # it needs browser-extension.
 #
+# epic was added on 2026-10-18 (story 042): patch 0066, a read-only "Epic
+# Stories" dock panel listing the project's .epic/ stories with their status and
+# tasks.md progress, followed live. On by default; it is generated on top of the
+# claude-agent-acp-plus group (its wiring sits beside 0035's), so it needs that
+# flag, and nothing else.
+#
 # ai-jail was added on 2026-10-03, carried over from app-editors/zed when that
 # package stopped being part of this chain: it pulls in sys-apps/ai-jail, a
 # sandbox for AI coding agents. Since story 043 it also applies patch 0057, the
@@ -1652,8 +1658,8 @@ KEYWORDS="~amd64"
 # zed-extension, zed-remote-server -- and renaming Zed's server infrastructure is
 # not what a rebrand of the editor is for.
 IUSE="+X ai-jail +browser-extension +claude-agent-acp-plus +claude-agent-acp-tui
-	+claude-code-ide +devtools-bridge +devtools-panel inspector +mimalloc neovim
-	screen-capture test tracy +wayland"
+	+claude-code-ide +devtools-bridge +devtools-panel +epic inspector +mimalloc
+	neovim screen-capture test tracy +wayland"
 # BENTOO-DIVERGENCE: REQUIRED_USE - the || ( X wayland ) clause, which follows
 # from the X and wayland flags this overlay adds (see the IUSE tag). ::gentoo
 # exposes neither, so it has nothing to constrain. ai-jail? requires the agent
@@ -1663,6 +1669,7 @@ IUSE="+X ai-jail +browser-extension +claude-agent-acp-plus +claude-agent-acp-tui
 # 0052's bridge socket, and 0058 is generated on top of it.
 # devtools-panel? requires browser-extension: 0063 extends 0058's session code
 # and is generated on top of it.
+# epic? requires claude-agent-acp-plus: 0066 is generated on top of that group.
 # test? requires the adapter flags the test-only patches (0050, 0051) are
 # generated on top of.
 REQUIRED_USE="
@@ -1671,6 +1678,7 @@ REQUIRED_USE="
 	browser-extension? ( devtools-bridge )
 	devtools-panel? ( browser-extension )
 	devtools-bridge? ( claude-agent-acp-plus )
+	epic? ( claude-agent-acp-plus )
 	test? ( claude-agent-acp-plus claude-code-ide )
 "
 RESTRICT="!test? ( test )"
@@ -2112,6 +2120,15 @@ src_prepare() {
 	# the two ship together.
 	if use devtools-panel; then
 		PATCHES+=( "${FILESDIR}/0063-devtools-panel.patch" )
+	fi
+
+	# 0066 (story 042): the Epic Stories panel -- a read-only dock panel of the
+	# project's .epic/ stories, their status and tasks.md progress, followed
+	# live; it writes nothing and runs nothing. Its own group, after
+	# devtools-panel and before test; it applies with claude-code-ide and
+	# devtools-bridge each on or off, and 0050/0051 on top of it.
+	if use epic; then
+		PATCHES+=( "${FILESDIR}/0066-epic-panel.patch" )
 	fi
 
 	# 0050 and 0051 change tests only -- nothing in them reaches the binary -- so
