@@ -2109,10 +2109,10 @@ index 0000000..0d9bc8a
 +}
 diff --git a/crates/epic_panel/src/panel.rs b/crates/epic_panel/src/panel.rs
 new file mode 100644
-index 0000000..475029f
+index 0000000..5826b73
 --- /dev/null
 +++ b/crates/epic_panel/src/panel.rs
-@@ -0,0 +1,1584 @@
+@@ -0,0 +1,1604 @@
 +//! `EpicPanel`: the dock panel that lists the stories under each local worktree's `.epic/`.
 +//!
 +//! The panel only reads. It looks for `.epic/` at the root of every local worktree (A6), keeps
@@ -2173,6 +2173,12 @@ index 0000000..475029f
 +const NO_STORIES: &str = "No stories yet";
 +/// The absent number, status or progress: U+2014, as the plugin writes it.
 +const ABSENT: &str = "\u{2014}";
++/// The right gutter every list row keeps, so the always-visible scrollbar never covers the
++/// progress or the badges. It is the `ui` scrollbar's track: the `ScrollbarStyle::Regular`
++/// thumb (6px) plus the 4px it is inset by on each side (`SCROLLBAR_PADDING`, private to
++/// `ui`). `Pixels` has no const arithmetic, so the sum is spelled out here;
++/// `panel_polish_tests` recomputes it from `ScrollbarStyle::Regular` and fails on drift.
++const ROW_END_PADDING: Pixels = px(14.);
 +const UNKNOWN_STATUS: &str = "Status not known to this Zeo; the epic plugin may be newer";
 +
 +/// Registers the panel's `ToggleFocus` on every workspace created from now on. No default
@@ -3134,7 +3140,7 @@ index 0000000..475029f
 +            .on_click(cx.listener(move |panel, _, window, cx| {
 +                panel.select_and_activate(index, window, cx)
 +            }));
-+        match entry {
++        let row = match entry {
 +            DisplayEntry::WorktreeHeader { worktree } => item.child(
 +                Label::new(
 +                    self.worktrees
@@ -3202,8 +3208,13 @@ index 0000000..475029f
 +                    .color(Color::Muted)
 +                    .truncate(),
 +            ),
-+        }
-+        .into_any_element()
++        };
++        // `ListItem` takes no padding of its own, so the gutter is the wrapper's.
++        div()
++            .w_full()
++            .pr(ROW_END_PADDING)
++            .child(row)
++            .into_any_element()
 +    }
 +}
 +
@@ -3296,10 +3307,11 @@ index 0000000..475029f
 +    }
 +}
 +
-+/// A log value: quoted when it holds whitespace, `=`, `"` or a control character, with `"` and
-+/// `\` escaped. Control characters and every whitespace other than the ASCII space are written
-+/// as `\u{..}`, so a name from a cloned repository can never end a line (U+2028 does, in some
-+/// readers) or forge another key (Q14).
++/// A log value: quoted when it holds whitespace, `=`, `"` or a control character. Inside the
++/// quotes, `"`, `\`, control characters and every whitespace other than the ASCII space are
++/// written as `\u{..}`, so a quoted value never holds a raw `"` or `\`: a name from a cloned
++/// repository can never end a line (U+2028 does, in some readers), close the quotes early or
++/// forge another key (Q14).
 +fn log_value(value: &str) -> String {
 +    if !value.contains(['=', '"'])
 +        && !value
@@ -3312,10 +3324,12 @@ index 0000000..475029f
 +    quoted.push('"');
 +    for character in value.chars() {
 +        match character {
-+            '"' => quoted.push_str("\\\""),
-+            '\\' => quoted.push_str("\\\\"),
 +            ' ' => quoted.push(' '),
-+            character if character.is_control() || character.is_whitespace() => {
++            character
++                if matches!(character, '"' | '\\')
++                    || character.is_control()
++                    || character.is_whitespace() =>
++            {
 +                quoted.push_str(&character.escape_unicode().to_string())
 +            }
 +            character => quoted.push(character),
@@ -3697,12 +3711,18 @@ index 0000000..475029f
 +#[cfg(test)]
 +#[path = "panel_contract_tests.rs"]
 +mod panel_contract_tests;
++
++// Task 10.1: log values the frozen Q14 parser reads, and the rows' scrollbar gutter.
++#[cfg(test)]
++#[path = "panel_polish_tests.rs"]
++#[rustfmt::skip]
++mod panel_polish_tests;
 diff --git a/crates/epic_panel/src/panel_contract_tests.rs b/crates/epic_panel/src/panel_contract_tests.rs
 new file mode 100644
-index 0000000..3163869
+index 0000000..86b43b7
 --- /dev/null
 +++ b/crates/epic_panel/src/panel_contract_tests.rs
-@@ -0,0 +1,871 @@
+@@ -0,0 +1,868 @@
 +// Story 042, task 6.1 — the panel renders only what the scan provides.
 +//
 +// Four groups, all test-after:
@@ -4393,8 +4413,8 @@ index 0000000..3163869
 +        ("a\\b", "a\\b"),
 +        ("my project", "\"my project\""),
 +        ("a=b", "\"a=b\""),
-+        ("a\"b", "\"a\\\"b\""),
-+        ("a \\b", "\"a \\\\b\""),
++        ("a\"b", "\"a\\u{22}b\""),
++        ("a \\b", "\"a \\u{5c}b\""),
 +        ("a\u{a0}b", "\"a\\u{a0}b\""),
 +        ("a\u{3000}b", "\"a\\u{3000}b\""),
 +        ("a\u{2028}b", "\"a\\u{2028}b\""),
@@ -4420,11 +4440,8 @@ index 0000000..3163869
 +            ],
 +            "one token that decodes back to {raw:?}: {line:?}"
 +        );
-+        // The frozen parser ends a quoted value at the first `"` and so cannot read the `\"`
-+        // escape design.md prescribes; every other value must satisfy it as it is.
-+        if !raw.contains('"') {
-+            assert!(frozen_parser(&line), "Q14 parser rejects {line:?}");
-+        }
++        // A quoted value holds no raw `"` (task 10.1), so the frozen parser reads every line.
++        assert!(frozen_parser(&line), "Q14 parser rejects {line:?}");
 +    }
 +}
 +
@@ -5025,6 +5042,262 @@ index 0000000..35ca9c1
 +        "an open failure becomes a visible error (workspace.show_error)"
 +    );
 +    rig.fs.unpause_events_and_flush();
++}
+diff --git a/crates/epic_panel/src/panel_polish_tests.rs b/crates/epic_panel/src/panel_polish_tests.rs
+new file mode 100644
+index 0000000..c8c8a25
+--- /dev/null
++++ b/crates/epic_panel/src/panel_polish_tests.rs
+@@ -0,0 +1,250 @@
++// Story 042, task 10.1 — log values the frozen Q14 parser reads, and a right gutter for the
++// list's scrollbar (R8.3, R8.4, R2.1; Q5, Q14, Q16). Module path: `panel::panel_polish_tests`.
++//
++// Mounted from `src/panel.rs` as a child of `panel`, so it reaches the private helpers:
++//
++//     #[cfg(test)]
++//     #[path = "panel_polish_tests.rs"]
++//     #[rustfmt::skip]
++//     mod panel_polish_tests;
++//
++// SEAMS THE IMPLEMENTATION MUST EXPOSE (in `panel.rs`, private is enough):
++//   - `fn log_value(value: &str) -> String` — exists today.
++//   - `const ROW_END_PADDING: Pixels` — the right gutter every list row keeps, applied by
++//     `EpicPanel::render_entry` (the builder every row kind goes through) by naming it.
++//
++// Value form, from design.md §As Built (Log values) and task 10.1's Objective: a value holding
++// `=`, `"`, whitespace or a control character is written in double quotes; inside the quotes
++// `"` is `\u{22}`, `\` is `\u{5c}`, and every `\` begins a `\u{..}` escape. Every other value
++// is bare.
++
++use gpui::Pixels;
++use ui::ScrollbarStyle;
++
++use super::{ROW_END_PADDING, log_value};
++
++// ── the frozen Q14 parser ───────────────────────────────────────────────────
++
++/// `panel_live_tests::parses_as_key_values`, copied verbatim: it is private to that frozen
++/// module, so it cannot be called from here.
++fn frozen_parser(mut rest: &str) -> bool {
++    loop {
++        rest = rest.trim_start();
++        if rest.is_empty() {
++            return true;
++        }
++        let Some(eq) = rest.find('=') else {
++            return false;
++        };
++        let key = &rest[..eq];
++        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
++            return false;
++        }
++        rest = &rest[eq + 1..];
++        if let Some(quoted) = rest.strip_prefix('"') {
++            let Some(end) = quoted.find('"') else {
++                return false;
++            };
++            rest = &quoted[end + 1..];
++        } else {
++            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
++            rest = &rest[end..];
++        }
++    }
++}
++
++/// The SAME rule as `frozen_parser`, step for step, but returning the `(key, token)` pairs it
++/// reads instead of a bool — so a test can see how many keys a line holds and where each
++/// value ends. A token keeps its quotes.
++fn frozen_tokens(mut rest: &str) -> Option<Vec<(&str, &str)>> {
++    let mut pairs = Vec::new();
++    loop {
++        rest = rest.trim_start();
++        if rest.is_empty() {
++            return Some(pairs);
++        }
++        let eq = rest.find('=')?;
++        let key = &rest[..eq];
++        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
++            return None;
++        }
++        rest = &rest[eq + 1..];
++        let token;
++        if let Some(quoted) = rest.strip_prefix('"') {
++            let end = quoted.find('"')?;
++            token = &rest[..end + 2];
++            rest = &quoted[end + 1..];
++        } else {
++            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
++            token = &rest[..end];
++            rest = &rest[end..];
++        }
++        pairs.push((key, token));
++    }
++}
++
++/// Reads a token back to the value: a bare token is the value as it is; a quoted token's
++/// inside may hold only `\u{hex}` escapes, so `\"` and `\\` are rejected (`None`).
++fn decode_token(token: &str) -> Option<String> {
++    let Some(inner) = token
++        .strip_prefix('"')
++        .and_then(|rest| rest.strip_suffix('"'))
++    else {
++        return Some(token.to_string());
++    };
++    let mut value = String::new();
++    let mut rest = inner;
++    while let Some(slash) = rest.find('\\') {
++        value.push_str(&rest[..slash]);
++        let escape = rest[slash + 1..].strip_prefix("u{")?;
++        let close = escape.find('}')?;
++        let code = u32::from_str_radix(&escape[..close], 16).ok()?;
++        value.push(char::from_u32(code)?);
++        rest = &escape[close + 1..];
++    }
++    value.push_str(rest);
++    Some(value)
++}
++
++/// One value's checks on a line shaped like the panel's `event=problem` line.
++fn assert_one_token(raw: &str) {
++    let written = log_value(raw);
++    let line = format!("event=problem story={written} file=tasks.md");
++    assert!(frozen_parser(&line), "Q14: the frozen parser rejects {line:?}");
++    let tokens = frozen_tokens(&line).unwrap_or_else(|| panic!("not key=value: {line:?}"));
++    let keys: Vec<&str> = tokens.iter().map(|(key, _)| *key).collect();
++    assert_eq!(
++        keys,
++        ["event", "story", "file"],
++        "{raw:?} must stay one value, neither forging a key nor splitting: {line:?}"
++    );
++    assert_eq!(tokens[1].1, written, "the whole of {written:?} is the story value");
++    assert_eq!(
++        decode_token(&written).as_deref(),
++        Some(raw),
++        "{written:?} must read back to {raw:?} with only \\u{{..}} escapes"
++    );
++}
++
++// ── log values ──────────────────────────────────────────────────────────────
++
++/// Values that hold `"`, `\`, `=` and a space — the hostile ones first: each is built to close
++/// the quotes early and forge a key under the old `\"` escape.
++const HOSTILE: &[&str] = &[
++    // all four at once
++    r#"say "hi" \ k=v"#,
++    // closes the quotes and forges `event=`
++    r#"x" event=forged reason="y"#,
++    // a backslash right before the closing quote (`\"` would swallow it)
++    r#"trailing \"#,
++    // the old escape spelled out literally
++    r#"a \" b = c"#,
++    r#"C:\Program Files\"x"=1"#,
++];
++
++#[test]
++fn polish_quoted_value_has_no_raw_quote_or_backslash() {
++    for raw in HOSTILE {
++        let written = log_value(raw);
++        let inner = written
++            .strip_prefix('"')
++            .and_then(|rest| rest.strip_suffix('"'))
++            .unwrap_or_else(|| panic!("{raw:?} needs quotes, got {written:?}"));
++        assert!(
++            !inner.contains('"'),
++            "a raw `\"` inside the quotes of {written:?} (for {raw:?})"
++        );
++        for (at, _) in inner.match_indices('\\') {
++            assert!(
++                inner[at + 1..].starts_with("u{"),
++                "a raw `\\` at byte {at} inside {written:?}: every backslash must begin a \\u{{..}} escape"
++            );
++        }
++        assert!(
++            !raw.contains('"') || inner.contains("\\u{22}"),
++            "`\"` is written as \\u{{22}} in {written:?}"
++        );
++        assert!(
++            !raw.contains('\\') || inner.contains("\\u{5c}"),
++            "`\\` is written as \\u{{5c}} in {written:?}"
++        );
++    }
++}
++
++#[test]
++fn polish_frozen_parser_reads_every_line_as_three_keys() {
++    for raw in HOSTILE {
++        assert_one_token(raw);
++    }
++}
++
++/// The escape is a spelling the fix invents, so a THIRD value can collide with it: a value
++/// whose own text is `\u{22}` must not render the same as a value holding `"`.
++#[test]
++fn polish_escape_spelling_cannot_collide_with_a_literal_value() {
++    let pairs: &[(&str, &str)] = &[
++        (r#"a "b"#, r#"a \u{22}b"#),
++        (r#"a \b"#, r#"a \u{5c}b"#),
++        (r#"a"b"#, r#"a\u{22}b"#),
++        (r#"a\b c"#, r#"a\u{5c}b c"#),
++    ];
++    for (with_char, with_escape_text) in pairs {
++        let left = log_value(with_char);
++        let right = log_value(with_escape_text);
++        assert_ne!(
++            left, right,
++            "{with_char:?} and {with_escape_text:?} must stay distinguishable"
++        );
++        assert_one_token(with_char);
++        assert_one_token(with_escape_text);
++    }
++}
++
++#[test]
++fn polish_plain_value_stays_bare() {
++    for raw in ["project", "001-epic-panel", "tasks.md", "0", "watch_failed"] {
++        assert_eq!(log_value(raw), raw, "a plain value is written bare");
++        assert_one_token(raw);
++    }
++}
++
++// ── the scrollbar gutter ────────────────────────────────────────────────────
++
++/// The track the panel's `Scrollbars::always_visible` draws over the list's right edge: the
++/// default `ScrollbarStyle::Regular` thumb plus the `SCROLLBAR_PADDING` (4px, private to `ui`)
++/// it is inset by on each side. A gutter narrower than this leaves text under the thumb.
++fn scrollbar_track() -> f32 {
++    ScrollbarStyle::Regular.to_pixels().as_f32() + 2.0 * 4.0
++}
++
++#[test]
++fn polish_row_gutter_is_the_scrollbar_width() {
++    let gutter: Pixels = ROW_END_PADDING;
++    let track = scrollbar_track();
++    assert!(
++        gutter.as_f32() >= track,
++        "every row keeps a right gutter at least as wide as the scrollbar track ({track}px), got {gutter:?}"
++    );
++    // A gutter far wider than the track only takes width from the labels, scrollbar or not.
++    assert!(
++        gutter.as_f32() <= 2.0 * track,
++        "the gutter ({gutter:?}) is at most twice the track ({track}px)"
++    );
++}
++
++/// `render_entry` is the builder every row kind goes through (headers, stories, `Archived (N)`,
++/// "N more not shown", errors), so the gutter is applied there, by name.
++#[test]
++fn polish_row_builder_applies_the_gutter() {
++    let source = include_str!("panel.rs");
++    let start = source
++        .find("fn render_entry(")
++        .expect("panel.rs has `fn render_entry(`");
++    let body = &source[start..];
++    // The method ends at the first closing brace at its own indentation.
++    let end = body.find("\n    }\n").map_or(body.len(), |end| end + 6);
++    assert!(
++        body[..end].contains("ROW_END_PADDING"),
++        "render_entry must apply ROW_END_PADDING to every row"
++    );
 +}
 diff --git a/crates/epic_panel/src/panel_rows_tests.rs b/crates/epic_panel/src/panel_rows_tests.rs
 new file mode 100644
