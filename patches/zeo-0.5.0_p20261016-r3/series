@@ -419,6 +419,19 @@
 # on top of 0058 with or without 0057, and 0050/0051 apply on top of it unchanged.
 0063-devtools-panel.patch
 
+# @feature: epic
+# 0066: the Epic Stories panel (story 042) -- a read-only dock panel listing the
+# project's .epic/ stories and archived stories, each with its status and its
+# tasks.md progress, read with epic plugin 0.13.1's own grammar (a parity test
+# runs the real epic-index.sh against it) and followed live; it writes nothing
+# and runs nothing. A patch because a Zed extension cannot render a panel. Its
+# own group, after every devtools group and before test: USE epic (default on)
+# needs claude-agent-acp-plus, whose 0035 wiring its hunks sit beside, and the
+# ebuild's REQUIRED_USE ties the two. It needs none of the optional groups: it
+# applies with claude-code-ide and devtools-bridge each on or off, and 0050/0051
+# apply on top of it unchanged.
+0066-epic-panel.patch
+
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
 # ebuild applies them under USE=test alone. They are generated on top of every
