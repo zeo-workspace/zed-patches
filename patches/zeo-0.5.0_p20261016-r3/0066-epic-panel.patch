@@ -2109,10 +2109,10 @@ index 0000000..0d9bc8a
 +}
 diff --git a/crates/epic_panel/src/panel.rs b/crates/epic_panel/src/panel.rs
 new file mode 100644
-index 0000000..5826b73
+index 0000000..f7baaa5
 --- /dev/null
 +++ b/crates/epic_panel/src/panel.rs
-@@ -0,0 +1,1604 @@
+@@ -0,0 +1,1610 @@
 +//! `EpicPanel`: the dock panel that lists the stories under each local worktree's `.epic/`.
 +//!
 +//! The panel only reads. It looks for `.epic/` at the root of every local worktree (A6), keeps
@@ -3717,6 +3717,12 @@ index 0000000..5826b73
 +#[path = "panel_polish_tests.rs"]
 +#[rustfmt::skip]
 +mod panel_polish_tests;
++
++// Task 11.1: a symlink whose target cannot be read puts no absolute path in any log line.
++#[cfg(test)]
++#[path = "panel_fs_log_tests.rs"]
++#[rustfmt::skip]
++mod panel_fs_log_tests;
 diff --git a/crates/epic_panel/src/panel_contract_tests.rs b/crates/epic_panel/src/panel_contract_tests.rs
 new file mode 100644
 index 0000000..86b43b7
@@ -4590,6 +4596,261 @@ index 0000000..86b43b7
 +    .await;
 +    assert_eq!(lines(&mut rig).len(), 4, "{:?}", lines(&mut rig));
 +    assert_eq!(banner(&mut rig), None);
++}
+diff --git a/crates/epic_panel/src/panel_fs_log_tests.rs b/crates/epic_panel/src/panel_fs_log_tests.rs
+new file mode 100644
+index 0000000..077e108
+--- /dev/null
++++ b/crates/epic_panel/src/panel_fs_log_tests.rs
+@@ -0,0 +1,249 @@
++// Story 042, task 11.1 — a hostile symlink in `.epic/` puts no absolute path in any log line,
++// from any crate (R8.5, R8.4; Q5, Q14). Module path: `panel::panel_fs_log_tests`.
++//
++// Mounted from `src/panel.rs`, a child of `panel` like its siblings:
++//
++//     #[cfg(test)]
++//     #[path = "panel_fs_log_tests.rs"]
++//     #[rustfmt::skip]
++//     mod panel_fs_log_tests;
++//
++// The corpus is built with blocking standard-library calls on a real temp directory, which the
++// workspace's disallowed-methods list rejects; the allow is an inner attribute below, so the
++// mount needs nothing more than the three lines above.
++//
++// HOW EVERY LOG TARGET IS SEEN. The process has one logger, `panel_test_helpers`'
++// `CaptureLogger`, installed once by `capture_logs()`. It records every record from every
++// target (the `fs` crate's included) on the thread that logs it, but its only reader of raw
++// lines, `panel_lines()`, keeps the lines containing "epic_panel". A second logger cannot be
++// installed: there is one per process and the sibling tests race to own it. So this test makes
++// the filter irrelevant to what it forbids instead: the temp directory's own name starts with
++// `epic_panel-`, hence every line carrying its absolute path — whichever crate wrote it —
++// contains "epic_panel" and is read. The forbidden set is observed in full.
++//
++// LIVENESS. A capture that never sees the `fs` crate would pass this test silently. A story-area
++// entry that is itself a symlink loop is named `099-epic_panel-loop`, so the `fs` warn for it
++// contains "epic_panel" whether it names the path or only the file name; the test requires that
++// warn to be seen.
++
++#![cfg(unix)]
++#![allow(clippy::disallowed_methods)]
++
++use std::{
++    fs as stdfs,
++    os::unix::fs::PermissionsExt as _,
++    path::{Path, PathBuf},
++    sync::Arc,
++    time::Duration,
++};
++
++use gpui::TestAppContext;
++
++use super::panel_test_helpers::*;
++use super::row_badge;
++use crate::scan::RowProblem;
++
++const LOOP_STORY: &str = "001-loop";
++const LOCKED_STORY: &str = "002-locked";
++/// A story-area entry that is a symlink to itself: `fs` warns about it, and its name makes the
++/// warn visible to `panel_lines()` (see LIVENESS above).
++const LOOP_ENTRY: &str = "099-epic_panel-loop";
++/// The derived value the fix logs is a file name. A name may hold a newline, which written
++/// raw would forge a second log line; this one names a field the panel's parser reads.
++const FORGING_ENTRY: &str = "098-epic_panel-forge\nevent=scan worktree=x";
++
++fn write(path: &Path, content: &str) {
++    let parent = path.parent().expect("a file has a parent");
++    stdfs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
++    stdfs::write(path, content).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
++}
++
++fn symlink(target: &Path, link: &Path) {
++    std::os::unix::fs::symlink(target, link)
++        .unwrap_or_else(|e| panic!("symlink {} -> {}: {e}", link.display(), target.display()));
++}
++
++/// Gives a locked directory its permissions back, so the temp directory can be removed even
++/// when an assertion fails first.
++struct Unlock(PathBuf);
++
++impl Drop for Unlock {
++    fn drop(&mut self) {
++        let _ = stdfs::set_permissions(&self.0, stdfs::Permissions::from_mode(0o755));
++    }
++}
++
++struct Corpus {
++    project: PathBuf,
++    /// The absolute paths of every hostile link and of the locked target.
++    hostile: Vec<PathBuf>,
++    /// True when the locked target really errors (false when running as root).
++    locked_errors: bool,
++    _unlock: Unlock,
++}
++
++/// `<root>/project/.epic/stories/` with:
++///   - `001-loop`: a `story.md`, and a `tasks.md` that is a symlink to itself (a loop);
++///   - `002-locked`: a `story.md`, and a `tasks.md` that is a symlink, by absolute path, to a
++///     file inside a directory with mode 000 (the user may not read the target);
++///   - `099-epic_panel-loop` and the forging name: entries that are symlinks to themselves.
++/// Every link target is absolute, so the link text itself carries the temp path.
++fn build(root: &Path) -> Corpus {
++    let project = root.join("project");
++    write(&project.join(".gitignore"), ".epic/\n");
++    let stories = project.join(".epic/stories");
++    let story = |status: &str| fm(&[("status", status)], "# Story - Hostile link\n");
++
++    write(&stories.join(LOOP_STORY).join("story.md"), &story("in-progress"));
++    let loop_tasks = stories.join(LOOP_STORY).join("tasks.md");
++    symlink(&loop_tasks, &loop_tasks);
++
++    write(&stories.join(LOCKED_STORY).join("story.md"), &story("draft"));
++    let locked_dir = root.join("locked");
++    let locked_target = locked_dir.join("tasks.md");
++    write(&locked_target, "- [ ] hidden\n");
++    symlink(&locked_target, &stories.join(LOCKED_STORY).join("tasks.md"));
++    stdfs::set_permissions(&locked_dir, stdfs::Permissions::from_mode(0o000))
++        .unwrap_or_else(|e| panic!("chmod 000 {}: {e}", locked_dir.display()));
++    let unlock = Unlock(locked_dir);
++    let locked_errors = stdfs::metadata(&locked_target).is_err();
++
++    let mut hostile = vec![loop_tasks, stories.join(LOCKED_STORY).join("tasks.md"), locked_target];
++    for entry in [LOOP_ENTRY, FORGING_ENTRY] {
++        let link = stories.join(entry);
++        symlink(&link, &link);
++        hostile.push(link);
++    }
++
++    Corpus {
++        project,
++        hostile,
++        locked_errors,
++        _unlock: unlock,
++    }
++}
++
++fn find_line(rig: &mut Rig, dir_name: &str) -> bool {
++    find_row(rig, dir_name).is_some()
++}
++
++// R8.5, R8.4 — opening the panel on a story whose `tasks.md` is a symlink loop, and on one whose
++// target the user may not read, logs no line from any crate that carries an absolute path; the
++// stories still show their row problem.
++#[gpui::test]
++async fn panel_fs_log_hostile_symlinks_log_no_absolute_path(cx: &mut TestAppContext) {
++    cx.executor().allow_parking();
++    capture_logs();
++    init_test(cx);
++
++    let temp = tempfile::Builder::new()
++        .prefix("epic_panel-fs-log-")
++        .tempdir()
++        .expect("temp dir");
++    let corpus = build(temp.path());
++    let mut forbidden = vec![temp.path().to_string_lossy().into_owned()];
++    if let Ok(canonical) = stdfs::canonicalize(temp.path()) {
++        forbidden.push(canonical.to_string_lossy().into_owned());
++    }
++    for path in &forbidden {
++        assert!(path.contains("epic_panel"), "the capture sees this path only through its name: {path}");
++    }
++
++    let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    let project = project::Project::test(fs.clone(), [corpus.project.as_path()], cx).await;
++    let window = cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = window.read_with(cx, |multi, _| multi.workspace().clone()).expect("workspace");
++    let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
++    let panel = load(&workspace, &mut vcx).await;
++    workspace.update_in(&mut vcx, |workspace, window, cx| workspace.add_panel(panel.clone(), window, cx));
++    vcx.run_until_parked();
++    let fake = fs::FakeFs::new(vcx.executor());
++    let mut rig = Rig {
++        fs: fake,
++        project,
++        workspace,
++        panel,
++        cx: vcx,
++    };
++
++    // Real I/O: give the scan real time rather than virtual time.
++    for _ in 0..100 {
++        if find_line(&mut rig, LOOP_STORY) && find_line(&mut rig, LOCKED_STORY) {
++            break;
++        }
++        std::thread::sleep(Duration::from_millis(50));
++        rig.cx.run_until_parked();
++    }
++    // Open the panel and read again, so later reads log too.
++    focus_panel(&mut rig);
++    press(&mut rig, super::Refresh);
++    for _ in 0..10 {
++        std::thread::sleep(Duration::from_millis(50));
++        rig.cx.run_until_parked();
++    }
++
++    // The stories still show their row problem.
++    for dir_name in [LOOP_STORY, LOCKED_STORY] {
++        let row = find_row(&mut rig, dir_name)
++            .unwrap_or_else(|| panic!("{dir_name} is listed: {:?}", lines(&mut rig)));
++        assert_eq!(row.problem, Some(RowProblem::Symlink("tasks.md".to_string())), "{dir_name}: {row:?}");
++        assert_eq!(row_badge(&row), Some("symlink not followed"), "{dir_name}");
++    }
++
++    let captured = panel_lines();
++
++    // Liveness: the `fs` crate's warn for the looping entry was captured, so the scan below
++    // looked at the `fs` crate's lines and not only the panel's.
++    assert!(
++        captured.iter().any(|(level, line)| *level == log::Level::Warn
++            && line.contains(LOOP_ENTRY)
++            && !line.starts_with("epic_panel ")),
++        "the capture saw the fs crate's warn for the looping entry {LOOP_ENTRY:?}: {captured:#?}"
++    );
++
++    // R8.5, R8.4 — no line, from any target, at debug or above, carries the temp directory's
++    // absolute path. Trace is left out on purpose: the `fs` watcher and the git ancestor lookup
++    // trace every directory they watch or consider, by absolute path, in any project and with
++    // or without a symlink; that is upstream behaviour the symlink does not trigger, and trace
++    // is never on in a shipped build.
++    for (level, line) in &captured {
++        if *level == log::Level::Trace {
++            continue;
++        }
++        for path in &forbidden {
++            assert!(
++                !line.contains(path.as_str()),
++                "R8.5 a {level} line carries the absolute path {path:?}: {line}"
++            );
++        }
++    }
++
++    // R8.5 — at every level, trace included, no line names a hostile link or the locked target
++    // by absolute path (as written, or under the canonical temp directory).
++    let canonical_root = stdfs::canonicalize(temp.path()).ok();
++    for link in &corpus.hostile {
++        let mut spellings = vec![link.to_string_lossy().into_owned()];
++        if let (Some(root), Ok(rest)) = (&canonical_root, link.strip_prefix(temp.path())) {
++            spellings.push(root.join(rest).to_string_lossy().into_owned());
++        }
++        for (level, line) in &captured {
++            for spelling in &spellings {
++                assert!(
++                    !line.contains(spelling.as_str()),
++                    "R8.5 a {level} line names the hostile link {spelling:?}: {line}"
++                );
++            }
++        }
++    }
++
++    // The derived file name is written escaped: a name holding a newline forges no line.
++    for (level, line) in &captured {
++        assert!(!line.contains('\n'), "a {level} line holds a raw newline (forged line): {line:?}");
++    }
++
++    if !corpus.locked_errors {
++        eprintln!("panel_fs_log: the locked target was readable (running as root?); only the loop exercised the error path");
++    }
++    drop(rig);
 +}
 diff --git a/crates/epic_panel/src/panel_live_tests.rs b/crates/epic_panel/src/panel_live_tests.rs
 new file mode 100644
@@ -8133,6 +8394,23 @@ index 0000000..57367ee
 +    );
 +    assert_eq!(probe.failures().len(), 1, "still reported only once");
 +}
+diff --git a/crates/fs/src/fs.rs b/crates/fs/src/fs.rs
+index 893c25f..d2d3a89 100644
+--- a/crates/fs/src/fs.rs
++++ b/crates/fs/src/fs.rs
+@@ -1112,8 +1112,11 @@ impl Fs for RealFs {
+                 Err(err) => {
+                     if err.kind() != io::ErrorKind::NotFound {
+                         // TODO: Also FilesystemLoop when that's stable
++                        // The file name only: the path may sit in an untrusted repository,
++                        // and an absolute path does not belong in a log line.
+                         log::warn!(
+-                            "Failed to read symlink target metadata for path {path:?}: {err}"
++                            "Failed to read symlink target metadata for {:?}: {err}",
++                            path.file_name().unwrap_or_default()
+                         );
+                     }
+                     // For a broken or recursive symlink, return the symlink metadata. (Or
 diff --git a/crates/zed/Cargo.toml b/crates/zed/Cargo.toml
 index f441800..5aceaa4 100644
 --- a/crates/zed/Cargo.toml
