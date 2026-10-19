@@ -111,7 +111,7 @@ spawns a real agent script and reads back its environment (story 050).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index de37a26..075da70 100644
+index 0fda5dc..6a72659 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -368,6 +368,39 @@ dependencies = [
@@ -191,7 +191,7 @@ index de37a26..075da70 100644
   "agent_servers",
   "agent_settings",
   "agent_skills",
-@@ -16522,6 +16560,7 @@ name = "settings_ui"
+@@ -16588,6 +16626,7 @@ name = "settings_ui"
  version = "0.1.0"
  dependencies = [
   "agent",
@@ -199,7 +199,7 @@ index de37a26..075da70 100644
   "agent_settings",
   "agent_skills",
   "anyhow",
-@@ -16554,6 +16593,7 @@ dependencies = [
+@@ -16620,6 +16659,7 @@ dependencies = [
   "language_models",
   "log",
   "menu",
@@ -207,7 +207,7 @@ index de37a26..075da70 100644
   "paths",
   "picker",
   "platform_title_bar",
-@@ -16564,13 +16604,16 @@ dependencies = [
+@@ -16630,13 +16670,16 @@ dependencies = [
   "rodio",
   "schemars 1.0.4",
   "search",
@@ -224,7 +224,7 @@ index de37a26..075da70 100644
   "theme",
   "theme_settings",
   "ui",
-@@ -22498,6 +22541,7 @@ dependencies = [
+@@ -22593,6 +22636,7 @@ dependencies = [
   "activity_indicator",
   "agent",
   "agent-client-protocol",
@@ -10929,10 +10929,10 @@ index 86f3d0c..0dc9ca6 100644
 +    }
  }
 diff --git a/crates/agent_servers/src/acp/v1.rs b/crates/agent_servers/src/acp/v1.rs
-index 1c5cbc3..a210cf1 100644
+index 9acd4bc..e44a5e8 100644
 --- a/crates/agent_servers/src/acp/v1.rs
 +++ b/crates/agent_servers/src/acp/v1.rs
-@@ -377,22 +377,35 @@ impl AgentSessionList for AcpSessionList {
+@@ -378,22 +378,35 @@ impl AgentSessionList for AcpSessionList {
      }
  }
  
@@ -10971,7 +10971,7 @@ index 1c5cbc3..a210cf1 100644
          cx,
      )
      .await?;
-@@ -554,6 +567,9 @@ impl AcpConnection {
+@@ -555,6 +568,9 @@ impl AcpConnection {
          self.debug_log.subscribe()
      }
  
@@ -10981,7 +10981,7 @@ index 1c5cbc3..a210cf1 100644
      pub async fn stdio(
          agent_id: AgentId,
          project: Entity<Project>,
-@@ -563,6 +579,30 @@ impl AcpConnection {
+@@ -564,6 +580,30 @@ impl AcpConnection {
          default_config_options: HashMap<String, AgentConfigOptionValue>,
          cx: &mut AsyncApp,
      ) -> Result<Self> {
@@ -11012,7 +11012,7 @@ index 1c5cbc3..a210cf1 100644
          let original_command = command.clone();
          let transport::StdioProcess {
              child,
-@@ -570,7 +610,7 @@ impl AcpConnection {
+@@ -571,7 +611,7 @@ impl AcpConnection {
              outgoing,
              stderr,
              debug_log,
@@ -11021,7 +11021,7 @@ index 1c5cbc3..a210cf1 100644
          let mut child = transport::OwnedChild(child);
          let sessions = Rc::new(RefCell::new(HashMap::default()));
  
-@@ -610,7 +650,14 @@ impl AcpConnection {
+@@ -611,7 +651,14 @@ impl AcpConnection {
              connection_tx,
              runtime::shutdown_requested(shutdown),
          );
@@ -11038,7 +11038,7 @@ index 1c5cbc3..a210cf1 100644
          let connection_rx = async move {
              connection_rx
 diff --git a/crates/agent_servers/src/acp/v2.rs b/crates/agent_servers/src/acp/v2.rs
-index 6560a56..3d71b2b 100644
+index b5d42e0..7baabef 100644
 --- a/crates/agent_servers/src/acp/v2.rs
 +++ b/crates/agent_servers/src/acp/v2.rs
 @@ -147,7 +147,7 @@ impl AcpV2Connection {

@@ -72,15 +72,23 @@ the two. It applies with claude-code-ide and devtools-bridge each on or
 off, and 0050/0051 apply on top of it unchanged. No new third-party
 crate: Cargo.lock gains only the epic_panel entry.
 
-Tests: epic_panel 179 (grammar 5 files, scan, watch, the panel's rows,
-shell, open, live updates and field contract, never-writes, parity).
+One hunk sits outside the crate, in crates/fs: RealFs::metadata warns
+when a symlink's target cannot be read, and that warning printed the
+whole path. A hostile symlink inside an untrusted repository's .epic/
+would put an absolute path in the log the panel promises never to
+write one to, so the warning now names the file only. Behaviour is
+otherwise unchanged; the panel_fs_log test pins it.
+
+Tests: epic_panel, 186 tests (grammar 5 files, scan, watch, the panel's rows,
+shell, open, live updates and field contract, never-writes, parity,
+the fs symlink log line).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 6afc7ea..eca8e0d 100644
+index 1cc3328..57e8251 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -5866,6 +5866,30 @@ dependencies = [
+@@ -5911,6 +5911,30 @@ dependencies = [
   "serde",
  ]
  
@@ -111,7 +119,7 @@ index 6afc7ea..eca8e0d 100644
  [[package]]
  name = "equator"
  version = "0.4.2"
-@@ -22588,6 +22612,7 @@ dependencies = [
+@@ -22683,6 +22707,7 @@ dependencies = [
   "editor",
   "encoding_selector",
   "env_logger 0.11.8",

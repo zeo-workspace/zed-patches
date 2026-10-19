@@ -60,10 +60,10 @@ Tests added 2026-10-10 (story 032 v4): Background -> Completed marks a pinned ro
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index e6920b8..5de6379 100644
+index f519dbf..cad2770 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
-@@ -3627,6 +3627,15 @@ impl AccountUsage {
+@@ -3659,6 +3659,15 @@ impl AccountUsage {
  /// forwards the SDK's `rate_limit_event` here instead of dropping it.
  const CLAUDE_RATE_LIMIT_META_KEY: &str = "_claude/rateLimit";
  
@@ -79,7 +79,7 @@ index e6920b8..5de6379 100644
  pub const TOKEN_USAGE_WARNING_THRESHOLD: f32 = 0.8;
  
  impl TokenUsage {
-@@ -3724,6 +3733,7 @@ pub struct AcpThread {
+@@ -3756,6 +3765,7 @@ pub struct AcpThread {
      activity: SessionActivity,
      token_usage: Option<TokenUsage>,
      account_usage: AccountUsage,
@@ -87,7 +87,7 @@ index e6920b8..5de6379 100644
      cost: Option<SessionCost>,
      prompt_capabilities: acp_v2::PromptCapabilities,
      available_commands: Vec<acp_v2::AvailableCommand>,
-@@ -3852,6 +3862,7 @@ pub enum AcpThreadEvent {
+@@ -3884,6 +3894,7 @@ pub enum AcpThreadEvent {
      NoticesUpdated,
      TokenUsageUpdated,
      AccountUsageUpdated,
@@ -95,7 +95,7 @@ index e6920b8..5de6379 100644
      EntryUpdated(usize),
      EntriesRemoved(Range<usize>),
      ToolAuthorizationRequested(PermissionRequestId),
-@@ -4005,6 +4016,7 @@ impl AcpThread {
+@@ -4037,6 +4048,7 @@ impl AcpThread {
                  | AcpThreadEvent::NoticesUpdated
                  | AcpThreadEvent::TokenUsageUpdated
                  | AcpThreadEvent::AccountUsageUpdated
@@ -103,7 +103,7 @@ index e6920b8..5de6379 100644
                  | AcpThreadEvent::EntryUpdated(_)
                  | AcpThreadEvent::Retry(_)
                  | AcpThreadEvent::SubagentSpawned(_)
-@@ -4065,6 +4077,7 @@ impl AcpThread {
+@@ -4097,6 +4109,7 @@ impl AcpThread {
              connection,
              token_usage: None,
              account_usage: AccountUsage::default(),
@@ -111,7 +111,7 @@ index e6920b8..5de6379 100644
              cost: None,
              prompt_capabilities,
              available_commands: Vec::new(),
-@@ -4628,6 +4641,12 @@ impl AcpThread {
+@@ -4660,6 +4673,12 @@ impl AcpThread {
          (!self.account_usage.is_empty()).then_some(&self.account_usage)
      }
  
@@ -124,7 +124,7 @@ index e6920b8..5de6379 100644
      pub fn cost(&self) -> Option<&SessionCost> {
          self.cost.as_ref()
      }
-@@ -4793,6 +4812,22 @@ impl AcpThread {
+@@ -4825,6 +4844,22 @@ impl AcpThread {
                  self.push_notice(notices::from_v1(notice).map_err(acp_v1::Error::from)?, cx);
              }
              acp_v1::SessionUpdate::SessionInfoUpdate(info_update) => {
@@ -144,10 +144,10 @@ index e6920b8..5de6379 100644
 +                    self.background_task_count = count;
 +                    cx.emit(AcpThreadEvent::BackgroundTasksUpdated);
 +                }
-                 self.update_session_info(session_info_update_from_v1(info_update), cx);
+                 self.update_session_info(info_update, cx);
              }
              acp_v1::SessionUpdate::AvailableCommandsUpdate(acp_v1::AvailableCommandsUpdate {
-@@ -21605,6 +21640,136 @@ mod tests {
+@@ -21892,6 +21927,136 @@ mod tests {
          );
      }
  

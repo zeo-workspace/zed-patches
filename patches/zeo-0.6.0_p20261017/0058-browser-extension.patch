@@ -74,7 +74,7 @@ Story 045 (zed/.epic/stories/045-browser-extension), branch dev-045.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 075da70..6afc7ea 100644
+index 6a72659..1cc3328 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -561,6 +561,7 @@ dependencies = [
@@ -93,7 +93,7 @@ index 075da70..6afc7ea 100644
   "streaming_diff",
   "task",
   "telemetry",
-@@ -22916,6 +22918,18 @@ version = "0.3.3"
+@@ -23011,6 +23013,18 @@ version = "0.3.3"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
  
@@ -125,7 +125,7 @@ index 0a716d9..2c4b17b 100644
      "crates/zlog",
      "crates/zlog_settings",
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 80324ad..d467192 100644
+index 5ac61fd..e1af25b 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -8,6 +8,8 @@ mod diff;
@@ -138,10 +138,10 @@ index 80324ad..d467192 100644
  pub mod notices;
  pub mod prompt_capabilities;
 diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
-index 36b5413..11bc8db 100644
+index 4ab1be3..df26798 100644
 --- a/crates/acp_thread/src/connection.rs
 +++ b/crates/acp_thread/src/connection.rs
-@@ -948,7 +948,7 @@ mod test_support {
+@@ -976,7 +976,7 @@ mod test_support {
      use gpui::{AppContext as _, WeakEntity};
      use parking_lot::Mutex;
  
@@ -150,7 +150,7 @@ index 36b5413..11bc8db 100644
  
      use super::*;
  
-@@ -1010,6 +1010,7 @@ mod test_support {
+@@ -1038,6 +1038,7 @@ mod test_support {
          set_title_calls: Arc<Mutex<Vec<(acp_v2::SessionId, SharedString)>>>,
          cancel_calls: Arc<Mutex<Vec<acp_v2::SessionId>>>,
          next_cancel_error: Arc<Mutex<Option<anyhow::Error>>>,
@@ -158,7 +158,7 @@ index 36b5413..11bc8db 100644
          supports_receipt_submissions: bool,
          supports_retry: bool,
          supports_load_session: bool,
-@@ -1053,6 +1054,7 @@ mod test_support {
+@@ -1081,6 +1082,7 @@ mod test_support {
                  set_title_calls: Default::default(),
                  cancel_calls: Default::default(),
                  next_cancel_error: Default::default(),
@@ -166,7 +166,7 @@ index 36b5413..11bc8db 100644
                  permission_requests: HashMap::default(),
                  sessions: Arc::default(),
                  supports_receipt_submissions: false,
-@@ -1115,6 +1117,11 @@ mod test_support {
+@@ -1143,6 +1145,11 @@ mod test_support {
              self.receipt_prompt.lock().take()
          }
  
@@ -178,7 +178,7 @@ index 36b5413..11bc8db 100644
          pub fn take_set_title_calls(&self) -> Vec<(acp_v2::SessionId, SharedString)> {
              std::mem::take(&mut *self.set_title_calls.lock())
          }
-@@ -1401,9 +1408,10 @@ mod test_support {
+@@ -1429,9 +1436,10 @@ mod test_support {
                      } else {
                          None
                      };
@@ -190,7 +190,7 @@ index 36b5413..11bc8db 100644
                                  .update(cx, |thread, cx| {
                                      thread.request_tool_call_authorization(
                                          tool_call.clone().into(),
-@@ -1413,6 +1421,7 @@ mod test_support {
+@@ -1441,6 +1449,7 @@ mod test_support {
                                      )
                                  })??
                                  .await;

@@ -41,7 +41,7 @@ window and values above 1 are read as percentages.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index c70eae2..1ae1eca 100644
+index 0dd9876..617a964 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
@@ -53,7 +53,7 @@ index c70eae2..1ae1eca 100644
  use std::error::Error;
  use std::fmt::{Formatter, Write};
  use std::ops::Range;
-@@ -3351,6 +3351,206 @@ pub struct SessionCost {
+@@ -3383,6 +3383,206 @@ pub struct SessionCost {
      pub meta: Option<acp_v2::Meta>,
  }
  
@@ -260,7 +260,7 @@ index c70eae2..1ae1eca 100644
  pub const TOKEN_USAGE_WARNING_THRESHOLD: f32 = 0.8;
  
  impl TokenUsage {
-@@ -3447,6 +3647,7 @@ pub struct AcpThread {
+@@ -3479,6 +3679,7 @@ pub struct AcpThread {
      submissions: SessionSubmissions,
      activity: SessionActivity,
      token_usage: Option<TokenUsage>,
@@ -268,7 +268,7 @@ index c70eae2..1ae1eca 100644
      cost: Option<SessionCost>,
      prompt_capabilities: acp_v2::PromptCapabilities,
      available_commands: Vec<acp_v2::AvailableCommand>,
-@@ -3574,6 +3775,7 @@ pub enum AcpThreadEvent {
+@@ -3606,6 +3807,7 @@ pub enum AcpThreadEvent {
      TitleUpdated,
      NoticesUpdated,
      TokenUsageUpdated,
@@ -276,7 +276,7 @@ index c70eae2..1ae1eca 100644
      EntryUpdated(usize),
      EntriesRemoved(Range<usize>),
      ToolAuthorizationRequested(PermissionRequestId),
-@@ -3726,6 +3928,7 @@ impl AcpThread {
+@@ -3758,6 +3960,7 @@ impl AcpThread {
                  | AcpThreadEvent::TitleUpdated
                  | AcpThreadEvent::NoticesUpdated
                  | AcpThreadEvent::TokenUsageUpdated
@@ -284,7 +284,7 @@ index c70eae2..1ae1eca 100644
                  | AcpThreadEvent::EntryUpdated(_)
                  | AcpThreadEvent::Retry(_)
                  | AcpThreadEvent::SubagentSpawned(_)
-@@ -3785,6 +3988,7 @@ impl AcpThread {
+@@ -3817,6 +4020,7 @@ impl AcpThread {
              activity: SessionActivity::default(),
              connection,
              token_usage: None,
@@ -292,7 +292,7 @@ index c70eae2..1ae1eca 100644
              cost: None,
              prompt_capabilities,
              available_commands: Vec::new(),
-@@ -4339,6 +4543,15 @@ impl AcpThread {
+@@ -4371,6 +4575,15 @@ impl AcpThread {
          Ok(())
      }
  
@@ -308,7 +308,7 @@ index c70eae2..1ae1eca 100644
      pub fn cost(&self) -> Option<&SessionCost> {
          self.cost.as_ref()
      }
-@@ -5375,7 +5588,18 @@ impl AcpThread {
+@@ -5413,7 +5626,18 @@ impl AcpThread {
                  meta: cost.meta,
              });
          }
@@ -327,7 +327,7 @@ index c70eae2..1ae1eca 100644
      }
  
      pub fn update_retry_status(&mut self, status: RetryStatus, cx: &mut Context<Self>) {
-@@ -7877,6 +8101,198 @@ fn update_markdown_in_place(markdown: &Entity<Markdown>, text: &str, cx: &mut Ap
+@@ -7915,6 +8139,198 @@ fn update_markdown_in_place(markdown: &Entity<Markdown>, text: &str, cx: &mut Ap
  
  #[cfg(test)]
  mod tests {

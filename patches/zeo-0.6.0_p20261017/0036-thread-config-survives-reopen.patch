@@ -71,7 +71,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 00bb83e..23f4e9a 100644
+index f308b4d..267d1dc 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -381,6 +381,7 @@ dependencies = [
@@ -263,7 +263,7 @@ index e915a2e..be1b72f 100644
  }
  
 diff --git a/crates/agent_servers/src/acp/v1.rs b/crates/agent_servers/src/acp/v1.rs
-index 5db122b..c78bf01 100644
+index 3b82b3d..161f946 100644
 --- a/crates/agent_servers/src/acp/v1.rs
 +++ b/crates/agent_servers/src/acp/v1.rs
 @@ -1,10 +1,10 @@
@@ -291,7 +291,7 @@ index 5db122b..c78bf01 100644
  use crate::{CURSOR_ID, GEMINI_ID};
  
  pub const GEMINI_TERMINAL_AUTH_METHOD_ID: &str = "spawn-gemini-cli";
-@@ -758,6 +759,7 @@ impl AcpConnection {
+@@ -759,6 +760,7 @@ impl AcpConnection {
          session_modes: Option<Rc<RefCell<acp::SessionModeState>>>,
          config_options: Option<ConfigOptions>,
          default_config_task: Option<Task<()>>,
@@ -299,7 +299,7 @@ index 5db122b..c78bf01 100644
          cx: &mut App,
      ) {
          let release_subscription = cx.observe_release(thread, {
-@@ -778,11 +780,33 @@ impl AcpConnection {
+@@ -779,11 +781,33 @@ impl AcpConnection {
                  session_modes,
                  config_options,
                  default_config_task,
@@ -333,7 +333,7 @@ index 5db122b..c78bf01 100644
      fn remove_session(&self, session_id: &acp_v2::SessionId, thread_id: gpui::EntityId) {
          let mut sessions = self.sessions.borrow_mut();
          if sessions
-@@ -928,7 +952,15 @@ impl AcpConnection {
+@@ -929,7 +953,15 @@ impl AcpConnection {
                  cx,
              )
          });
@@ -350,7 +350,7 @@ index 5db122b..c78bf01 100644
  
          // The connection owns this task, so retaining the thread (which owns the
          // connection) here would keep both alive after all callers abandon the load.
-@@ -940,6 +972,7 @@ impl AcpConnection {
+@@ -941,6 +973,7 @@ impl AcpConnection {
                  let connection = self.connection.clone();
                  let dispatch_tx = self.dispatch_tx.clone();
                  let supports_close = self.agent_supports_session_close();
@@ -358,7 +358,7 @@ index 5db122b..c78bf01 100644
                  async move |cx| {
                      if thread.upgrade().is_none() {
                          if let Some(this) = this.upgrade() {
-@@ -949,6 +982,10 @@ impl AcpConnection {
+@@ -950,6 +983,10 @@ impl AcpConnection {
                          return Ok(());
                      }
  
@@ -369,7 +369,7 @@ index 5db122b..c78bf01 100644
                      let response =
                          rpc_call(connection.clone(), session_id.clone(), directories).await;
                      if response.is_err() {
-@@ -971,7 +1008,7 @@ impl AcpConnection {
+@@ -972,7 +1009,7 @@ impl AcpConnection {
                      };
  
                      if let Some(_thread) = thread.upgrade() {
@@ -378,7 +378,7 @@ index 5db122b..c78bf01 100644
                              let mut sessions = connection_state.sessions.borrow_mut();
                              let Some(session) = sessions
                                  .get_mut(&session_id)
-@@ -983,16 +1020,32 @@ impl AcpConnection {
+@@ -984,16 +1021,32 @@ impl AcpConnection {
                                      "session was closed or replaced before load completed"
                                  )));
                              };
@@ -413,7 +413,7 @@ index 5db122b..c78bf01 100644
                          connection_state.remove_pending_session(&session_id, thread.entity_id());
                          return Ok(());
                      }
-@@ -1028,22 +1081,31 @@ impl AcpConnection {
+@@ -1029,22 +1082,31 @@ impl AcpConnection {
          })
      }
  
@@ -447,7 +447,7 @@ index 5db122b..c78bf01 100644
                      // Retry deferred or reset defaults after dependent changes, but
                      // do not repeat an attempt in the same state if defaults conflict.
                      if attempted_defaults.iter().any(|(config_id, options)| {
-@@ -1051,60 +1113,50 @@ impl AcpConnection {
+@@ -1052,60 +1114,50 @@ impl AcpConnection {
                      }) {
                          return None;
                      }
@@ -546,7 +546,7 @@ index 5db122b..c78bf01 100644
                  };
                  config_options
                      .set_config_option(
-@@ -1118,8 +1170,223 @@ impl AcpConnection {
+@@ -1119,8 +1171,223 @@ impl AcpConnection {
              }
          })
      }
@@ -623,8 +623,8 @@ index 5db122b..c78bf01 100644
 +        })
 +        .detach();
 +    }
- }
- 
++}
++
 +/// What restoring one config option asks of the agent.
 +#[derive(Debug, Clone, PartialEq)]
 +enum Choice {
@@ -634,8 +634,8 @@ index 5db122b..c78bf01 100644
 +    Skip,
 +    /// Nothing to apply: no usable record and no valid default.
 +    None,
-+}
-+
+ }
+ 
 +/// Whether a select option offers `value_id`, in any group when grouped.
 +fn select_offers(select: &acp_v2::SessionConfigSelect, value_id: &str) -> bool {
 +    match &select.options {
@@ -770,7 +770,7 @@ index 5db122b..c78bf01 100644
  #[derive(Clone, Debug, PartialEq, Eq)]
  struct SessionDirectories {
      cwd: PathBuf,
-@@ -1306,6 +1573,9 @@ impl AgentConnection for AcpConnection {
+@@ -1307,6 +1574,9 @@ impl AgentConnection for AcpConnection {
                  .map_err(map_acp_error)?;
  
              let (modes, config_options) = config_state(response.modes, response.config_options)?;
@@ -780,7 +780,7 @@ index 5db122b..c78bf01 100644
  
              let default_mode = self.defaults.mode();
              if let Some(default_mode) = default_mode {
-@@ -1324,6 +1594,7 @@ impl AgentConnection for AcpConnection {
+@@ -1325,6 +1595,7 @@ impl AgentConnection for AcpConnection {
                              let default_mode = default_mode.clone();
                              let session_id = response.session_id.clone();
                              let modes = modes.clone();
@@ -788,7 +788,7 @@ index 5db122b..c78bf01 100644
                              let conn = self.connection.clone();
                              async move |_| {
                                  let result = conn
-@@ -1338,6 +1609,9 @@ impl AgentConnection for AcpConnection {
+@@ -1339,6 +1610,9 @@ impl AgentConnection for AcpConnection {
                                  if result.is_none() {
                                      modes.borrow_mut().current_mode_id = initial_mode_id;
                                  }
@@ -798,7 +798,7 @@ index 5db122b..c78bf01 100644
                              }
                          })
                          .detach();
-@@ -1360,7 +1634,7 @@ impl AgentConnection for AcpConnection {
+@@ -1361,7 +1635,7 @@ impl AgentConnection for AcpConnection {
  
              let session_id = acp_v2::SessionId::new(response.session_id.0);
              let default_config_task = config_options.as_ref().map(|options| {
@@ -807,7 +807,7 @@ index 5db122b..c78bf01 100644
              });
  
              let action_log = cx.new(|_| ActionLog::new(project.clone()));
-@@ -1381,13 +1655,15 @@ impl AgentConnection for AcpConnection {
+@@ -1382,13 +1656,15 @@ impl AgentConnection for AcpConnection {
  
              cx.update(|cx| {
                  self.register_session(
@@ -825,7 +825,7 @@ index 5db122b..c78bf01 100644
              });
  
              registered
-@@ -1659,6 +1935,7 @@ impl AgentConnection for AcpConnection {
+@@ -1660,6 +1936,7 @@ impl AgentConnection for AcpConnection {
                  connection: self.connection.clone(),
                  session_id: session_id.clone(),
                  state: modes.clone(),
@@ -833,7 +833,7 @@ index 5db122b..c78bf01 100644
              }) as _)
          } else {
              None
-@@ -2853,8 +3130,15 @@ mod tests {
+@@ -2854,8 +3131,15 @@ mod tests {
                  .await
                  .expect("receipt-capable model session");
              cx.update(|cx| {
@@ -851,7 +851,7 @@ index 5db122b..c78bf01 100644
              });
              thread
          }
-@@ -6179,6 +6463,7 @@ mod tests {
+@@ -6186,6 +6470,7 @@ mod tests {
                      acp::SessionMode::new("opaque/手動", "Manual"),
                  ],
              ))),
@@ -859,7 +859,7 @@ index 5db122b..c78bf01 100644
          };
          let selected = acp_v2::SessionConfigValueId::new("opaque/手動");
          let change = cx.update(|cx| modes.set_mode(selected.clone(), cx));
-@@ -6285,9 +6570,10 @@ mod tests {
+@@ -6292,9 +6577,10 @@ mod tests {
          ])));
  
          let mut async_cx = cx.to_async();
@@ -871,7 +871,7 @@ index 5db122b..c78bf01 100644
              &mut async_cx,
          );
          drop(async_cx);
-@@ -6403,9 +6689,10 @@ mod tests {
+@@ -6410,9 +6696,10 @@ mod tests {
                  config_state(None, Some(initial_options)).expect("initial config");
              let config_options = config_options.expect("config options");
              let mut receiver = config_options.rx.clone();
@@ -883,7 +883,7 @@ index 5db122b..c78bf01 100644
                  &mut cx.to_async(),
              );
              cx.run_until_parked();
-@@ -6481,9 +6768,10 @@ mod tests {
+@@ -6488,9 +6775,10 @@ mod tests {
          )];
          let config_options = ConfigOptions::new(Rc::new(RefCell::new(original_options.clone())));
          let mut receiver = config_options.rx.clone();
@@ -895,7 +895,7 @@ index 5db122b..c78bf01 100644
              &mut cx.to_async(),
          );
          cx.run_until_parked();
-@@ -6524,9 +6812,10 @@ mod tests {
+@@ -6531,9 +6819,10 @@ mod tests {
              acp_v2::SessionConfigOption::boolean("first", "First", false),
              acp_v2::SessionConfigOption::boolean("second", "Second", false),
          ])));
@@ -907,7 +907,7 @@ index 5db122b..c78bf01 100644
              &mut cx.to_async(),
          );
          cx.run_until_parked();
-@@ -7822,7 +8111,15 @@ exit 7
+@@ -7829,7 +8118,15 @@ exit 7
              .expect("receipt model owner");
          cx.update(|cx| {
              let session_id = thread.read(cx).session_id().clone();
@@ -924,7 +924,7 @@ index 5db122b..c78bf01 100644
          });
          let _pending_sender = connection.defer_next_receipt_response();
          let pending = thread.update(cx, |thread, cx| thread.send(vec!["pending".into()], cx));
-@@ -9190,6 +9487,8 @@ struct AcpSessionModes {
+@@ -9197,6 +9494,8 @@ struct AcpSessionModes {
      session_id: acp_v2::SessionId,
      connection: ConnectionTo<Agent>,
      state: Rc<RefCell<acp::SessionModeState>>,
@@ -933,7 +933,7 @@ index 5db122b..c78bf01 100644
  }
  
  fn mode_from_v1(mode: &acp::SessionMode) -> acp_v2::SessionConfigSelectOption {
-@@ -9226,6 +9525,7 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
+@@ -9233,6 +9532,7 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
              state.current_mode_id = mode_id.clone();
          };
          let state = self.state.clone();
@@ -941,7 +941,7 @@ index 5db122b..c78bf01 100644
          cx.foreground_executor().spawn(async move {
              let result = connection
                  .send_request(acp::SetSessionModeRequest::new(session_id, mode_id))
-@@ -9235,6 +9535,12 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
+@@ -9242,6 +9542,12 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
              if result.is_err() {
                  state.borrow_mut().current_mode_id = old_mode_id;
              }
@@ -954,7 +954,7 @@ index 5db122b..c78bf01 100644
  
              result?;
  
-@@ -9484,7 +9790,7 @@ fn handle_session_notification(
+@@ -9491,7 +9797,7 @@ fn handle_session_notification(
  ) {
      let session_id = acp_v2::SessionId::new(notification.session_id.0);
      // Extract everything we need from the session while briefly borrowing.
@@ -963,7 +963,7 @@ index 5db122b..c78bf01 100644
          let sessions = ctx.sessions.borrow();
          let Some(session) = sessions.get(&session_id) else {
              log::warn!(
-@@ -9496,6 +9802,7 @@ fn handle_session_notification(
+@@ -9503,6 +9809,7 @@ fn handle_session_notification(
          (
              session.thread.clone(),
              session.session_modes.clone(),
@@ -971,7 +971,7 @@ index 5db122b..c78bf01 100644
              session
                  .config_options
                  .as_ref()
-@@ -9511,6 +9818,7 @@ fn handle_session_notification(
+@@ -9518,6 +9825,7 @@ fn handle_session_notification(
      {
          if let Some(session_modes) = &session_modes {
              session_modes.borrow_mut().current_mode_id = current_mode_id.clone();
@@ -3060,7 +3060,7 @@ index 0000000..31ad6bf
 +    }
 +}
 diff --git a/crates/agent_servers/src/acp/v2.rs b/crates/agent_servers/src/acp/v2.rs
-index 7641fb2..6560a56 100644
+index 13bef20..b5d42e0 100644
 --- a/crates/agent_servers/src/acp/v2.rs
 +++ b/crates/agent_servers/src/acp/v2.rs
 @@ -1,7 +1,7 @@

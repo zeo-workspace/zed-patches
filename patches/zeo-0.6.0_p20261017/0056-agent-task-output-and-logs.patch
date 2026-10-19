@@ -56,6 +56,8 @@ log whole -- never via /tmp, another filesystem. A log keeps at most the
 last 1 MiB, cut at a line boundary under "[earlier output truncated: N
 bytes]". Log lines (agent_task_log event=saved|deleted|swept|failed)
 carry ids, sizes, modes and outcomes, never output text.
+The cut searches bytes for that line boundary, so a cap that lands
+inside a multibyte character advances to a char boundary, never panics.
 
 Migration: HISTORY_MIGRATIONS step 4 (the next free step; 0053-0055 add
 none), ALTER TABLE agent_task_history ADD COLUMN log_bytes INTEGER;
@@ -68,10 +70,10 @@ BY DEPENDENCY after 0053, the last task patch: it extends 0037's card,
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index eb072b3..135a703 100644
+index eec21cb..49e7c0a 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
-@@ -3684,6 +3684,20 @@ pub struct AgentTask {
+@@ -3716,6 +3716,20 @@ pub struct AgentTask {
      pub usage: Option<AgentTaskUsage>,
      pub last_tool: Option<SharedString>,
      pub summary: Option<SharedString>,
@@ -92,7 +94,7 @@ index eb072b3..135a703 100644
  }
  
  #[derive(Deserialize)]
-@@ -3707,6 +3721,12 @@ struct WireTask {
+@@ -3739,6 +3753,12 @@ struct WireTask {
      usage: Option<WireTaskUsage>,
      last_tool: Option<String>,
      summary: Option<String>,
@@ -105,7 +107,7 @@ index eb072b3..135a703 100644
  }
  
  #[derive(Deserialize)]
-@@ -3760,6 +3780,10 @@ impl From<WireTask> for AgentTask {
+@@ -3792,6 +3812,10 @@ impl From<WireTask> for AgentTask {
              }),
              last_tool: task.last_tool.map(SharedString::from),
              summary: task.summary.map(SharedString::from),
@@ -116,7 +118,7 @@ index eb072b3..135a703 100644
          }
      }
  }
-@@ -4803,6 +4827,17 @@ impl AcpThread {
+@@ -4835,6 +4859,17 @@ impl AcpThread {
              .stop_task(self.session_id(), task_id, cx)
      }
  
@@ -134,7 +136,7 @@ index eb072b3..135a703 100644
      /// Resolves to `false` when the agent had nothing to move to the background.
      pub fn background_task(&self, tool_call_id: &str, cx: &mut App) -> Task<Result<bool>> {
          self.connection
-@@ -5064,10 +5099,14 @@ impl AcpThread {
+@@ -5096,10 +5131,14 @@ impl AcpThread {
                  {
                      match serde_json::from_value::<WireTasksSnapshot>(payload.clone()) {
                          Ok(snapshot) => self.apply_tasks_snapshot(snapshot, cx),
@@ -151,7 +153,7 @@ index eb072b3..135a703 100644
                          ),
                      }
                  }
-@@ -8881,12 +8920,15 @@ mod tests {
+@@ -8919,12 +8958,15 @@ mod tests {
              "utilization": 0.40,
          })));
          for blank in ["", "   ", "\t\n"] {
@@ -173,7 +175,7 @@ index eb072b3..135a703 100644
          }
          assert!(
              usage.is_empty(),
-@@ -22634,7 +22676,12 @@ mod tests {
+@@ -22921,7 +22963,12 @@ mod tests {
          });
  
          thread.read_with(cx, |thread, _| {
@@ -187,7 +189,7 @@ index eb072b3..135a703 100644
              let compaction = compaction_entries(thread)
                  .pop()
                  .expect("the compaction entry survives the enrichment frame");
-@@ -26115,4 +26162,6 @@ mod tests {
+@@ -26402,4 +26449,6 @@ mod tests {
  
      include!("acp_thread_tasks_tests.rs");
      include!("acp_thread_tasks_review_tests.rs");
@@ -601,7 +603,7 @@ index 0000000..bc94905
 +    );
 +}
 diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
-index 029789d..497c9fb 100644
+index 14e65a7..9eb8662 100644
 --- a/crates/acp_thread/src/connection.rs
 +++ b/crates/acp_thread/src/connection.rs
 @@ -1,4 +1,4 @@
@@ -704,7 +706,7 @@ index 0000000..63eb65f
 +  ]
 +}
 diff --git a/crates/agent_servers/src/acp/v1.rs b/crates/agent_servers/src/acp/v1.rs
-index 3d0f8b8..1f589c9 100644
+index 4611cd5..7bef412 100644
 --- a/crates/agent_servers/src/acp/v1.rs
 +++ b/crates/agent_servers/src/acp/v1.rs
 @@ -55,6 +55,9 @@ const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
@@ -749,7 +751,7 @@ index 3d0f8b8..1f589c9 100644
  pub struct AcpConnection {
      id: AgentId,
      telemetry_id: SharedString,
-@@ -911,14 +939,21 @@ impl AcpConnection {
+@@ -912,14 +940,21 @@ impl AcpConnection {
  
      /// Keyed on the capability alone: the entry id is whatever the user named it, and
      /// the agent's self-reported name differs between the fork and the published package.
@@ -773,7 +775,7 @@ index 3d0f8b8..1f589c9 100644
      }
  
      fn open_or_create_session(
-@@ -2045,6 +2080,38 @@ impl AgentConnection for AcpConnection {
+@@ -2046,6 +2081,38 @@ impl AgentConnection for AcpConnection {
              .spawn(async move { request.await.map(|_| ()) })
      }
  
@@ -812,7 +814,7 @@ index 3d0f8b8..1f589c9 100644
      fn background_task(
          self: Rc<Self>,
          session_id: &acp_v2::SessionId,
-@@ -2421,6 +2488,17 @@ pub mod test_support {
+@@ -2422,6 +2489,17 @@ pub mod test_support {
                  .background_task(session_id, tool_call_id, cx)
          }
  
@@ -830,12 +832,11 @@ index 3d0f8b8..1f589c9 100644
          fn request_elicitations(&self) -> Option<Entity<ElicitationStore>> {
              self.inner.request_elicitations()
          }
-@@ -9613,6 +9691,8 @@ exit 7
+@@ -9620,6 +9698,7 @@ exit 7
      }
  
      include!("../acp_task_actions_tests.rs");
 +    include!("../acp_task_output_tests.rs");
-+    include!("../acp_usage_refresh_tests.rs");
  }
  
  fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
@@ -5549,10 +5550,10 @@ index 0000000..5e4b4ff
 +}
 diff --git a/crates/agent_ui/src/tasks_card/task_log.rs b/crates/agent_ui/src/tasks_card/task_log.rs
 new file mode 100644
-index 0000000..1cff554
+index 0000000..6323643
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/task_log.rs
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,349 @@
 +//! Where an agent task's saved log lives, and how it is written (story 041).
 +//!
 +//! A shell task's output is copied here when it ends, and when the operator opens its log, so the
@@ -5678,7 +5679,13 @@ index 0000000..1cff554
 +    if content.as_bytes()[start - 1] == b'\n' {
 +        return &content[start..];
 +    }
-+    match content[start..].find('\n') {
++    // `start` is a byte offset and may fall inside a multibyte character (U+FFFD from the
++    // adapter's lossy decode is three bytes), so the newline is searched in bytes: the byte
++    // after a `\n` always begins a character.
++    match content.as_bytes()[start..]
++        .iter()
++        .position(|byte| *byte == b'\n')
++    {
 +        Some(newline) => &content[start + newline + 1..],
 +        None => {
 +            let mut start = start;
@@ -6011,10 +6018,10 @@ index 0000000..47bb9ef
 +}
 diff --git a/crates/agent_ui/src/tasks_card/task_log_tests.rs b/crates/agent_ui/src/tasks_card/task_log_tests.rs
 new file mode 100644
-index 0000000..b15bbb1
+index 0000000..76acc2a
 --- /dev/null
 +++ b/crates/agent_ui/src/tasks_card/task_log_tests.rs
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,431 @@
 +// Story 041, task 5.1 — `task_log`: where a task's log lives, how it is written (mode 0600 in
 +// 0700 directories, replaced atomically), the 1 MiB cap, delete and the orphan sweep (R6.2, R6.3,
 +// R6.4, R6.6, R6.7; Q4, Q15, Q18).
@@ -6224,6 +6231,54 @@ index 0000000..b15bbb1
 +    );
 +    assert!(content.ends_with(body));
 +    assert_eq!(LOG_MAX_BYTES, 1_048_576);
++}
++
++// Hostile: the raw cut `len - LOG_MAX_BYTES` lands inside a two-byte character and no newline
++// follows it, so only whole characters may be kept.
++#[test]
++fn task_log_cap_without_a_newline_keeps_whole_multibyte_characters() {
++    let content = "é".repeat(LOG_MAX_BYTES / 2 + 1) + "x";
++    assert!(!content.is_char_boundary(content.len() - LOG_MAX_BYTES));
++
++    let body = cap_at_line_boundary(&content);
++
++    assert_eq!(body.len(), LOG_MAX_BYTES - 1);
++    assert!(body.starts_with('é'));
++    assert!(content.ends_with(body));
++}
++
++// Hostile: the adapter decodes invalid bytes as U+FFFD (three bytes each), so a capped log can
++// exceed LOG_MAX_BYTES with the raw cut inside a replacement character. The kept part must
++// still start on the next line.
++#[test]
++fn task_log_cap_inside_a_replacement_character_starts_on_the_next_line() {
++    let line = "\u{FFFD}".repeat(9) + "\n";
++    let content = line.repeat((2 * LOG_MAX_BYTES) / line.len()) + "\u{FFFD}\u{FFFD}";
++    assert!(!content.is_char_boundary(content.len() - LOG_MAX_BYTES));
++
++    let body = cap_at_line_boundary(&content);
++
++    assert!(body.len() <= LOG_MAX_BYTES);
++    assert!(body.starts_with(&line));
++    assert!(content.ends_with(body));
++    let cut = content.len() - body.len();
++    assert_eq!(&content[cut - 1..cut], "\n");
++    assert!(cut - (content.len() - LOG_MAX_BYTES) < line.len());
++}
++
++#[test]
++fn task_log_cap_of_ascii_lines_is_unchanged() {
++    let line = "0123456789\n";
++    let content = "x".repeat(5) + &line.repeat((2 * LOG_MAX_BYTES) / line.len());
++    let start = content.len() - LOG_MAX_BYTES;
++    let expected = &content[start + content[start..].find('\n').map_or(0, |i| i + 1)..];
++    assert_eq!(cap_at_line_boundary(&content), expected);
++
++    let aligned = "y".repeat(LOG_MAX_BYTES) + "\n" + &"z".repeat(LOG_MAX_BYTES - 1) + "\n";
++    assert_eq!(
++        cap_at_line_boundary(&aligned),
++        "z".repeat(LOG_MAX_BYTES - 1) + "\n"
++    );
 +}
 +
 +// ---- write_log: modes, replace, failure (R6.3, R6.4, Q18) ---------------------------------

@@ -308,6 +308,10 @@ CRATES="
 	diff@0.1.13
 	diffy@0.4.2
 	digest@0.10.7
+	dioxus-cli-config@0.7.10
+	dioxus-core-types@0.7.10
+	dioxus-core@0.7.10
+	dioxus-devtools-types@0.7.10
 	dirs-sys@0.5.0
 	dirs@6.0.0
 	dispatch2@0.3.1
@@ -420,6 +424,7 @@ CRATES="
 	futures@0.1.31
 	futures@0.3.34
 	gaoya@0.2.0
+	generational-box@0.7.10
 	generator@0.8.9
 	generic-array@0.14.7
 	gethostname@1.1.0
@@ -604,6 +609,7 @@ CRATES="
 	logos@0.15.1
 	logos@0.16.1
 	lol_html@3.0.1
+	longest-increasing-subsequence@0.1.0
 	loom@0.7.2
 	loop9@0.1.5
 	lru-slab@0.1.2
@@ -1060,6 +1066,8 @@ CRATES="
 	strum@0.28.0
 	strum_macros@0.27.2
 	strum_macros@0.28.0
+	subsecond-types@0.7.10
+	subsecond@0.7.10
 	subtle@2.6.1
 	sval@2.15.0
 	sval_buffer@2.15.0
@@ -1552,7 +1560,7 @@ declare -A GIT_CRATES=(
 # rewrites the date and EGIT_COMMIT; a second version variable it could not
 # keep current would leave a new tarball under an old, already-manifested name).
 
-EGIT_COMMIT="2d4c4831943153f63ad0aeddf49c8f5a3d008e75"
+EGIT_COMMIT="56934ec0560bce8929025497411de7f5322fb6ca"
 # LLVM 23 only, so it is the default slot: llvm-r1 would always prefer slot 22
 # (its newest stable) whenever 22 is listed. RUST_NEEDS_LLVM ties the Rust slot
 # to it, so this builds with Rust 1.99, one release past upstream's 1.98.1 pin

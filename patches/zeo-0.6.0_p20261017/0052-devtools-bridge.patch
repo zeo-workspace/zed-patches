@@ -84,7 +84,7 @@ its own unit, integration and Playwright suites in zeo-devtools.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 449e769..de37a26 100644
+index 3c21ef9..0fda5dc 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -4984,6 +4984,32 @@ dependencies = [
@@ -120,7 +120,7 @@ index 449e769..de37a26 100644
  [[package]]
  name = "diagnostics"
  version = "0.1.0"
-@@ -22509,6 +22535,7 @@ dependencies = [
+@@ -22604,6 +22630,7 @@ dependencies = [
   "debugger_tools",
   "debugger_ui",
   "dev_container",
@@ -164,7 +164,7 @@ index 9a5d375..ff0a42e 100644
 +  },
  }
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 8f6f657..80324ad 100644
+index f591b0b..5ac61fd 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -7,6 +7,8 @@ pub mod content;

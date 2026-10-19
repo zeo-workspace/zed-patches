@@ -49,10 +49,10 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ---
 
 diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
-index 86d0be5..a323a8e 100644
+index 9ede73f..f87f5ba 100644
 --- a/crates/acp_thread/src/connection.rs
 +++ b/crates/acp_thread/src/connection.rs
-@@ -611,11 +611,27 @@ pub trait AgentModelSelector: 'static {
+@@ -639,11 +639,27 @@ pub trait AgentModelSelector: 'static {
      ///
      /// # Parameters
      /// - `model_id`: The model to select (should be one from [list_models]).
@@ -81,7 +81,7 @@ index 86d0be5..a323a8e 100644
  
      /// Retrieves the currently selected model for a specific session (thread).
      ///
-@@ -1551,7 +1567,12 @@ mod test_support {
+@@ -1579,7 +1595,12 @@ mod test_support {
              Task::ready(Ok(AgentModelList::Flat(vec![model])))
          }
  

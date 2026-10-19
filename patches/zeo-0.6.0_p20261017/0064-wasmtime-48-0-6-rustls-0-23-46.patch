@@ -171,7 +171,7 @@ sit above the two dropped crates, so only their index lines would differ.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 00bb83e..b199624 100644
+index fc1be19..f308b4d 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -2685,18 +2685,6 @@ dependencies = [
@@ -362,7 +362,7 @@ index 00bb83e..b199624 100644
  
  [[package]]
  name = "crash-context"
-@@ -5040,7 +5016,7 @@ dependencies = [
+@@ -5085,7 +5061,7 @@ dependencies = [
   "libc",
   "option-ext",
   "redox_users",
@@ -371,7 +371,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -5823,7 +5799,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -5868,7 +5844,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
  dependencies = [
   "libc",
@@ -380,7 +380,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -6040,8 +6016,8 @@ dependencies = [
+@@ -6085,8 +6061,8 @@ dependencies = [
   "tracing",
   "url",
   "util",
@@ -391,7 +391,7 @@ index 00bb83e..b199624 100644
   "which",
   "ztracing",
  ]
-@@ -6122,7 +6098,7 @@ dependencies = [
+@@ -6167,7 +6143,7 @@ dependencies = [
   "tracing",
   "url",
   "util",
@@ -400,7 +400,7 @@ index 00bb83e..b199624 100644
   "wasmtime",
   "wasmtime-wasi",
   "zlog",
-@@ -6872,7 +6848,7 @@ dependencies = [
+@@ -6927,7 +6903,7 @@ dependencies = [
   "libc",
   "log",
   "rustversion",
@@ -409,7 +409,7 @@ index 00bb83e..b199624 100644
   "windows-result 0.4.1",
  ]
  
-@@ -7004,7 +6980,7 @@ dependencies = [
+@@ -7059,7 +7035,7 @@ dependencies = [
   "gobject-sys",
   "libc",
   "system-deps",
@@ -418,7 +418,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -8403,7 +8379,7 @@ dependencies = [
+@@ -8463,7 +8439,7 @@ dependencies = [
   "libc",
   "percent-encoding",
   "pin-project-lite",
@@ -427,7 +427,7 @@ index 00bb83e..b199624 100644
   "tokio",
   "tower-service",
   "tracing",
-@@ -11033,7 +11009,7 @@ version = "0.6.1"
+@@ -11099,7 +11075,7 @@ version = "0.6.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
  dependencies = [
@@ -436,7 +436,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -11411,7 +11387,7 @@ version = "0.50.3"
+@@ -11477,7 +11453,7 @@ version = "0.50.3"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
  dependencies = [
@@ -445,7 +445,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -14167,8 +14143,8 @@ version = "0.14.4"
+@@ -14233,8 +14209,8 @@ version = "0.14.4"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
  dependencies = [
@@ -456,7 +456,7 @@ index 00bb83e..b199624 100644
   "log",
   "multimap",
   "petgraph",
-@@ -14187,7 +14163,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -14253,7 +14229,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
  dependencies = [
   "anyhow",
@@ -465,7 +465,7 @@ index 00bb83e..b199624 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -14338,9 +14314,9 @@ checksum = "bd348ff538bc9caeda7ee8cad2d1d48236a1f443c1fa3913c6a02fe0043b1dd3"
+@@ -14404,9 +14380,9 @@ checksum = "bd348ff538bc9caeda7ee8cad2d1d48236a1f443c1fa3913c6a02fe0043b1dd3"
  
  [[package]]
  name = "pulley-interpreter"
@@ -477,7 +477,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "cranelift-bitset",
   "log",
-@@ -14350,9 +14326,9 @@ dependencies = [
+@@ -14416,9 +14392,9 @@ dependencies = [
  
  [[package]]
  name = "pulley-macros"
@@ -489,7 +489,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "proc-macro2",
   "quote",
-@@ -14439,7 +14415,7 @@ dependencies = [
+@@ -14505,7 +14481,7 @@ dependencies = [
   "quinn-udp",
   "rustc-hash 2.1.1",
   "rustls",
@@ -498,7 +498,7 @@ index 00bb83e..b199624 100644
   "thiserror 2.0.17",
   "tokio",
   "tracing",
-@@ -14477,7 +14453,7 @@ dependencies = [
+@@ -14543,7 +14519,7 @@ dependencies = [
   "cfg_aliases",
   "libc",
   "once_cell",
@@ -507,7 +507,7 @@ index 00bb83e..b199624 100644
   "tracing",
   "windows-sys 0.60.2",
  ]
-@@ -15569,7 +15545,7 @@ dependencies = [
+@@ -15635,7 +15611,7 @@ dependencies = [
   "errno 0.3.14",
   "libc",
   "linux-raw-sys",
@@ -516,7 +516,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -15595,9 +15571,9 @@ dependencies = [
+@@ -15661,9 +15637,9 @@ dependencies = [
  
  [[package]]
  name = "rustls"
@@ -528,7 +528,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "aws-lc-rs",
   "log",
-@@ -15667,7 +15643,7 @@ dependencies = [
+@@ -15733,7 +15709,7 @@ dependencies = [
   "security-framework",
   "security-framework-sys",
   "webpki-root-certs",
@@ -537,7 +537,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -16882,7 +16858,7 @@ version = "0.8.9"
+@@ -16949,7 +16925,7 @@ version = "0.8.9"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
  dependencies = [
@@ -546,7 +546,7 @@ index 00bb83e..b199624 100644
   "proc-macro2",
   "quote",
   "syn 2.0.117",
-@@ -16951,7 +16927,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -17018,7 +16994,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
  dependencies = [
   "libc",
@@ -555,7 +555,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -17265,7 +17241,7 @@ dependencies = [
+@@ -17332,7 +17308,7 @@ dependencies = [
   "cfg-if",
   "libc",
   "psm",
@@ -564,7 +564,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -17967,7 +17943,7 @@ dependencies = [
+@@ -18062,7 +18038,7 @@ dependencies = [
   "getrandom 0.4.1",
   "once_cell",
   "rustix",
@@ -573,7 +573,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -19880,12 +19856,12 @@ dependencies = [
+@@ -19975,12 +19951,12 @@ dependencies = [
  
  [[package]]
  name = "wasm-encoder"
@@ -589,7 +589,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -19937,14 +19913,14 @@ dependencies = [
+@@ -20032,14 +20008,14 @@ dependencies = [
  
  [[package]]
  name = "wasm-metadata"
@@ -608,7 +608,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -20008,9 +19984,9 @@ dependencies = [
+@@ -20103,9 +20079,9 @@ dependencies = [
  
  [[package]]
  name = "wasmparser"
@@ -620,7 +620,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "bitflags 2.13.1",
   "hashbrown 0.17.1",
-@@ -20021,20 +19997,20 @@ dependencies = [
+@@ -20116,20 +20092,20 @@ dependencies = [
  
  [[package]]
  name = "wasmprinter"
@@ -646,7 +646,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "addr2line 0.26.1",
   "async-trait",
-@@ -20058,7 +20034,7 @@ dependencies = [
+@@ -20153,7 +20129,7 @@ dependencies = [
   "serde_derive",
   "smallvec",
   "target-lexicon",
@@ -655,7 +655,7 @@ index 00bb83e..b199624 100644
   "wasmtime-environ",
   "wasmtime-internal-component-macro",
   "wasmtime-internal-component-util",
-@@ -20074,9 +20050,9 @@ dependencies = [
+@@ -20169,9 +20145,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-c-api-impl"
@@ -667,7 +667,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "log",
   "tracing",
-@@ -20086,9 +20062,9 @@ dependencies = [
+@@ -20181,9 +20157,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-environ"
@@ -679,7 +679,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "anyhow",
   "cpp_demangle",
-@@ -20108,8 +20084,8 @@ dependencies = [
+@@ -20203,8 +20179,8 @@ dependencies = [
   "sha2",
   "smallvec",
   "target-lexicon",
@@ -690,7 +690,7 @@ index 00bb83e..b199624 100644
   "wasmprinter",
   "wasmtime-internal-component-util",
   "wasmtime-internal-core",
-@@ -20117,9 +20093,9 @@ dependencies = [
+@@ -20212,9 +20188,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-c-api-macros"
@@ -702,7 +702,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "proc-macro2",
   "quote",
-@@ -20127,9 +20103,9 @@ dependencies = [
+@@ -20222,9 +20198,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-component-macro"
@@ -714,7 +714,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "anyhow",
   "proc-macro2",
-@@ -20137,20 +20113,20 @@ dependencies = [
+@@ -20232,20 +20208,20 @@ dependencies = [
   "syn 2.0.117",
   "wasmtime-internal-component-util",
   "wasmtime-internal-wit-bindgen",
@@ -740,7 +740,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "anyhow",
   "hashbrown 0.17.1",
-@@ -20160,9 +20136,9 @@ dependencies = [
+@@ -20255,9 +20231,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-cranelift"
@@ -752,7 +752,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "cranelift-codegen",
   "cranelift-control",
-@@ -20177,7 +20153,7 @@ dependencies = [
+@@ -20272,7 +20248,7 @@ dependencies = [
   "smallvec",
   "target-lexicon",
   "thiserror 2.0.17",
@@ -761,7 +761,7 @@ index 00bb83e..b199624 100644
   "wasmtime-environ",
   "wasmtime-internal-core",
   "wasmtime-internal-unwinder",
-@@ -20186,9 +20162,9 @@ dependencies = [
+@@ -20281,9 +20257,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-fiber"
@@ -773,7 +773,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "cc",
   "libc",
-@@ -20200,9 +20176,9 @@ dependencies = [
+@@ -20295,9 +20271,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-jit-debug"
@@ -785,7 +785,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "cc",
   "wasmtime-internal-versioned-export-macros",
-@@ -20210,9 +20186,9 @@ dependencies = [
+@@ -20305,9 +20281,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-jit-icache-coherence"
@@ -797,7 +797,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "libc",
   "wasmtime-internal-core",
-@@ -20221,9 +20197,9 @@ dependencies = [
+@@ -20316,9 +20292,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-unwinder"
@@ -809,7 +809,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "cranelift-codegen",
   "log",
-@@ -20233,9 +20209,9 @@ dependencies = [
+@@ -20328,9 +20304,9 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-versioned-export-macros"
@@ -821,7 +821,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "proc-macro2",
   "quote",
-@@ -20244,32 +20220,32 @@ dependencies = [
+@@ -20339,32 +20315,32 @@ dependencies = [
  
  [[package]]
  name = "wasmtime-internal-wit-bindgen"
@@ -861,7 +861,7 @@ index 00bb83e..b199624 100644
   "thiserror 2.0.17",
   "tokio",
   "tracing",
-@@ -20277,13 +20253,14 @@ dependencies = [
+@@ -20372,13 +20348,14 @@ dependencies = [
   "wasmtime",
   "wasmtime-wasi-io",
   "windows-sys 0.61.2",
@@ -878,7 +878,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "async-trait",
   "bytes 1.11.1",
-@@ -20789,7 +20766,7 @@ version = "0.1.11"
+@@ -20884,7 +20861,7 @@ version = "0.1.11"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
  dependencies = [
@@ -887,7 +887,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -21828,9 +21805,9 @@ dependencies = [
+@@ -21923,9 +21900,9 @@ dependencies = [
  
  [[package]]
  name = "wit-component"
@@ -899,7 +899,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "anyhow",
   "bitflags 2.13.1",
-@@ -21839,10 +21816,10 @@ dependencies = [
+@@ -21934,10 +21911,10 @@ dependencies = [
   "serde",
   "serde_derive",
   "serde_json",
@@ -914,7 +914,7 @@ index 00bb83e..b199624 100644
  ]
  
  [[package]]
-@@ -21901,9 +21878,9 @@ dependencies = [
+@@ -21996,9 +21973,9 @@ dependencies = [
  
  [[package]]
  name = "wit-parser"
@@ -926,7 +926,7 @@ index 00bb83e..b199624 100644
  dependencies = [
   "anyhow",
   "hashbrown 0.17.1",
-@@ -21915,7 +21892,7 @@ dependencies = [
+@@ -22010,7 +21987,7 @@ dependencies = [
   "serde_derive",
   "serde_json",
   "unicode-ident",
