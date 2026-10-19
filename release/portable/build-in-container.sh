@@ -91,17 +91,63 @@ export CARGO_TARGET_DIR=/work/target CARGO_HOME=/cargo-home
 # /var/cache/sccache (also unreadable here: its entries are mode 0600, portage's).
 # The paths in the key (/work/src, /cargo-home) are the same for every version.
 export RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}"
+# Voice input (0067) compiles whisper.cpp through whisper-rs-sys, whose build.rs
+# hands every GGML_*/WHISPER_* variable to CMake. GGML_NATIVE=OFF keeps ggml off
+# -march=native (the build machine's CPU) and switches on its fixed x86-64-v3
+# set instead: AVX, AVX2, FMA, F16C, BMI2, no AVX-512. WHISPER_DONT_GENERATE_BINDINGS
+# uses the crate's bundled bindings, so no bindgen run on this machine decides
+# them. ZEO_VOICE_CPU_BASELINE is read by voice_input at compile time (option_env!).
+# GGML_CCACHE=OFF: ggml would otherwise wrap the C/C++ compiler with the ccache or
+# sccache it finds (sccache is in this image), outside the build's own caching.
+readonly voice_env="GGML_NATIVE=OFF GGML_CCACHE=OFF WHISPER_DONT_GENERATE_BINDINGS=1 ZEO_VOICE_CPU_BASELINE=x86-64-v3"
+export GGML_NATIVE=OFF GGML_CCACHE=OFF WHISPER_DONT_GENERATE_BINDINGS=1 ZEO_VOICE_CPU_BASELINE=x86-64-v3
+# whisper-rs-sys's build.rs reruns only when its wrapper.h changes, not when the
+# environment does, so a persistent /work/target would keep the CMake flags of
+# whichever build ran first. Cleaning that one package forces its CMake run.
+# A series without the voice group has no whisper-rs-sys to clean or to check.
+# --locked: `cargo clean -p` resolves the workspace and would otherwise rewrite a
+# stale Cargo.lock, which the --locked build below would then accept.
+voice=0
+grep -qx 'name = "whisper-rs-sys"' Cargo.lock && voice=1
+if ((voice)); then
+	log "voice input: ${voice_env}"
+	cargo clean --locked --release --package whisper-rs-sys
+fi
 sccache --zero-stats >/dev/null
 log "building (cargo build --release --locked)"
 cargo build --release --locked --package zed --package cli --features zed/mimalloc
+# The CMake cache is what whisper.cpp was really configured with: there must be
+# one, and every one found must say NATIVE, AVX-512 and the runtime-dispatched
+# CPU variants are all off, and ggml has no ccache wrapper. build.rs forwards any GGML_* in the environment, so
+# a stray GGML_AVX512=ON or GGML_CPU_ALL_VARIANTS=ON would reach CMake.
+if ((voice)); then
+	shopt -s nullglob
+	caches=("${CARGO_TARGET_DIR}"/release/build/whisper-rs-sys-*/out/build/CMakeCache.txt)
+	shopt -u nullglob
+	if ((${#caches[@]} == 0)); then
+		echo "error: no whisper.cpp CMakeCache.txt under ${CARGO_TARGET_DIR}/release/build" >&2
+		exit 1
+	fi
+	for cache in "${caches[@]}"; do
+		for setting in GGML_NATIVE GGML_AVX512 GGML_CPU_ALL_VARIANTS GGML_CCACHE; do
+			if ! grep -q "^${setting}:BOOL=OFF\$" "${cache}"; then
+				echo "error: whisper.cpp was not configured with ${setting}=OFF: ${cache}" >&2
+				exit 1
+			fi
+		done
+	done
+	log "whisper.cpp CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS, GGML_CCACHE :BOOL=OFF (${#caches[@]} checked)"
+fi
 sccache --show-stats | grep -E '^(Compile requests|Cache hits|Cache misses|Cache size)' |
 	sed 's/^/[portable] sccache: /'
 sccache --stop-server >/dev/null
 
 # AVX-512, checked on the unstripped binary so each instruction has a function
 # name. Hand-written assembly kernels that pick an AVX-512 path at run time
-# (dav1d, aws-lc) carry it on purpose and never run it on a CPU without it;
-# compiler-generated code does not check, so one Rust or C++ function using it
+# (dav1d, aws-lc, and WebRTC's BoringSSL and libyuv) carry it on purpose and
+# never run it on a CPU without it; they have plain C names and are exempt.
+# Compiler-generated code does not check, so one Rust (_R), C++ (_Z, any form)
+# or whisper.cpp (ggml_/whisper_/gguf_, plain C names) function using it
 # means the binary dies with SIGILL on a CPU below AVX-512. That is exactly what
 # Gentoo's zeo-bin shipped until 0.1.0_p20261003-r1: the host's Rust standard
 # library was built for znver5. The whole disassembly is read (awk, no grep -q),
@@ -110,7 +156,7 @@ sccache --stop-server >/dev/null
 log "checking for compiler-generated AVX-512"
 avx512_fns="$(objdump -d --no-show-raw-insn /work/target/release/zeo | awk '
 	/^[0-9a-f]+ <.*>:$/ { fn = $2 }
-	/%zmm[0-9]|\{%k[1-7]\}/ { if (fn ~ /^<_R/ || fn ~ /^<_ZN/) bad[fn] = 1 }
+	/%zmm[0-9]|\{%k[1-7]\}/ { if (fn ~ /^<(_R|_Z|ggml_|whisper_|gguf_)/) bad[fn] = 1 }
 	END { for (f in bad) print f }')"
 if [[ -n "${avx512_fns}" ]]; then
 	echo "error: compiler-generated code uses AVX-512 (would SIGILL below AVX-512):" >&2
@@ -156,6 +202,9 @@ done
 	printf 'cc / c++       %s\n' "$(clang --version | head -1)"
 	printf 'CFLAGS         %s\n' "${CFLAGS}"
 	printf 'RUSTFLAGS      %s\n' "${RUSTFLAGS}"
+	if ((voice)); then
+		printf 'whisper.cpp    %s (CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS, GGML_CCACHE OFF)\n' "${voice_env}"
+	fi
 	printf 'glibc          needs %s at most (ceiling checked: %s)\n\n' \
 		"$(objdump -T "${stage}/usr/libexec/zeo-editor" "${stage}/usr/bin/zeo" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)" \
 		"${max_glibc}"

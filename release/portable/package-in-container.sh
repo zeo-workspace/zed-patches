@@ -71,9 +71,34 @@ cp -a "${stage}/usr/." "${appdir}/usr/"
 for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1; do
 	cp -L "/usr/lib/x86_64-linux-gnu/${lib}" "${appdir}/usr/lib/"
 done
+# Every binary in it is compiled for x86-64-v3 (Rust, C, C++, and whisper.cpp
+# for voice input), so on an older CPU the first such instruction kills Zeo with
+# SIGILL and no word of why. AppRun reads the CPU's flags first and refuses with
+# the level that is needed. Before the forwarding branch: the bundled CLI is
+# built the same way. An unreadable /proc/cpuinfo decides nothing, so it starts.
+# The list is the whole x86-64-v3 level in /proc/cpuinfo's spelling (LZCNT is
+# "abm"): the compiler may emit any of them, and a virtual CPU can mask one.
 cat > "${appdir}/AppRun" <<'EOF'
 #!/bin/sh
 here="$(dirname "$(readlink -f "$0")")"
+flags="$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null)"
+if [ -n "${flags}" ]; then
+	missing=""
+	for flag in avx avx2 bmi1 bmi2 f16c fma abm movbe xsave; do
+		case " ${flags#*:} " in
+		*" ${flag} "*) ;;
+		*) missing="${missing} ${flag}" ;;
+		esac
+	done
+	if [ -n "${missing}" ]; then
+		msg="Zeo needs a CPU with x86-64-v3 (AVX2, FMA, F16C, BMI2); this one lacks:${missing}"
+		echo "${msg}" >&2
+		if command -v notify-send >/dev/null 2>&1; then
+			notify-send --app-name=Zeo "Zeo cannot start" "${msg}" >/dev/null 2>&1 || :
+		fi
+		exit 1
+	fi
+fi
 export LD_LIBRARY_PATH="${here}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 case " $* " in
 *" --user-data-dir"*) ;;
