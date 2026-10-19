@@ -97,8 +97,10 @@ export RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache SCCACHE_CACHE_SIZE="${SCCACHE_
 # set instead: AVX, AVX2, FMA, F16C, BMI2, no AVX-512. WHISPER_DONT_GENERATE_BINDINGS
 # uses the crate's bundled bindings, so no bindgen run on this machine decides
 # them. ZEO_VOICE_CPU_BASELINE is read by voice_input at compile time (option_env!).
-readonly voice_env="GGML_NATIVE=OFF WHISPER_DONT_GENERATE_BINDINGS=1 ZEO_VOICE_CPU_BASELINE=x86-64-v3"
-export GGML_NATIVE=OFF WHISPER_DONT_GENERATE_BINDINGS=1 ZEO_VOICE_CPU_BASELINE=x86-64-v3
+# GGML_CCACHE=OFF: ggml would otherwise wrap the C/C++ compiler with the ccache or
+# sccache it finds (sccache is in this image), outside the build's own caching.
+readonly voice_env="GGML_NATIVE=OFF GGML_CCACHE=OFF WHISPER_DONT_GENERATE_BINDINGS=1 ZEO_VOICE_CPU_BASELINE=x86-64-v3"
+export GGML_NATIVE=OFF GGML_CCACHE=OFF WHISPER_DONT_GENERATE_BINDINGS=1 ZEO_VOICE_CPU_BASELINE=x86-64-v3
 # whisper-rs-sys's build.rs reruns only when its wrapper.h changes, not when the
 # environment does, so a persistent /work/target would keep the CMake flags of
 # whichever build ran first. Cleaning that one package forces its CMake run.
@@ -116,7 +118,7 @@ log "building (cargo build --release --locked)"
 cargo build --release --locked --package zed --package cli --features zed/mimalloc
 # The CMake cache is what whisper.cpp was really configured with: there must be
 # one, and every one found must say NATIVE, AVX-512 and the runtime-dispatched
-# CPU variants are all off. build.rs forwards any GGML_* in the environment, so
+# CPU variants are all off, and ggml has no ccache wrapper. build.rs forwards any GGML_* in the environment, so
 # a stray GGML_AVX512=ON or GGML_CPU_ALL_VARIANTS=ON would reach CMake.
 if ((voice)); then
 	shopt -s nullglob
@@ -127,14 +129,14 @@ if ((voice)); then
 		exit 1
 	fi
 	for cache in "${caches[@]}"; do
-		for setting in GGML_NATIVE GGML_AVX512 GGML_CPU_ALL_VARIANTS; do
+		for setting in GGML_NATIVE GGML_AVX512 GGML_CPU_ALL_VARIANTS GGML_CCACHE; do
 			if ! grep -q "^${setting}:BOOL=OFF\$" "${cache}"; then
 				echo "error: whisper.cpp was not configured with ${setting}=OFF: ${cache}" >&2
 				exit 1
 			fi
 		done
 	done
-	log "whisper.cpp CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS :BOOL=OFF (${#caches[@]} checked)"
+	log "whisper.cpp CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS, GGML_CCACHE :BOOL=OFF (${#caches[@]} checked)"
 fi
 sccache --show-stats | grep -E '^(Compile requests|Cache hits|Cache misses|Cache size)' |
 	sed 's/^/[portable] sccache: /'
@@ -201,7 +203,7 @@ done
 	printf 'CFLAGS         %s\n' "${CFLAGS}"
 	printf 'RUSTFLAGS      %s\n' "${RUSTFLAGS}"
 	if ((voice)); then
-		printf 'whisper.cpp    %s (CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS OFF)\n' "${voice_env}"
+		printf 'whisper.cpp    %s (CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS, GGML_CCACHE OFF)\n' "${voice_env}"
 	fi
 	printf 'glibc          needs %s at most (ceiling checked: %s)\n\n' \
 		"$(objdump -T "${stage}/usr/libexec/zeo-editor" "${stage}/usr/bin/zeo" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)" \
