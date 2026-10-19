@@ -432,6 +432,20 @@
 # apply on top of it unchanged.
 0066-epic-panel.patch
 
+# @feature: voice
+# 0067: voice input (story 044) -- a microphone in the agent composer: speech
+# is transcribed on this machine by whisper.cpp (crates whisper-rs and
+# whisper-rs-sys) and put into the composer unsent; the model comes from
+# app-accessibility/whisper-models or a pinned, checksummed download after
+# consent, and a remote speech service is opt-in. Its own group, after every
+# devtools group and epic, and before test: USE voice (default on) needs
+# claude-agent-acp-plus, whose composer hunks (0043-0045) it sits beside, and
+# the ebuild's REQUIRED_USE ties the two. It needs none of the optional groups:
+# it applies with claude-code-ide, devtools-bridge, ai-jail, browser-extension,
+# devtools-panel and epic each on or off, and 0050/0051 apply on top of it
+# unchanged.
+0067-voice-input.patch
+
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
 # ebuild applies them under USE=test alone. They are generated on top of every

@@ -59,9 +59,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 CRATES=(acp_thread agent agent_servers agent_settings agent_tasks_panel agent_ui
 	auto_update claude_code_ide cli client devtools_bridge epic_panel extension_host
 	feature_flags icons install_cli markdown oauth_callback_server onboarding paths
-	project recent_projects release_channel remote_server settings settings_content
-	settings_ui sidebar title_bar ui workspace zed zed_credentials_provider
-	zeo_browser_host)
+	project recent_projects release_channel remote_server reqwest_client settings
+	settings_content settings_ui sidebar title_bar ui voice_input workspace zed
+	zed_credentials_provider zeo_browser_host)
 
 # The Claude Agent (Plus) half of the e2e suites, 0051's zeo_plus_e2e_tests module.
 E2E_PLUS_FILTER='test(/^zeo_plus_e2e_tests::/)'
@@ -157,8 +157,11 @@ main() {
 	grep -q "path = \"${workdir}/livekit" "${src}/Cargo.toml" || die 2 "the offline rewrite changed nothing"
 	mkdir -p "${src}/.git"
 
+	# GGML_NATIVE and WHISPER_DONT_GENERATE_BINDINGS: whisper.cpp (0067) built the way the
+	# ebuild builds it -- no -march=native, and the bindings whisper-rs-sys bundles.
 	local -a sysenv=(env -u RUSTC_WRAPPER CARGO_HOME="${workdir}/cargo_home" CARGO_TARGET_DIR="${target}"
-		LK_CUSTOM_WEBRTC="${workdir}/linux-x64-release" RUSTFLAGS="--cfg tokio_unstable --cap-lints=warn")
+		LK_CUSTOM_WEBRTC="${workdir}/linux-x64-release" RUSTFLAGS="--cfg tokio_unstable --cap-lints=warn"
+		GGML_NATIVE=OFF WHISPER_DONT_GENERATE_BINDINGS=1)
 	local -a pkgs=()
 	local crate
 	for crate in "${CRATES[@]}"; do pkgs+=(-p "${crate}"); done
