@@ -31,11 +31,14 @@ parsing (U+0130 lowercases to two scalars, which would make a valid
 32-character tag read as invalid). The raw query, `#` terms included,
 stays what every existing is_empty() check reads, so a tag term loads and
 expands collapsed groups and the Pinned section and turns drag off, as
-search text does. The picker is agent_ui::thread_tags_picker; the sidebar
-side is crates/sidebar/src/thread_tags.rs. ThreadItem (crates/ui) gains
-badges -- several, each with its own element id and tooltip, in builder
-call order -- and tag chips after them; a row with either ends a long
-title in an ellipsis instead of under the fade.
+search text does. The picker is agent_ui::thread_tags_picker; its Picker
+owns the 24 rem width (initial_width), so every row, the selection
+highlight and the separators are laid out inside the modal frame -- a
+fixed-width wrapper around an unsized Picker let them overrun it (R1.13).
+The sidebar side is crates/sidebar/src/thread_tags.rs. ThreadItem
+(crates/ui) gains badges -- several, each with its own element id and
+tooltip, in builder call order -- and tag chips after them; a row with
+either ends a long title in an ellipsis instead of under the fade.
 
 Failure: a refused add or removal leaves the thread's tags unchanged,
 shows the refusal in the picker and logs one warning naming the thread id
@@ -76,12 +79,12 @@ offsets and index lines: 0010, 0015, 0027-0030, 0035, 0037, 0039, 0040,
 0043-0045, 0052, 0054, 0056-0058 and 0067 -- most of them only for the
 two `pub mod` lines in agent_ui.rs's module list.
 
-Tests: 74, in ten new files -- ui thread_item_badge_tests (15), agent_ui
+Tests: 77, in eleven new files -- ui thread_item_badge_tests (15), agent_ui
 thread_tag_filter_tests (9), thread_tags_picker_tests (10),
 thread_tags_picker_selection_tests (4), thread_tags_picker_unicode_tests
-(2), threads_archive_view_tags_tests (6),
-threads_archive_view_unicode_tests (3), sidebar sidebar_tags_tests (6),
-sidebar_tags_filter_tests (14), sidebar_tags_notify_tests (5).
+(2), thread_tags_picker_layout_tests (3), threads_archive_view_tags_tests
+(6), threads_archive_view_unicode_tests (3), sidebar sidebar_tags_tests
+(6), sidebar_tags_filter_tests (14), sidebar_tags_notify_tests (5).
 
 UNGROUPED and unconditional, right after 0065: it consumes 0048's store,
 0049's Pinned section and 0065's filter guard on drag, and needs no
@@ -476,10 +479,10 @@ index 0000000..6a295e8
 +}
 diff --git a/crates/agent_ui/src/thread_tags_picker.rs b/crates/agent_ui/src/thread_tags_picker.rs
 new file mode 100644
-index 0000000..9e1a444
+index 0000000..ad4772a
 --- /dev/null
 +++ b/crates/agent_ui/src/thread_tags_picker.rs
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,325 @@
 +//! The Tags picker (story 037): a keyboard picker over every existing tag that toggles one
 +//! thread's tags. It stays open across confirms, so several tags can be set in one visit, and
 +//! Escape keeps whatever was already confirmed (R1.5, R1.6, R1.11).
@@ -512,7 +515,10 @@ index 0000000..9e1a444
 +            selected_index: 0,
 +        };
 +        delegate.rebuild(cx);
-+        let picker = cx.new(|cx| Picker::uniform_list(delegate, window, cx));
++        // The picker owns the width, so its rows and separators are laid out inside the frame
++        // (a fixed wrapper around an unsized picker let them overrun it, R1.13).
++        let picker =
++            cx.new(|cx| Picker::uniform_list(delegate, window, cx).initial_width(rems(24.)));
 +
 +        let mut subscriptions = vec![cx.subscribe(&picker, |_, _, _: &DismissEvent, cx| {
 +            cx.emit(DismissEvent);
@@ -547,7 +553,6 @@ index 0000000..9e1a444
 +    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
 +        v_flex()
 +            .key_context("ThreadTagsPicker")
-+            .w(rems(24.))
 +            .child(self.picker.clone())
 +    }
 +}
@@ -799,6 +804,339 @@ index 0000000..9e1a444
 +#[cfg(test)]
 +#[path = "thread_tags_picker_unicode_tests.rs"]
 +mod thread_tags_picker_unicode_tests;
++
++#[cfg(test)]
++#[path = "thread_tags_picker_layout_tests.rs"]
++mod thread_tags_picker_layout_tests;
+diff --git a/crates/agent_ui/src/thread_tags_picker_layout_tests.rs b/crates/agent_ui/src/thread_tags_picker_layout_tests.rs
+new file mode 100644
+index 0000000..7191b86
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tags_picker_layout_tests.rs
+@@ -0,0 +1,323 @@
++// Story 037, task 9.2 — the Tags picker is drawn inside its frame: every entry, its selection
++// highlight and its separators. Requirement: R1.13 (Q5, Q11, Q12). Found by the GUI proof,
++// `docs/assets/037-live-proof-2026-10-20/c2a-picker-typed.png`: the selected "Add tag" row ran
++// ~160 px past the modal's right edge.
++//
++// Materialize at the end of `crates/agent_ui/src/thread_tags_picker.rs`, beside the other picker
++// test modules (a child module, so the tests reach the modal's private `picker` field):
++//     #[cfg(test)]
++//     #[path = "thread_tags_picker_layout_tests.rs"]
++//     mod thread_tags_picker_layout_tests;
++// Filter: `cargo test -p agent_ui thread_tags_picker_layout` (also picked up by
++// `thread_tags_picker`).
++//
++// Geometry is read off the painted scene (`Window::painted_quads`), so no debug selector is
++// needed and the implementation is free to size the picker however it likes. The picker is
++// opened through `Workspace::toggle_modal`, so the real `ModalLayer` lays it out (Q12).
++//   - the FRAME is the modal surface: the smallest quad filled with `elevated_surface_background`
++//     (`StyledExt::elevation_3`; GPUI paints its border as separate quads) that contains the
++//     selected row's origin;
++//   - the SELECTED ROW is the quad painted with `ghost_element_selected` (`ListItem` with
++//     `toggle_state(true)`) whose origin lies inside the frame;
++//   - "drawn inside" is the VISIBLE extent: a quad's bounds intersected with its content mask, so
++//     a fix that clips is judged by what the user sees.
++// Coordinates are scaled pixels throughout; a rem is `rem_size * scale_factor`.
++//
++// Guard (green on the defect, kept so a fix cannot pass by collapsing the picker): the frame stays
++// at least 24 rem wide and the highlight still spans the row, ending within 1 rem of the frame's
++// right edge.
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{Entity, Hsla, Quad, TestAppContext, VisualTestContext, px, size};
++use project::Project;
++use serde_json::json;
++use ui::ActiveTheme as _;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use super::ThreadTagsPicker;
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::ThreadOrganizationStore;
++
++const PROJECT: &str = "/project-a";
++/// Sub-pixel slack for rounding at a fractional scale factor; far below the ~160 px defect.
++const SLACK: f32 = 0.5;
++
++// ── Setup (minimal copy of thread_tags_picker_tests.rs) ───────────────────
++
++async fn setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    // A fixed, wide window: the picker's own width must not be clamped away by a small display.
++    cx.simulate_resize(size(px(1600.), px(1000.)));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    cx.run_until_parked();
++    (workspace, cx)
++}
++
++fn thread(title: &str, cx: &mut VisualTestContext) -> ThreadId {
++    let now = Utc::now();
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "session-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++/// Fixture write through the store (not the code under test).
++fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store accepts a valid tag on a thread with a message");
++    cx.run_until_parked();
++}
++
++fn open_picker(
++    workspace: &Entity<Workspace>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> Entity<ThreadTagsPicker> {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.toggle_modal(window, cx, |window, cx| {
++            ThreadTagsPicker::new(thread_id, window, cx)
++        })
++    });
++    cx.run_until_parked();
++    workspace
++        .read_with(cx, |workspace, cx| {
++            workspace.active_modal::<ThreadTagsPicker>(cx)
++        })
++        .expect("the Tags picker is the active modal")
++}
++
++fn type_query(modal: &Entity<ThreadTagsPicker>, text: &str, cx: &mut VisualTestContext) {
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| picker.set_query(text, window, cx));
++    cx.run_until_parked();
++}
++
++fn select(modal: &Entity<ThreadTagsPicker>, ix: usize, cx: &mut VisualTestContext) {
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| {
++        picker.set_selected_index(ix, None, true, window, cx)
++    });
++    cx.run_until_parked();
++}
++
++// ── Reading the painted scene ──────────────────────────────────────────────
++
++/// A painted rectangle in scaled pixels: `right` is the VISIBLE right edge (clipped by the
++/// quad's content mask).
++#[derive(Clone, Copy, Debug)]
++struct Rect {
++    left: f32,
++    top: f32,
++    right: f32,
++    bottom: f32,
++}
++
++impl Rect {
++    fn visible(quad: &Quad) -> Self {
++        let bounds = quad.bounds;
++        let mask = quad.content_mask.bounds;
++        Self {
++            left: bounds.origin.x.0,
++            top: bounds.origin.y.0,
++            right: (bounds.origin.x.0 + bounds.size.width.0)
++                .min(mask.origin.x.0 + mask.size.width.0),
++            bottom: (bounds.origin.y.0 + bounds.size.height.0)
++                .min(mask.origin.y.0 + mask.size.height.0),
++        }
++    }
++
++    fn contains_origin_of(&self, other: &Rect) -> bool {
++        other.left >= self.left
++            && other.left < self.right
++            && other.top >= self.top
++            && other.top < self.bottom
++    }
++
++    fn width(&self) -> f32 {
++        self.right - self.left
++    }
++}
++
++struct Painted {
++    frame: Rect,
++    selected: Rect,
++    /// Every other quad whose origin lies inside the frame: rows, highlight, separators, editor.
++    inside: Vec<Rect>,
++    rem: f32,
++}
++
++fn painted(cx: &mut VisualTestContext) -> Painted {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++    cx.update(|window, cx| {
++        let colors = cx.theme().colors();
++        let surface: Hsla = colors.elevated_surface_background;
++        let selected_bg: Hsla = colors.ghost_element_selected;
++        let rem = (window.rem_size() / px(1.)) * window.scale_factor();
++        let quads = window.painted_quads();
++
++        let surfaces: Vec<Rect> = quads
++            .iter()
++            .filter(|quad| quad.background.as_solid() == Some(surface))
++            .map(Rect::visible)
++            .collect();
++        let highlights: Vec<Rect> = quads
++            .iter()
++            .filter(|quad| quad.background.as_solid() == Some(selected_bg))
++            .map(Rect::visible)
++            .collect();
++        // The selected row is the highlight that starts inside a modal surface; the frame is the
++        // smallest surface containing it.
++        let (frame, selected) = highlights
++            .iter()
++            .filter_map(|highlight| {
++                surfaces
++                    .iter()
++                    .filter(|surface| surface.contains_origin_of(highlight))
++                    .min_by(|a, b| a.width().total_cmp(&b.width()))
++                    .map(|frame| (*frame, *highlight))
++            })
++            .next()
++            .unwrap_or_else(|| {
++                panic!(
++                    "fixture: no selected row inside a modal surface; surfaces {surfaces:?}, \
++                     highlights {highlights:?}"
++                )
++            });
++        let inside = quads
++            .iter()
++            .map(Rect::visible)
++            .filter(|rect| {
++                frame.contains_origin_of(rect)
++                    && !(rect.left == frame.left
++                        && rect.top == frame.top
++                        && rect.right == frame.right)
++            })
++            .collect();
++        Painted {
++            frame,
++            selected,
++            inside,
++            rem,
++        }
++    })
++}
++
++// ═══ R1.13 ═════════════════════════════════════════════════════════════════
++
++// R1.13 — the capture's case: "php" typed, "Add tag “php”" the selected row. Its highlight ends
++// at or before the frame's right edge.
++#[gpui::test]
++async fn the_selected_entry_is_drawn_inside_the_modal_frame(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "php", cx);
++    let painted = painted(cx);
++    assert!(
++        painted.selected.right <= painted.frame.right + SLACK,
++        "R1.13: the selected row's highlight ends at {} but the modal frame ends at {} \
++         ({} scaled px past it); frame {:?}, highlight {:?}",
++        painted.selected.right,
++        painted.frame.right,
++        painted.selected.right - painted.frame.right,
++        painted.frame,
++        painted.selected,
++    );
++}
++
++// R1.13 — every entry, the highlight on a later entry, and the separator under the query: nothing
++// that starts inside the frame is drawn past its right edge.
++#[gpui::test]
++async fn every_entry_and_separator_is_drawn_inside_the_modal_frame(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "rust", cx);
++    for name in ["php", "go", "release-plan-2026-q4"] {
++        tag(other, name, cx);
++    }
++
++    let modal = open_picker(&workspace, this, cx);
++    select(&modal, 3, cx);
++    let painted = painted(cx);
++    let past: Vec<&Rect> = painted
++        .inside
++        .iter()
++        .filter(|rect| rect.right > painted.frame.right + SLACK)
++        .collect();
++    assert!(
++        past.is_empty(),
++        "R1.13: {} of {} quads starting inside the frame (right edge {}) are drawn past it: {:?}",
++        past.len(),
++        painted.inside.len(),
++        painted.frame.right,
++        past,
++    );
++}
++
++// Guard — a fix may not pass by collapsing the picker: the frame keeps at least 24 rem and the
++// highlight still spans the row, ending within 1 rem of the frame's right edge.
++#[gpui::test]
++async fn the_frame_keeps_its_width_and_the_highlight_spans_the_row(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "php", cx);
++    let painted = painted(cx);
++    assert!(
++        painted.frame.width() + SLACK >= 24. * painted.rem,
++        "the frame is {} wide, under 24 rem ({})",
++        painted.frame.width(),
++        24. * painted.rem,
++    );
++    assert!(
++        painted.selected.right >= painted.frame.right - painted.rem,
++        "the highlight ends at {}, more than 1 rem short of the frame's right edge {}",
++        painted.selected.right,
++        painted.frame.right,
++    );
++}
 diff --git a/crates/agent_ui/src/thread_tags_picker_selection_tests.rs b/crates/agent_ui/src/thread_tags_picker_selection_tests.rs
 new file mode 100644
 index 0000000..f56bc14
