@@ -1888,6 +1888,12 @@ src_prepare() {
 		# so it sits right after 0065; no flag gates it. It also owns the
 		# multi-badge thread row 0063 builds on.
 		"${FILESDIR}/0068-agent-thread-tags-and-filter.patch"
+		# 0069 (story 038) adds a Lists view beside the thread list and History,
+		# "Move to List" in the thread context menu and list management. It
+		# consumes 0048's store and 0049's row builder and edits the regions
+		# 0068 edits, so it sits right after 0068; no flag gates it. 0028-0030
+		# and 0063 are regenerated on top of it.
+		"${FILESDIR}/0069-sidebar-thread-lists-view.patch"
 		# 0061 starts every agent with ZEO_THREAD=1, so zeo-systray's hook can
 		# tell Zeo's sessions from any other Claude Code process and offer the
 		# tray link (0024) only for those. Ungrouped like 0024.

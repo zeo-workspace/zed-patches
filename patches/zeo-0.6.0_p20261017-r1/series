@@ -102,6 +102,18 @@
 # module list's other editors) are generated on top of it. Numbered 0068
 # because 0067 was the last number taken (story 037).
 0068-agent-thread-tags-and-filter.patch
+# 0069: the Lists view -- a "Thread Lists" button beside History opens a
+# third sidebar view showing 0048's thread lists, one collapsible group per
+# list whose rows carry their project's name and open the thread where it
+# lives, and "Move to List" in a thread row's context menu files a thread;
+# lists are created, renamed, deleted and reordered in the view. A Zeo
+# feature with no adapter dependency, so UNGROUPED and unconditional (story
+# 038); right after 0068 because it builds its rows with 0049's
+# build_pinned_rows, extends 0065's drag guard and puts its menu entry after
+# 0068's "Tags...", and the patches that also edit sidebar.rs (0028-0030,
+# 0063) are generated on top of it. Numbered 0069 because 0068 was the last
+# number taken (story 037).
+0069-sidebar-thread-lists-view.patch
 # 0061: every agent server Zeo starts gets ZEO_THREAD=1 in its environment.
 # zeo-systray's hook fires for every Claude Code process on the machine, and
 # only a session Zeo started has a thread its tray link (0024) can open; the
