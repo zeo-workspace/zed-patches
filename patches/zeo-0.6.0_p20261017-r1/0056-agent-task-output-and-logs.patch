@@ -3135,10 +3135,10 @@ index c6a78a5..14a3f8b 100644
  /// returns its index, or `None` when the root thread has no such entry: a nested
  /// subagent's tool call lives in its own thread, not among the root's entries.
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index ca8cdbe..c73c58c 100644
+index 2a95ed5..a572751 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -92,7 +92,11 @@ pub use crate::message_editor::MessageEditorEvent;
+@@ -94,7 +94,11 @@ pub use crate::message_editor::MessageEditorEvent;
  pub use crate::task_label::{
      TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
  };
@@ -3151,7 +3151,7 @@ index ca8cdbe..c73c58c 100644
  pub use crate::thread_metadata_store::ThreadId;
  pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
  pub use conversation_view::open_markdown_in_workspace;
-@@ -211,53 +215,60 @@ pub(crate) fn open_abs_path_at_point(
+@@ -213,53 +217,60 @@ pub(crate) fn open_abs_path_at_point(
      window: &mut Window,
      cx: &mut Context<Workspace>,
  ) {
@@ -3252,7 +3252,7 @@ index ca8cdbe..c73c58c 100644
              editor
                  .update_in(cx, |editor, window, cx| {
                      if let Some(buffer) = editor.buffer().read(cx).as_singleton() {
-@@ -270,9 +281,9 @@ pub(crate) fn open_abs_path_at_point(
+@@ -272,9 +283,9 @@ pub(crate) fn open_abs_path_at_point(
                      }
                  })
                  .ok();

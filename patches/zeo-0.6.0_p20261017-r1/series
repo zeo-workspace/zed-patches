@@ -89,6 +89,19 @@
 # also edit sidebar.rs (0028-0030) and 0063 are generated on top of it.
 # Numbered 0065 because 0064 was the last number taken (story 036).
 0065-agent-sidebar-drag-reorder.patch
+# 0068: thread tags -- "Tags…" in a thread row's context menu opens a
+# keyboard picker that adds and removes 0048's tags, a tagged row shows its
+# tags as chips, and `#tag` terms in the sidebar filter and in History keep
+# only the threads carrying every named tag. ThreadItem's badges (several,
+# 0063's globe among them) and chips live here; so does the pub(crate)
+# visibility of thread_organization's test_helpers, which the picker's
+# refusal test needs. A Zeo feature with no adapter dependency, so UNGROUPED
+# and unconditional; right after 0065 because it consumes 0048's store,
+# 0049's Pinned section and 0065's filter guard on drag, and the patches
+# that also edit these files (0015, 0028-0030, 0063, 0067 and the agent_ui.rs
+# module list's other editors) are generated on top of it. Numbered 0068
+# because 0067 was the last number taken (story 037).
+0068-agent-thread-tags-and-filter.patch
 # 0061: every agent server Zeo starts gets ZEO_THREAD=1 in its environment.
 # zeo-systray's hook fires for every Claude Code process on the machine, and
 # only a session Zeo started has a thread its tray link (0024) can open; the

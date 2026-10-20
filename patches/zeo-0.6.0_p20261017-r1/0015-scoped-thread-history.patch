@@ -64,10 +64,10 @@ local one is another project -- neither sees the other's threads.
 ---
 
 diff --git a/crates/agent_ui/src/threads_archive_view.rs b/crates/agent_ui/src/threads_archive_view.rs
-index 6b7b4a4..0cd9a3f 100644
+index e2b09da..9091a8c 100644
 --- a/crates/agent_ui/src/threads_archive_view.rs
 +++ b/crates/agent_ui/src/threads_archive_view.rs
-@@ -30,6 +30,7 @@ use picker::{
+@@ -32,6 +32,7 @@ use picker::{
  };
  use platform_title_bar::apply_title_bar_insets;
  use project::{AgentId, AgentServerStore};
@@ -75,7 +75,7 @@ index 6b7b4a4..0cd9a3f 100644
  use settings::Settings as _;
  use theme::ActiveTheme;
  use ui::{
-@@ -128,6 +129,61 @@ pub fn fuzzy_match_positions(query: &str, candidate: &str) -> Option<Vec<usize>>
+@@ -130,6 +131,61 @@ pub fn fuzzy_match_positions(query: &str, candidate: &str) -> Option<Vec<usize>>
      None
  }
  
@@ -137,7 +137,7 @@ index 6b7b4a4..0cd9a3f 100644
  pub enum ThreadsArchiveViewEvent {
      Close,
      Activate { thread: ThreadMetadata },
-@@ -171,7 +227,7 @@ impl ThreadsArchiveView {
+@@ -173,7 +229,7 @@ impl ThreadsArchiveView {
  
          let filter_editor = cx.new(|cx| {
              let mut editor = Editor::single_line(window, cx);
@@ -146,7 +146,7 @@ index 6b7b4a4..0cd9a3f 100644
              editor
          });
  
-@@ -268,29 +324,35 @@ impl ThreadsArchiveView {
+@@ -279,29 +335,35 @@ impl ThreadsArchiveView {
              .is_focused(window)
      }
  
@@ -202,7 +202,7 @@ index 6b7b4a4..0cd9a3f 100644
  
          let query = self.filter_editor.read(cx).text(cx).to_lowercase();
          let today = Local::now().naive_local().date();
-@@ -960,8 +1022,10 @@ impl ThreadsArchiveView {
+@@ -985,8 +1047,10 @@ impl ThreadsArchiveView {
              .count();
  
          let has_archived_threads = {
@@ -214,7 +214,7 @@ index 6b7b4a4..0cd9a3f 100644
          };
  
          let count_label = if entry_count == 1 {
-@@ -1700,4 +1764,224 @@ mod tests {
+@@ -1725,6 +1789,226 @@ mod tests {
              );
          }
      }
@@ -439,3 +439,5 @@ index 6b7b4a4..0cd9a3f 100644
 +        });
 +    }
  }
+ 
+ #[cfg(test)]

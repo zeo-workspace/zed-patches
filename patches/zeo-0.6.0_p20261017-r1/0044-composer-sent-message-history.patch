@@ -164,10 +164,10 @@ index 41dd2ec..ed7a9c2 100644
      // Outranks the binding above while the agent waits on an answer to its
      // question, as the default keymaps' `question_pending` block does.
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index ffa4d41..f1135a3 100644
+index 67f10bd..6861897 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -341,6 +341,14 @@ actions!(
+@@ -343,6 +343,14 @@ actions!(
          /// is what keeps the keystroke from reaching the editor as a newline,
          /// which an unbound (`null`) Enter would.
          IgnoreSendWhileQuestionPending,
