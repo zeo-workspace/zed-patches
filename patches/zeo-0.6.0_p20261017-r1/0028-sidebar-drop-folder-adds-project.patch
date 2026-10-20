@@ -55,7 +55,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
 
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 02154f8..b4dc14b 100644
+index de5bbbf..9059c82 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -31,9 +31,9 @@ use feature_flags::{
@@ -71,7 +71,7 @@ index 02154f8..b4dc14b 100644
  };
  use itertools::Itertools;
  use language_model::LanguageModelRegistry;
-@@ -638,6 +638,26 @@ fn workspace_path_list(workspace: &Entity<Workspace>, cx: &App) -> PathList {
+@@ -645,6 +645,26 @@ fn workspace_path_list(workspace: &Entity<Workspace>, cx: &App) -> PathList {
      PathList::new(&workspace.read(cx).root_paths(cx))
  }
  
@@ -98,7 +98,7 @@ index 02154f8..b4dc14b 100644
  fn linked_worktree_path_lists_for_workspaces(
      workspaces: &[Entity<Workspace>],
      cx: &App,
-@@ -1422,6 +1442,44 @@ impl Sidebar {
+@@ -1429,6 +1449,44 @@ impl Sidebar {
          }
      }
  
@@ -143,7 +143,7 @@ index 02154f8..b4dc14b 100644
      /// Opens a new workspace for a group that has no open workspaces.
      fn open_workspace_for_group(
          &mut self,
-@@ -8416,6 +8474,9 @@ impl Render for Sidebar {
+@@ -8444,6 +8502,9 @@ impl Render for Sidebar {
  
          let color = cx.theme().colors();
          let bg = color.background.blend(color.panel_background);
@@ -153,7 +153,7 @@ index 02154f8..b4dc14b 100644
  
          let no_open_projects = !self.contents.has_open_projects;
          let no_search_results = self.contents.entries.is_empty();
-@@ -8453,6 +8514,8 @@ impl Render for Sidebar {
+@@ -8481,6 +8542,8 @@ impl Render for Sidebar {
                  this.recent_projects_popover_handle.toggle(window, cx);
              }))
              .font(ui_font)

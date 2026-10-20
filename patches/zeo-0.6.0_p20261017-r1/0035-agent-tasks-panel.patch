@@ -5428,10 +5428,10 @@ index 39595f9..e677841 100644
      }
  
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 7eb947e..1d59119 100644
+index 3260b06..375b014 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -84,6 +84,7 @@ pub use crate::agent_panel::{
+@@ -86,6 +86,7 @@ pub use crate::agent_panel::{
  use crate::agent_registry_ui::AgentRegistryPage;
  pub use crate::inline_assistant::InlineAssistant;
  pub use crate::message_editor::MessageEditorEvent;

@@ -1882,6 +1882,12 @@ src_prepare() {
 		# 0048's store and 0049's Pinned section, so it sits right after them;
 		# no flag gates it. 0028-0030 and 0063 are regenerated on top of it.
 		"${FILESDIR}/0065-agent-sidebar-drag-reorder.patch"
+		# 0068 (story 037) tags threads from their context menu, draws the tags
+		# as chips on thread rows and filters the sidebar and History by #tag.
+		# It consumes 0048's store, 0049's Pinned section and 0065's drag guard,
+		# so it sits right after 0065; no flag gates it. It also owns the
+		# multi-badge thread row 0063 builds on.
+		"${FILESDIR}/0068-agent-thread-tags-and-filter.patch"
 		# 0061 starts every agent with ZEO_THREAD=1, so zeo-systray's hook can
 		# tell Zeo's sessions from any other Claude Code process and offer the
 		# tray link (0024) only for those. Ungrouped like 0024.

@@ -1,0 +1,4866 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Tue, 20 Oct 2026 12:52:17 -0300
+Subject: [PATCH] agent: tag threads, show tag chips and filter by #tag
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+0048's store has held tags since story 031, with add_tag, remove_tag and
+a per-thread key list, and nothing in the interface wrote or showed one.
+This patch is that interface, the third consumer of the store after 0049
+and 0065: story 037, 2026-10-20.
+
+What it does. A thread row's context menu, in a project group or in the
+Pinned section, offers "Tags…" right after "Pin Thread"/"Unpin Thread".
+It opens a keyboard picker over every existing tag, the thread's own
+marked as applied: typing narrows the list by key, a valid new tag is
+offered first as "Add tag “<text>”", Enter toggles a tag and keeps the
+picker open on the confirmed entry, Escape closes it and keeps what was
+confirmed. A tagged row shows its tags as chips after the title, ordered
+by key, three at most plus "+N", with a tooltip naming them all; a row
+with no tag draws as before. `#tag` terms in the sidebar filter keep only
+the threads carrying every named tag (AND), in groups and in the Pinned
+section, combined with the rest of the text as typed; History accepts the
+same terms. With no `#` term both filters behave exactly as before.
+
+How. One parser, agent_ui::thread_tag_filter::parse_tag_query, serves
+both filters; it never lowercases or re-joins the text, so the sidebar
+keeps matching the raw query and History lowercases its own, after
+parsing (U+0130 lowercases to two scalars, which would make a valid
+32-character tag read as invalid). The raw query, `#` terms included,
+stays what every existing is_empty() check reads, so a tag term loads and
+expands collapsed groups and the Pinned section and turns drag off, as
+search text does. The picker is agent_ui::thread_tags_picker; its Picker
+owns the 24 rem width (initial_width), so every row, the selection
+highlight and the separators are laid out inside the modal frame -- a
+fixed-width wrapper around an unsized Picker let them overrun it (R1.13).
+The sidebar side is crates/sidebar/src/thread_tags.rs. ThreadItem
+(crates/ui) gains badges -- several, each with its own element id and
+tooltip, in builder call order -- and tag chips after them; a row with
+either ends a long title in an ellipsis instead of under the fade.
+
+Failure: a refused add or removal leaves the thread's tags unchanged,
+shows the refusal in the picker and logs one warning naming the thread id
+and the refusal, never a title or tag text. Without the store (try_global
+is None) no "Tags…" entry, no chip and no tag filtering are offered; a
+missing workspace logs a warning and opens nothing. A row a tag term hides
+keeps its notification and access time, so removing the term brings both
+back.
+
+Upstream touch points. crates/sidebar/src/sidebar.rs only through hooks
+a-h, 7 hunks and 28 added lines, none removed: (a) parse_tag_query after
+`let query = ...`; (b) retain_tagged before the group's
+`if !query.is_empty()` branch; (c) the text part as the branch's query;
+(d, e) the tag-only kept threads and a `continue` for a label match with
+no tagged thread, both before the unchanged emptiness check; (f)
+retain_tagged_rows before the unchanged filter_pinned_rows line; (g)
+tags_menu_entry after "Pin Thread"; (h) .tags(tag_chips_for(..)) in the row
+builder; plus the module lines. pinned_section.rs: filter_pinned_rows'
+first statements strip the `#` terms. threads_archive_view.rs: a store
+observation in new() and the tag filter in update_items. agent_ui.rs: two
+`pub mod` lines. thread_organization: `pub(crate) mod test_helpers`,
+`pub(crate) fn capture_logs` and `pub(crate) fn all_lines_lowercased`,
+because the picker's refusal test needs 0048's log capture and a test
+binary can install one logger only. The lines 0063 rewrites
+(should_load_threads, the emptiness check, `if is_collapsed {`,
+filter_pinned_rows' call, the Pinned expand check) stay byte-identical.
+
+0063 is regenerated on top with three changes and no other: (1) its
+ThreadItem badge field, builder, rendering and thread_item_badge_tests.rs
+move here, generalised to several badges; its
+badge(IconName::ToolWeb, "Devtools thread") call is unchanged; (2) its
+three test_helpers visibility hunks move here; (3) a test-only hunk in
+sidebar_devtools_tests.rs guards the composition of its devtools-only
+view with the tag filter -- no code hunk, since its devtools-only retain
+already runs before retain_tagged for groups, collapsed groups and pinned
+rows. Nineteen more are regenerated with no other change than context,
+offsets and index lines: 0010, 0015, 0027-0030, 0035, 0037, 0039, 0040,
+0043-0045, 0052, 0054, 0056-0058 and 0067 -- most of them only for the
+two `pub mod` lines in agent_ui.rs's module list.
+
+Tests: 77, in eleven new files -- ui thread_item_badge_tests (15), agent_ui
+thread_tag_filter_tests (9), thread_tags_picker_tests (10),
+thread_tags_picker_selection_tests (4), thread_tags_picker_unicode_tests
+(2), thread_tags_picker_layout_tests (3), threads_archive_view_tags_tests
+(6), threads_archive_view_unicode_tests (3), sidebar sidebar_tags_tests
+(6), sidebar_tags_filter_tests (14), sidebar_tags_notify_tests (5).
+
+UNGROUPED and unconditional, right after 0065: it consumes 0048's store,
+0049's Pinned section and 0065's filter guard on drag, and needs no
+adapter. The claude-agent-acp-plus patches that also edit these files
+(0015 and 0028-0030 among them), 0063 and 0067 are generated on top of
+it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
+index ab42feb..f1e2be4 100644
+--- a/crates/agent_ui/src/agent_ui.rs
++++ b/crates/agent_ui/src/agent_ui.rs
+@@ -32,6 +32,8 @@ pub mod test_support;
+ mod thread_import;
+ pub mod thread_metadata_store;
+ pub mod thread_organization;
++pub mod thread_tag_filter;
++pub mod thread_tags_picker;
+ pub mod thread_worktree_archive;
+ 
+ pub mod threads_archive_view;
+diff --git a/crates/agent_ui/src/thread_organization.rs b/crates/agent_ui/src/thread_organization.rs
+index fc86555..85e2eca 100644
+--- a/crates/agent_ui/src/thread_organization.rs
++++ b/crates/agent_ui/src/thread_organization.rs
+@@ -1335,7 +1335,7 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
+ 
+ #[cfg(test)]
+ #[path = "thread_organization/test_helpers.rs"]
+-mod test_helpers;
++pub(crate) mod test_helpers;
+ 
+ #[cfg(test)]
+ #[path = "thread_organization/migration_tests.rs"]
+diff --git a/crates/agent_ui/src/thread_organization/test_helpers.rs b/crates/agent_ui/src/thread_organization/test_helpers.rs
+index b2b7ff7..5fbcd0a 100644
+--- a/crates/agent_ui/src/thread_organization/test_helpers.rs
++++ b/crates/agent_ui/src/thread_organization/test_helpers.rs
+@@ -405,7 +405,7 @@ static INSTALL: Once = Once::new();
+ 
+ /// Starts capturing log lines on this thread. Panics when another logger owns the process,
+ /// rather than letting a log assertion pass or fail for the wrong reason.
+-pub(super) fn capture_logs() {
++pub(crate) fn capture_logs() {
+     INSTALL.call_once(|| {
+         log::set_boxed_logger(Box::new(CaptureLogger))
+             .expect("another logger is installed; the log capture cannot run");
+@@ -434,7 +434,7 @@ pub(super) fn warn_lines() -> Vec<String> {
+ }
+ 
+ /// Every captured line, any level, lowercased — for "this text never reaches a log".
+-pub(super) fn all_lines_lowercased() -> Vec<String> {
++pub(crate) fn all_lines_lowercased() -> Vec<String> {
+     CAPTURED.with(|captured| {
+         captured
+             .borrow()
+diff --git a/crates/agent_ui/src/thread_tag_filter.rs b/crates/agent_ui/src/thread_tag_filter.rs
+new file mode 100644
+index 0000000..3d8f4a6
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tag_filter.rs
+@@ -0,0 +1,133 @@
++//! The `#tag` part of a thread filter, shared by the sidebar and History (story 037). It needs no
++//! `cx`, so either caller can run it on the text its filter editor holds.
++
++use std::ops::Range;
++
++use gpui::SharedString;
++
++use crate::thread_metadata_store::ThreadId;
++use crate::thread_organization::{ThreadOrganizationStore, normalize_tag};
++
++#[derive(Clone, Debug, Default, PartialEq)]
++pub struct TagQuery {
++    /// In `normalize_tag`'s key form, so they compare equal to the store's keys.
++    pub tag_keys: Vec<SharedString>,
++    /// `None` when the query names no key: the caller then matches the raw text exactly as it did
++    /// before tags existed (R4.5, R5.3).
++    pub text: Option<String>,
++}
++
++impl TagQuery {
++    pub fn has_keys(&self) -> bool {
++        !self.tag_keys.is_empty()
++    }
++
++    pub fn text_or<'a>(&'a self, raw: &'a str) -> &'a str {
++        self.text.as_deref().unwrap_or(raw)
++    }
++
++    /// Every key must be on the thread (R4.3); a query without keys passes every thread.
++    pub fn thread_matches(&self, store: &ThreadOrganizationStore, thread_id: ThreadId) -> bool {
++        if self.tag_keys.is_empty() {
++            return true;
++        }
++        let tags = store.tags(thread_id);
++        self.tag_keys
++            .iter()
++            .all(|key| tags.iter().any(|tag| &tag.key == key))
++    }
++
++    /// History can run without the organization store installed; typed keys then match no
++    /// thread rather than being ignored, so a tag term never lists untagged threads (R5.1).
++    pub fn admits_thread(
++        &self,
++        store: Option<&ThreadOrganizationStore>,
++        thread_id: ThreadId,
++    ) -> bool {
++        match store {
++            Some(store) => self.thread_matches(store, thread_id),
++            None => !self.has_keys(),
++        }
++    }
++}
++
++/// The text is never lowercased or re-joined: the sidebar matches it with the case and spacing
++/// typed, and History lowercases it on its own afterwards (R4.14).
++pub fn parse_tag_query(raw: &str) -> TagQuery {
++    let tokens = whitespace_tokens(raw);
++    let mut tag_keys: Vec<SharedString> = Vec::new();
++    let mut removed: Vec<Range<usize>> = Vec::new();
++    for (index, token) in tokens.iter().enumerate() {
++        let Some(name) = raw[token.clone()].strip_prefix('#') else {
++            continue;
++        };
++        // An invalid term is plain text (R4.6), so the error is the answer, not a failure.
++        let Ok((key, _display)) = normalize_tag(name) else {
++            continue;
++        };
++        if !tag_keys.contains(&key) {
++            tag_keys.push(key);
++        }
++        removed.push(with_one_adjacent_space(raw, &tokens, index, token));
++    }
++    if tag_keys.is_empty() {
++        return TagQuery::default();
++    }
++
++    let mut text = String::with_capacity(raw.len());
++    let mut kept_from = 0;
++    for range in &removed {
++        if range.start > kept_from {
++            text.push_str(&raw[kept_from..range.start]);
++        }
++        kept_from = kept_from.max(range.end);
++    }
++    text.push_str(&raw[kept_from..]);
++    TagQuery {
++        tag_keys,
++        text: Some(text.trim().to_string()),
++    }
++}
++
++/// Byte ranges of the whitespace-separated tokens, in order. Always on char boundaries.
++fn whitespace_tokens(raw: &str) -> Vec<Range<usize>> {
++    let mut tokens = Vec::new();
++    let mut start = None;
++    for (offset, character) in raw.char_indices() {
++        match (character.is_whitespace(), start) {
++            (true, Some(token_start)) => {
++                tokens.push(token_start..offset);
++                start = None;
++            }
++            (false, None) => start = Some(offset),
++            _ => {}
++        }
++    }
++    if let Some(token_start) = start {
++        tokens.push(token_start..raw.len());
++    }
++    tokens
++}
++
++/// The token plus the whitespace run after it, or the one before it when it ends the string, so
++/// removing a key leaves the words around it one gap apart.
++fn with_one_adjacent_space(
++    raw: &str,
++    tokens: &[Range<usize>],
++    index: usize,
++    token: &Range<usize>,
++) -> Range<usize> {
++    if token.end < raw.len() {
++        let next_start = tokens.get(index + 1).map_or(raw.len(), |next| next.start);
++        return token.start..next_start;
++    }
++    let previous_end = index
++        .checked_sub(1)
++        .and_then(|previous| tokens.get(previous))
++        .map_or(0, |previous| previous.end);
++    previous_end..token.end
++}
++
++#[cfg(test)]
++#[path = "thread_tag_filter_tests.rs"]
++mod tests;
+diff --git a/crates/agent_ui/src/thread_tag_filter_tests.rs b/crates/agent_ui/src/thread_tag_filter_tests.rs
+new file mode 100644
+index 0000000..6a295e8
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tag_filter_tests.rs
+@@ -0,0 +1,189 @@
++// Story 037, task 3.1 — the `#tag` query parser (R4.1, R4.3, R4.5, R4.6, R4.14, R5.3).
++// Filter: `cargo test -p agent_ui thread_tag_filter`.
++//
++// The parser is pure, so most of this file needs no app. `thread_matches` reads a real
++// `ThreadOrganizationStore`, whose writes admit only threads `ThreadMetadataStore` knows with a
++// session, so those tests build the same globals story 031's store tests use.
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::Fs;
++use gpui::{SharedString, TestAppContext};
++use project::FakeFs;
++use workspace::PathList;
++
++use super::{TagQuery, parse_tag_query};
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::ThreadOrganizationStore;
++
++fn keys(query: &TagQuery) -> Vec<&str> {
++    query.tag_keys.iter().map(SharedString::as_ref).collect()
++}
++
++// ── Parsing ────────────────────────────────────────────────────────────────
++
++// R4.1 — a valid `#` term is a key; the rest is the text.
++#[test]
++fn thread_tag_filter_key_and_text() {
++    let raw = "#php login";
++    let query = parse_tag_query(raw);
++    assert_eq!(keys(&query), ["php"]);
++    assert_eq!(query.text.as_deref(), Some("login"));
++    assert_eq!(query.text_or(raw), "login");
++    assert!(query.has_keys());
++}
++
++// R4.14 — the text keeps the case and the inner spacing typed.
++#[test]
++fn thread_tag_filter_text_keeps_case_and_inner_spacing() {
++    let query = parse_tag_query("#php Login  Page");
++    assert_eq!(keys(&query), ["php"]);
++    assert_eq!(query.text.as_deref(), Some("Login  Page"));
++}
++
++// R4.14 — a key at the end leaves no trailing space behind.
++#[test]
++fn thread_tag_filter_key_after_text() {
++    let query = parse_tag_query("Login #php");
++    assert_eq!(keys(&query), ["php"]);
++    assert_eq!(query.text.as_deref(), Some("Login"));
++}
++
++// R4.1 — keys are compared case-insensitively, in `normalize_tag`'s key form.
++#[test]
++fn thread_tag_filter_duplicate_keys_collapse() {
++    let query = parse_tag_query("#PHP #php");
++    assert_eq!(keys(&query), ["php"]);
++    assert_eq!(query.text.as_deref(), Some(""));
++}
++
++// R4.6 — an invalid `#` term is plain text: a bare `#`, a comma, more than 32 characters.
++#[test]
++fn thread_tag_filter_invalid_terms_stay_text() {
++    let too_long = format!("#{}", "a".repeat(33));
++    for raw in ["#", "#a,b", too_long.as_str()] {
++        let query = parse_tag_query(raw);
++        assert!(!query.has_keys(), "{raw:?} is not a key");
++        assert_eq!(query.text, None, "{raw:?} leaves the text untouched");
++        assert_eq!(query.text_or(raw), raw);
++    }
++
++    let query = parse_tag_query("#a,b #php");
++    assert_eq!(keys(&query), ["php"]);
++    assert_eq!(query.text.as_deref(), Some("#a,b"));
++}
++
++// R4.5, R5.3 — text alone runs exactly today's code: the raw string, untouched.
++#[test]
++fn thread_tag_filter_text_only_is_untouched() {
++    let raw = "  Login  Page ";
++    let query = parse_tag_query(raw);
++    assert_eq!(query, TagQuery::default());
++    assert_eq!(query.text_or(raw), raw);
++}
++
++// ── Matching ───────────────────────────────────────────────────────────────
++
++fn init(cx: &mut TestAppContext) {
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| {
++        cx.set_global(db::AppDatabase::test_new());
++        let settings_store = settings::SettingsStore::test(cx);
++        cx.set_global(settings_store);
++        theme_settings::init(theme::LoadThemes::JustBase, cx);
++        editor::init(cx);
++        release_channel::init("0.0.0".parse().unwrap(), cx);
++        prompt_store::init(cx);
++        <dyn Fs>::set_global(fs, cx);
++        ThreadMetadataStore::init_global(cx);
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++}
++
++/// A thread with a sent message (a session), so the store admits tags on it.
++fn thread(tags: &[&str], cx: &mut TestAppContext) -> ThreadId {
++    let thread_id = ThreadId::new();
++    let now = Utc::now();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "tag-filter-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some("Thread".into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(
++            "/project-a",
++        )])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    for tag in tags {
++        cx.update(|cx| {
++            ThreadOrganizationStore::global(cx)
++                .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++        })
++        .expect("fixture: the store accepts a valid tag on a thread with a message");
++    }
++    cx.run_until_parked();
++    thread_id
++}
++
++fn matches(query: &TagQuery, thread_id: ThreadId, cx: &mut TestAppContext) -> bool {
++    cx.update(|cx| query.thread_matches(ThreadOrganizationStore::global(cx).read(cx), thread_id))
++}
++
++// R4.3 — several keys are an AND: a thread carrying one of two fails.
++#[gpui::test]
++async fn thread_tag_filter_two_keys_require_both(cx: &mut TestAppContext) {
++    init(cx);
++    let php_only = thread(&["php"], cx);
++    let both = thread(&["PHP", "Auth"], cx);
++    let query = parse_tag_query("#php #auth");
++
++    assert!(
++        !matches(&query, php_only, cx),
++        "one of two keys is not a match"
++    );
++    assert!(
++        matches(&query, both, cx),
++        "the first spelling does not matter"
++    );
++}
++
++// R4.1 — a thread with no tags fails a key, even a key no thread carries.
++#[gpui::test]
++async fn thread_tag_filter_untagged_thread_fails_a_key(cx: &mut TestAppContext) {
++    init(cx);
++    let untagged = thread(&[], cx);
++    let tagged = thread(&["rust"], cx);
++
++    assert!(!matches(&parse_tag_query("#rust"), untagged, cx));
++    assert!(!matches(&parse_tag_query("#nobody"), tagged, cx));
++}
++
++// R4.5 — no keys match every thread.
++#[gpui::test]
++async fn thread_tag_filter_no_keys_match_every_thread(cx: &mut TestAppContext) {
++    init(cx);
++    let untagged = thread(&[], cx);
++    let tagged = thread(&["rust"], cx);
++    let query = parse_tag_query("login");
++
++    assert!(matches(&query, untagged, cx));
++    assert!(matches(&query, tagged, cx));
++}
+diff --git a/crates/agent_ui/src/thread_tags_picker.rs b/crates/agent_ui/src/thread_tags_picker.rs
+new file mode 100644
+index 0000000..ad4772a
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tags_picker.rs
+@@ -0,0 +1,325 @@
++//! The Tags picker (story 037): a keyboard picker over every existing tag that toggles one
++//! thread's tags. It stays open across confirms, so several tags can be set in one visit, and
++//! Escape keeps whatever was already confirmed (R1.5, R1.6, R1.11).
++
++use std::sync::Arc;
++
++use gpui::{
++    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
++    Subscription, Task, Window,
++};
++use picker::{Picker, PickerDelegate};
++use ui::{ListItem, ListItemSpacing, prelude::*};
++use workspace::ModalView;
++
++use crate::thread_metadata_store::ThreadId;
++use crate::thread_organization::{Tag, ThreadOrganizationStore, normalize_tag};
++
++pub struct ThreadTagsPicker {
++    picker: Entity<Picker<ThreadTagsPickerDelegate>>,
++    _subscriptions: Vec<Subscription>,
++}
++
++impl ThreadTagsPicker {
++    pub fn new(thread_id: ThreadId, window: &mut Window, cx: &mut Context<Self>) -> Self {
++        let mut delegate = ThreadTagsPickerDelegate {
++            thread_id,
++            query: String::new(),
++            entries: Vec::new(),
++            message: None,
++            selected_index: 0,
++        };
++        delegate.rebuild(cx);
++        // The picker owns the width, so its rows and separators are laid out inside the frame
++        // (a fixed wrapper around an unsized picker let them overrun it, R1.13).
++        let picker =
++            cx.new(|cx| Picker::uniform_list(delegate, window, cx).initial_width(rems(24.)));
++
++        let mut subscriptions = vec![cx.subscribe(&picker, |_, _, _: &DismissEvent, cx| {
++            cx.emit(DismissEvent);
++        })];
++        // Another surface (the sidebar, a deleted thread) can change the tags while the picker
++        // is open; without this the checked marks would go stale until the next keystroke.
++        if let Some(store) = ThreadOrganizationStore::try_global(cx) {
++            subscriptions.push(cx.observe_in(&store, window, |this, _, window, cx| {
++                this.picker
++                    .update(cx, |picker, cx| picker.refresh(window, cx));
++            }));
++        }
++
++        Self {
++            picker,
++            _subscriptions: subscriptions,
++        }
++    }
++}
++
++impl ModalView for ThreadTagsPicker {}
++
++impl EventEmitter<DismissEvent> for ThreadTagsPicker {}
++
++impl Focusable for ThreadTagsPicker {
++    fn focus_handle(&self, cx: &App) -> FocusHandle {
++        self.picker.focus_handle(cx)
++    }
++}
++
++impl Render for ThreadTagsPicker {
++    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
++        v_flex()
++            .key_context("ThreadTagsPicker")
++            .child(self.picker.clone())
++    }
++}
++
++enum TagEntry {
++    /// A valid tag no thread carries yet, in the spelling typed (R1.4).
++    Add {
++        key: SharedString,
++        display: SharedString,
++    },
++    Existing {
++        tag: Tag,
++        applied: bool,
++    },
++}
++
++pub struct ThreadTagsPickerDelegate {
++    thread_id: ThreadId,
++    query: String,
++    entries: Vec<TagEntry>,
++    /// The store's rule for an invalid query, or its last refusal (R1.8, R1.9).
++    message: Option<SharedString>,
++    selected_index: usize,
++}
++
++impl ThreadTagsPickerDelegate {
++    /// Recomputes the entries and the rule from the store, so a checked mark is never older than
++    /// the last write.
++    fn rebuild(&mut self, cx: &App) {
++        // R1.7: exactly one '#' — "##kiwi" must stay invalid rather than become "kiwi".
++        let text = self.query.strip_prefix('#').unwrap_or(&self.query);
++        let normalized = normalize_tag(text);
++        let needle = match &normalized {
++            Ok((key, _)) => key.to_string(),
++            Err(_) => text.trim().to_lowercase(),
++        };
++        self.message = match &normalized {
++            Err(error) if !text.trim().is_empty() => Some(error.to_string().into()),
++            _ => None,
++        };
++
++        self.entries.clear();
++        if let Some(store) = ThreadOrganizationStore::try_global(cx) {
++            let store = store.read(cx);
++            let applied = store.tags(self.thread_id);
++            let mut known = store.all_tags();
++            known.sort_by(|left, right| left.key.cmp(&right.key));
++            if let Ok((key, display)) = &normalized
++                && !known.iter().any(|tag| &tag.key == key)
++            {
++                self.entries.push(TagEntry::Add {
++                    key: key.clone(),
++                    display: display.clone(),
++                });
++            }
++            self.entries.extend(
++                known
++                    .into_iter()
++                    .filter(|tag| tag.key.contains(needle.as_str()))
++                    .map(|tag| {
++                        let applied = applied.iter().any(|own| own.key == tag.key);
++                        TagEntry::Existing { tag, applied }
++                    }),
++            );
++        }
++        self.selected_index = self
++            .selected_index
++            .min(self.entries.len().saturating_sub(1));
++    }
++
++    fn entry_key(entry: &TagEntry) -> &SharedString {
++        match entry {
++            TagEntry::Add { key, .. } => key,
++            TagEntry::Existing { tag, .. } => &tag.key,
++        }
++    }
++
++    fn entry_label(entry: &TagEntry) -> SharedString {
++        match entry {
++            TagEntry::Add { display, .. } => format!("Add tag “{display}”").into(),
++            TagEntry::Existing { tag, .. } => tag.display.clone(),
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) fn test_entries(&self) -> Vec<String> {
++        self.entries
++            .iter()
++            .map(|entry| match entry {
++                TagEntry::Add { .. } => format!("+ {}", Self::entry_label(entry)),
++                TagEntry::Existing { tag, applied } => {
++                    format!("[{}] {}", if *applied { "x" } else { " " }, tag.display)
++                }
++            })
++            .collect()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn test_message(&self) -> Option<SharedString> {
++        self.message.clone()
++    }
++}
++
++impl PickerDelegate for ThreadTagsPickerDelegate {
++    type ListItem = ListItem;
++
++    fn name() -> &'static str {
++        "thread_tags_picker"
++    }
++
++    fn match_count(&self) -> usize {
++        self.entries.len()
++    }
++
++    fn selected_index(&self) -> usize {
++        self.selected_index
++    }
++
++    fn set_selected_index(&mut self, ix: usize, _: &mut Window, _: &mut Context<Picker<Self>>) {
++        self.selected_index = ix;
++    }
++
++    fn placeholder_text(&self, _: &mut Window, _: &mut App) -> Arc<str> {
++        "Add or remove a tag…".into()
++    }
++
++    fn no_matches_text(&self, _: &mut Window, _: &mut App) -> Option<SharedString> {
++        Some(if self.query.is_empty() {
++            "No tags yet".into()
++        } else {
++            "No matching tags".into()
++        })
++    }
++
++    fn update_matches(
++        &mut self,
++        query: String,
++        _: &mut Window,
++        cx: &mut Context<Picker<Self>>,
++    ) -> Task<()> {
++        if query != self.query {
++            self.selected_index = 0;
++        }
++        self.query = query;
++        self.rebuild(cx);
++        Task::ready(())
++    }
++
++    fn confirm(&mut self, _: bool, _: &mut Window, cx: &mut Context<Picker<Self>>) {
++        let Some(entry) = self.entries.get(self.selected_index) else {
++            return;
++        };
++        let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++            return;
++        };
++        let thread_id = self.thread_id;
++        let confirmed_key = Self::entry_key(entry).clone();
++        // Called from a picker action, never from inside a `ThreadMetadataStore` update, which
++        // the store's admission check would re-enter.
++        let result = store.update(cx, |store, cx| match entry {
++            TagEntry::Add { display, .. } => store.add_tag(thread_id, display, cx),
++            // The spelling, never the key: the store re-validates its argument, and a key can be
++            // longer than the 32 characters its spelling was checked against (`İ` lowercases to
++            // `i` + U+0307).
++            TagEntry::Existing { tag, applied: true } => {
++                store.remove_tag(thread_id, &tag.display, cx)
++            }
++            TagEntry::Existing {
++                tag,
++                applied: false,
++            } => store.add_tag(thread_id, &tag.display, cx),
++        });
++        self.rebuild(cx);
++        // R1.12: the rebuild re-sorts, and removing a tag's last carrier turns its entry into
++        // "Add tag", so the index alone would point at a neighbour; follow the key instead. A
++        // refusal changed nothing, so the clamped index is still the confirmed entry.
++        if result.is_ok()
++            && let Some(ix) = self
++                .entries
++                .iter()
++                .position(|entry| Self::entry_key(entry) == &confirmed_key)
++        {
++            self.selected_index = ix;
++        }
++        if let Err(error) = result {
++            // Ids only (Q13): the error's fields are ids, and the title and tag text stay out.
++            log::warn!(
++                "thread_tags_picker: the store refused a tag change on thread {}: {error:?}",
++                thread_id.to_key_string()
++            );
++            self.message = Some(error.to_string().into());
++        }
++        cx.notify();
++    }
++
++    fn dismissed(&mut self, _: &mut Window, _: &mut Context<Picker<Self>>) {}
++
++    fn render_header(&self, _: &mut Window, _: &mut Context<Picker<Self>>) -> Option<AnyElement> {
++        let message = self.message.clone()?;
++        Some(
++            h_flex()
++                .px_3()
++                .pt_2()
++                .child(
++                    Label::new(message)
++                        .size(LabelSize::Small)
++                        .color(Color::Warning),
++                )
++                .into_any_element(),
++        )
++    }
++
++    fn render_match(
++        &self,
++        ix: usize,
++        selected: bool,
++        _: &mut Window,
++        _: &mut Context<Picker<Self>>,
++    ) -> Option<Self::ListItem> {
++        let entry = self.entries.get(ix)?;
++        let icon = match entry {
++            TagEntry::Add { .. } => Icon::new(IconName::Plus).color(Color::Muted),
++            TagEntry::Existing { applied: true, .. } => {
++                Icon::new(IconName::Check).color(Color::Accent)
++            }
++            TagEntry::Existing { applied: false, .. } => {
++                Icon::new(IconName::Hash).color(Color::Muted)
++            }
++        };
++        Some(
++            ListItem::new(ix)
++                .inset(true)
++                .spacing(ListItemSpacing::Sparse)
++                .toggle_state(selected)
++                .start_slot(icon.size(IconSize::Small))
++                .child(Label::new(Self::entry_label(entry))),
++        )
++    }
++}
++
++#[cfg(test)]
++#[path = "thread_tags_picker_tests.rs"]
++mod thread_tags_picker_tests;
++
++#[cfg(test)]
++#[path = "thread_tags_picker_selection_tests.rs"]
++mod thread_tags_picker_selection_tests;
++
++#[cfg(test)]
++#[path = "thread_tags_picker_unicode_tests.rs"]
++mod thread_tags_picker_unicode_tests;
++
++#[cfg(test)]
++#[path = "thread_tags_picker_layout_tests.rs"]
++mod thread_tags_picker_layout_tests;
+diff --git a/crates/agent_ui/src/thread_tags_picker_layout_tests.rs b/crates/agent_ui/src/thread_tags_picker_layout_tests.rs
+new file mode 100644
+index 0000000..7191b86
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tags_picker_layout_tests.rs
+@@ -0,0 +1,323 @@
++// Story 037, task 9.2 — the Tags picker is drawn inside its frame: every entry, its selection
++// highlight and its separators. Requirement: R1.13 (Q5, Q11, Q12). Found by the GUI proof,
++// `docs/assets/037-live-proof-2026-10-20/c2a-picker-typed.png`: the selected "Add tag" row ran
++// ~160 px past the modal's right edge.
++//
++// Materialize at the end of `crates/agent_ui/src/thread_tags_picker.rs`, beside the other picker
++// test modules (a child module, so the tests reach the modal's private `picker` field):
++//     #[cfg(test)]
++//     #[path = "thread_tags_picker_layout_tests.rs"]
++//     mod thread_tags_picker_layout_tests;
++// Filter: `cargo test -p agent_ui thread_tags_picker_layout` (also picked up by
++// `thread_tags_picker`).
++//
++// Geometry is read off the painted scene (`Window::painted_quads`), so no debug selector is
++// needed and the implementation is free to size the picker however it likes. The picker is
++// opened through `Workspace::toggle_modal`, so the real `ModalLayer` lays it out (Q12).
++//   - the FRAME is the modal surface: the smallest quad filled with `elevated_surface_background`
++//     (`StyledExt::elevation_3`; GPUI paints its border as separate quads) that contains the
++//     selected row's origin;
++//   - the SELECTED ROW is the quad painted with `ghost_element_selected` (`ListItem` with
++//     `toggle_state(true)`) whose origin lies inside the frame;
++//   - "drawn inside" is the VISIBLE extent: a quad's bounds intersected with its content mask, so
++//     a fix that clips is judged by what the user sees.
++// Coordinates are scaled pixels throughout; a rem is `rem_size * scale_factor`.
++//
++// Guard (green on the defect, kept so a fix cannot pass by collapsing the picker): the frame stays
++// at least 24 rem wide and the highlight still spans the row, ending within 1 rem of the frame's
++// right edge.
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{Entity, Hsla, Quad, TestAppContext, VisualTestContext, px, size};
++use project::Project;
++use serde_json::json;
++use ui::ActiveTheme as _;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use super::ThreadTagsPicker;
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::ThreadOrganizationStore;
++
++const PROJECT: &str = "/project-a";
++/// Sub-pixel slack for rounding at a fractional scale factor; far below the ~160 px defect.
++const SLACK: f32 = 0.5;
++
++// ── Setup (minimal copy of thread_tags_picker_tests.rs) ───────────────────
++
++async fn setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    // A fixed, wide window: the picker's own width must not be clamped away by a small display.
++    cx.simulate_resize(size(px(1600.), px(1000.)));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    cx.run_until_parked();
++    (workspace, cx)
++}
++
++fn thread(title: &str, cx: &mut VisualTestContext) -> ThreadId {
++    let now = Utc::now();
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "session-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++/// Fixture write through the store (not the code under test).
++fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store accepts a valid tag on a thread with a message");
++    cx.run_until_parked();
++}
++
++fn open_picker(
++    workspace: &Entity<Workspace>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> Entity<ThreadTagsPicker> {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.toggle_modal(window, cx, |window, cx| {
++            ThreadTagsPicker::new(thread_id, window, cx)
++        })
++    });
++    cx.run_until_parked();
++    workspace
++        .read_with(cx, |workspace, cx| {
++            workspace.active_modal::<ThreadTagsPicker>(cx)
++        })
++        .expect("the Tags picker is the active modal")
++}
++
++fn type_query(modal: &Entity<ThreadTagsPicker>, text: &str, cx: &mut VisualTestContext) {
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| picker.set_query(text, window, cx));
++    cx.run_until_parked();
++}
++
++fn select(modal: &Entity<ThreadTagsPicker>, ix: usize, cx: &mut VisualTestContext) {
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| {
++        picker.set_selected_index(ix, None, true, window, cx)
++    });
++    cx.run_until_parked();
++}
++
++// ── Reading the painted scene ──────────────────────────────────────────────
++
++/// A painted rectangle in scaled pixels: `right` is the VISIBLE right edge (clipped by the
++/// quad's content mask).
++#[derive(Clone, Copy, Debug)]
++struct Rect {
++    left: f32,
++    top: f32,
++    right: f32,
++    bottom: f32,
++}
++
++impl Rect {
++    fn visible(quad: &Quad) -> Self {
++        let bounds = quad.bounds;
++        let mask = quad.content_mask.bounds;
++        Self {
++            left: bounds.origin.x.0,
++            top: bounds.origin.y.0,
++            right: (bounds.origin.x.0 + bounds.size.width.0)
++                .min(mask.origin.x.0 + mask.size.width.0),
++            bottom: (bounds.origin.y.0 + bounds.size.height.0)
++                .min(mask.origin.y.0 + mask.size.height.0),
++        }
++    }
++
++    fn contains_origin_of(&self, other: &Rect) -> bool {
++        other.left >= self.left
++            && other.left < self.right
++            && other.top >= self.top
++            && other.top < self.bottom
++    }
++
++    fn width(&self) -> f32 {
++        self.right - self.left
++    }
++}
++
++struct Painted {
++    frame: Rect,
++    selected: Rect,
++    /// Every other quad whose origin lies inside the frame: rows, highlight, separators, editor.
++    inside: Vec<Rect>,
++    rem: f32,
++}
++
++fn painted(cx: &mut VisualTestContext) -> Painted {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++    cx.update(|window, cx| {
++        let colors = cx.theme().colors();
++        let surface: Hsla = colors.elevated_surface_background;
++        let selected_bg: Hsla = colors.ghost_element_selected;
++        let rem = (window.rem_size() / px(1.)) * window.scale_factor();
++        let quads = window.painted_quads();
++
++        let surfaces: Vec<Rect> = quads
++            .iter()
++            .filter(|quad| quad.background.as_solid() == Some(surface))
++            .map(Rect::visible)
++            .collect();
++        let highlights: Vec<Rect> = quads
++            .iter()
++            .filter(|quad| quad.background.as_solid() == Some(selected_bg))
++            .map(Rect::visible)
++            .collect();
++        // The selected row is the highlight that starts inside a modal surface; the frame is the
++        // smallest surface containing it.
++        let (frame, selected) = highlights
++            .iter()
++            .filter_map(|highlight| {
++                surfaces
++                    .iter()
++                    .filter(|surface| surface.contains_origin_of(highlight))
++                    .min_by(|a, b| a.width().total_cmp(&b.width()))
++                    .map(|frame| (*frame, *highlight))
++            })
++            .next()
++            .unwrap_or_else(|| {
++                panic!(
++                    "fixture: no selected row inside a modal surface; surfaces {surfaces:?}, \
++                     highlights {highlights:?}"
++                )
++            });
++        let inside = quads
++            .iter()
++            .map(Rect::visible)
++            .filter(|rect| {
++                frame.contains_origin_of(rect)
++                    && !(rect.left == frame.left
++                        && rect.top == frame.top
++                        && rect.right == frame.right)
++            })
++            .collect();
++        Painted {
++            frame,
++            selected,
++            inside,
++            rem,
++        }
++    })
++}
++
++// ═══ R1.13 ═════════════════════════════════════════════════════════════════
++
++// R1.13 — the capture's case: "php" typed, "Add tag “php”" the selected row. Its highlight ends
++// at or before the frame's right edge.
++#[gpui::test]
++async fn the_selected_entry_is_drawn_inside_the_modal_frame(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "php", cx);
++    let painted = painted(cx);
++    assert!(
++        painted.selected.right <= painted.frame.right + SLACK,
++        "R1.13: the selected row's highlight ends at {} but the modal frame ends at {} \
++         ({} scaled px past it); frame {:?}, highlight {:?}",
++        painted.selected.right,
++        painted.frame.right,
++        painted.selected.right - painted.frame.right,
++        painted.frame,
++        painted.selected,
++    );
++}
++
++// R1.13 — every entry, the highlight on a later entry, and the separator under the query: nothing
++// that starts inside the frame is drawn past its right edge.
++#[gpui::test]
++async fn every_entry_and_separator_is_drawn_inside_the_modal_frame(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "rust", cx);
++    for name in ["php", "go", "release-plan-2026-q4"] {
++        tag(other, name, cx);
++    }
++
++    let modal = open_picker(&workspace, this, cx);
++    select(&modal, 3, cx);
++    let painted = painted(cx);
++    let past: Vec<&Rect> = painted
++        .inside
++        .iter()
++        .filter(|rect| rect.right > painted.frame.right + SLACK)
++        .collect();
++    assert!(
++        past.is_empty(),
++        "R1.13: {} of {} quads starting inside the frame (right edge {}) are drawn past it: {:?}",
++        past.len(),
++        painted.inside.len(),
++        painted.frame.right,
++        past,
++    );
++}
++
++// Guard — a fix may not pass by collapsing the picker: the frame keeps at least 24 rem and the
++// highlight still spans the row, ending within 1 rem of the frame's right edge.
++#[gpui::test]
++async fn the_frame_keeps_its_width_and_the_highlight_spans_the_row(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "php", cx);
++    let painted = painted(cx);
++    assert!(
++        painted.frame.width() + SLACK >= 24. * painted.rem,
++        "the frame is {} wide, under 24 rem ({})",
++        painted.frame.width(),
++        24. * painted.rem,
++    );
++    assert!(
++        painted.selected.right >= painted.frame.right - painted.rem,
++        "the highlight ends at {}, more than 1 rem short of the frame's right edge {}",
++        painted.selected.right,
++        painted.frame.right,
++    );
++}
+diff --git a/crates/agent_ui/src/thread_tags_picker_selection_tests.rs b/crates/agent_ui/src/thread_tags_picker_selection_tests.rs
+new file mode 100644
+index 0000000..f56bc14
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tags_picker_selection_tests.rs
+@@ -0,0 +1,332 @@
++// Story 037, task 4.2 — the Tags picker keeps the confirmed tag selected after the list is
++// rebuilt, so a second Enter toggles the SAME tag back. Requirements: R1.12 (with R1.5, R1.6;
++// Q5, Q12). Tech review note N4.
++//
++// Materialize at the end of `crates/agent_ui/src/thread_tags_picker.rs`, beside 4.1's module (a
++// child module, so the tests reach the modal's private `picker` field and the delegate's
++// `selected_index`):
++//     #[cfg(test)]
++//     #[path = "thread_tags_picker_selection_tests.rs"]
++//     mod thread_tags_picker_selection_tests;
++// Filter: `cargo test -p agent_ui thread_tags_picker` (both picker files).
++//
++// A separate file because 4.1's `thread_tags_picker_tests.rs` is at the 500-line limit; its
++// helpers are private, so the minimal setup is repeated here. The same seams as 4.1: the delegate's
++// `test_entries()` ("+ Add tag “<text>”" · "[x] <display>" · "[ ] <display>", one per match
++// index) and `test_message()`.
++//
++// "The confirmed tag" is a KEY, not an index and not a label. Hostile halves first:
++//   - wrong collapse: after "Add tag “ui”" the re-sort puts `build-ui` at the index `ui` had; the
++//     selection must not stay on the index (it would then point at a DIFFERENT tag). `web-ui`
++//     makes `ui` land in the middle of the list, so "select the last entry" is no fix either;
++//   - wrong split: removing a tag no other thread carries turns its entry from "[x] ui" into
++//     "+ Add tag “ui”" — a different label and kind, the same tag. The selection follows it, so
++//     a second Enter adds `ui` back rather than adding the neighbour `build-ui`.
++// Regression guards (green on the tip, kept so a fix cannot break them):
++//   - `confirming_an_applied_tag_keeps_it_selected` — a removal that keeps the entry in place;
++//   - `a_refused_add_keeps_the_selection` — a refusal moves nothing (ToDo 3).
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use pretty_assertions::assert_eq;
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use super::ThreadTagsPicker;
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::{OrganizeError, ThreadOrganizationStore};
++
++const PROJECT: &str = "/project-a";
++
++// ── Setup (as 4.1's file) ──────────────────────────────────────────────────
++
++async fn setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    cx.run_until_parked();
++    (workspace, cx)
++}
++
++/// A thread with a sent message (it has a session) in `PROJECT`.
++fn thread(title: &str, cx: &mut VisualTestContext) -> ThreadId {
++    let now = Utc::now();
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "session-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++/// Fixture write through the store (not the code under test).
++fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store accepts a valid tag on a thread with a message");
++    cx.run_until_parked();
++}
++
++fn stored(thread_id: ThreadId, cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .tags(thread_id)
++            .into_iter()
++            .map(|tag| tag.display.to_string())
++            .collect()
++    })
++}
++
++// ── Driving the picker ─────────────────────────────────────────────────────
++
++fn open_picker(
++    workspace: &Entity<Workspace>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> Entity<ThreadTagsPicker> {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.toggle_modal(window, cx, |window, cx| {
++            ThreadTagsPicker::new(thread_id, window, cx)
++        })
++    });
++    cx.run_until_parked();
++    workspace
++        .read_with(cx, |workspace, cx| {
++            workspace.active_modal::<ThreadTagsPicker>(cx)
++        })
++        .expect("the Tags picker is the active modal")
++}
++
++fn type_query(modal: &Entity<ThreadTagsPicker>, text: &str, cx: &mut VisualTestContext) {
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| picker.set_query(text, window, cx));
++    cx.run_until_parked();
++}
++
++fn listed(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> Vec<String> {
++    modal.read_with(cx, |modal, cx| {
++        modal.picker.read(cx).delegate.test_entries()
++    })
++}
++
++/// The entry the picker highlights — what Enter acts on.
++fn selected(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> String {
++    modal.read_with(cx, |modal, cx| {
++        let delegate = &modal.picker.read(cx).delegate;
++        let entries = delegate.test_entries();
++        entries
++            .get(delegate.selected_index)
++            .cloned()
++            .unwrap_or_else(|| panic!("index {} out of {entries:?}", delegate.selected_index))
++    })
++}
++
++/// Selects the entry listed as `entry`, as a user does with the arrows.
++fn select(modal: &Entity<ThreadTagsPicker>, entry: &str, cx: &mut VisualTestContext) {
++    let ix = listed(modal, cx)
++        .iter()
++        .position(|listed| listed == entry)
++        .unwrap_or_else(|| panic!("{entry:?} is not listed: {:?}", listed(modal, cx)));
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| {
++        picker.set_selected_index(ix, None, true, window, cx)
++    });
++    cx.run_until_parked();
++}
++
++/// Enter on whatever is selected — no re-selection in between.
++fn press_enter(cx: &mut VisualTestContext) {
++    cx.dispatch_action(menu::Confirm);
++    cx.run_until_parked();
++}
++
++fn add_entry(text: &str) -> String {
++    format!("+ Add tag “{text}”")
++}
++
++// ═══ R1.12 — hostile halves ═══════════════════════════════════════════════
++
++// Wrong collapse: "ui" is new, offered first at index 0. Adding it re-sorts the list by key to
++// [build-ui, ui, web-ui]; the selection must follow `ui` to index 1, not stay at index 0 on
++// `build-ui`, and not jump to the last entry. Then a second Enter removes `ui` — it must not add
++// `build-ui`.
++#[gpui::test]
++async fn adding_a_tag_keeps_it_selected_after_the_re_sort(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(other, "build-ui", cx);
++    tag(other, "web-ui", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "ui", cx);
++    assert_eq!(
++        listed(&modal, cx),
++        vec![add_entry("ui"), "[ ] build-ui".into(), "[ ] web-ui".into()],
++        "fixture: 'ui' is new and offered first"
++    );
++    assert_eq!(selected(&modal, cx), add_entry("ui"));
++
++    press_enter(cx);
++    assert_eq!(stored(this, cx), vec!["ui"], "R1.5: added");
++    assert_eq!(
++        listed(&modal, cx),
++        vec!["[ ] build-ui", "[x] ui", "[ ] web-ui"],
++        "the rebuilt list, sorted by key"
++    );
++    assert_eq!(
++        selected(&modal, cx),
++        "[x] ui",
++        "R1.12: the confirmed tag stays selected after the re-sort"
++    );
++
++    press_enter(cx);
++    assert_eq!(
++        stored(this, cx),
++        Vec::<String>::new(),
++        "R1.12: a second Enter toggles 'ui' back off, it does not add 'build-ui'"
++    );
++    assert_eq!(
++        selected(&modal, cx),
++        add_entry("ui"),
++        "and 'ui', unknown again, stays selected as its add entry"
++    );
++}
++
++// Wrong split: `ui` is carried by this thread only, so removing it makes it unknown and its entry
++// becomes "+ Add tag “ui”", listed first. That entry IS the confirmed tag: the selection follows
++// it from index 1 to 0 instead of staying on index 1, now `build-ui`, and a second Enter adds `ui`
++// back.
++#[gpui::test]
++async fn removing_the_last_carrier_keeps_the_tag_selected_as_its_add_entry(
++    cx: &mut TestAppContext,
++) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "ui", cx);
++    tag(other, "build-ui", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "ui", cx);
++    assert_eq!(listed(&modal, cx), vec!["[ ] build-ui", "[x] ui"]);
++    select(&modal, "[x] ui", cx);
++
++    press_enter(cx);
++    assert_eq!(stored(this, cx), Vec::<String>::new(), "R1.6: removed");
++    assert_eq!(
++        listed(&modal, cx),
++        vec![add_entry("ui"), "[ ] build-ui".into()],
++        "no thread carries 'ui' now: it is offered as new"
++    );
++    assert_eq!(
++        selected(&modal, cx),
++        add_entry("ui"),
++        "R1.12: the selection follows the tag to its add entry, not the index to 'build-ui'"
++    );
++
++    press_enter(cx);
++    assert_eq!(
++        stored(this, cx),
++        vec!["ui"],
++        "R1.12: a second Enter adds 'ui' back, never 'build-ui'"
++    );
++}
++
++// ═══ Regression guards ════════════════════════════════════════════════════
++
++// Guard — R1.6 with the entry staying in place (another thread carries the tag): removing it
++// keeps it selected, and a second Enter adds it back.
++#[gpui::test]
++async fn confirming_an_applied_tag_keeps_it_selected(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    for name in ["alpha", "beta", "gamma"] {
++        tag(other, name, cx);
++    }
++    tag(this, "beta", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    select(&modal, "[x] beta", cx);
++    press_enter(cx);
++    assert_eq!(stored(this, cx), Vec::<String>::new());
++    assert_eq!(selected(&modal, cx), "[ ] beta", "R1.12");
++
++    press_enter(cx);
++    assert_eq!(stored(this, cx), vec!["beta"], "the same tag toggles back");
++    assert_eq!(selected(&modal, cx), "[x] beta");
++}
++
++// Guard — ToDo 3: the store refuses a 21st tag, so nothing is rebuilt differently and the
++// selection stays where it was (the last entry, `zz-other`), with the refusal shown.
++#[gpui::test]
++async fn a_refused_add_keeps_the_selection(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    for n in 1..=20 {
++        tag(this, &format!("t{n:02}"), cx);
++    }
++    tag(other, "m-other", cx);
++    tag(other, "zz-other", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    select(&modal, "[ ] zz-other", cx);
++    press_enter(cx);
++
++    assert_eq!(stored(this, cx).len(), 20, "R1.9: refused");
++    assert_eq!(
++        modal.read_with(cx, |modal, cx| modal
++            .picker
++            .read(cx)
++            .delegate
++            .test_message()
++            .map(|message| message.to_string())),
++        Some(OrganizeError::TooManyTags { thread_id: this }.to_string())
++    );
++    assert_eq!(
++        selected(&modal, cx),
++        "[ ] zz-other",
++        "a refusal keeps the selection"
++    );
++}
+diff --git a/crates/agent_ui/src/thread_tags_picker_tests.rs b/crates/agent_ui/src/thread_tags_picker_tests.rs
+new file mode 100644
+index 0000000..149be67
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tags_picker_tests.rs
+@@ -0,0 +1,499 @@
++// Story 037, task 4.1 — the Tags picker: a keyboard picker over every existing tag that toggles
++// one thread's tags and stays open. Requirements: R1.2–R1.9, R1.11 (Q4, Q12, Q13).
++//
++// Materialize at the end of `crates/agent_ui/src/thread_tags_picker.rs` (a child module, so the
++// tests reach the modal's private `picker` field):
++//     #[cfg(test)]
++//     #[path = "thread_tags_picker_tests.rs"]
++//     mod thread_tags_picker_tests;
++// Filter: `cargo test -p agent_ui thread_tags_picker`.
++//
++// Driven as a user drives it (Q12): opened through `Workspace::toggle_modal`, text set as the
++// query, an entry chosen with `Picker::set_selected_index`, then `menu::Confirm`; Escape is
++// `menu::Cancel`. Tags go through the real stores, so a write made inside a metadata-store update
++// panics here as it would in Zeo. Assumed seams, each named in ONE helper below:
++//   - `open_picker()`: `ThreadTagsPicker::new(thread_id, window, cx)` (task 4.1 Objective);
++//   - the modal holds `picker: Entity<Picker<_>>` (Zed's modal convention, as `ThreadSwitcher`);
++//   - `listed()`: the delegate's `test_entries() -> Vec<String>`, one string per match index:
++//     "+ Add tag “<text>”" (as typed, '#' stripped) · "[x] <display>" applied · "[ ] <display>";
++//   - `message()`: the delegate's `test_message() -> Option<SharedString>`, the line the picker
++//     shows (the store's rule or a refusal), `None` when nothing is shown.
++// Logs: 0048's shared capture; this story's patch widens `test_helpers`, `capture_logs` and
++// `all_lines_lowercased` to `pub(crate)` (moved out of 0063, refine v2 C1); the level filter
++// stays `pub(super)`, so R1.9's warning is asserted by content. Run under the filter: a full
++// `cargo test -p agent_ui` also installs thread_view.rs's `FileLinkWarningCapture`.
++//
++// Hostile halves first: a different case of an existing tag ("RUST") offers no add (wrong split)
++// before a prefix of one ("rus") is new (wrong collapse); THIRD element: a tag only another thread
++// carries ("perl") is not new yet unapplied here; narrowing is a key substring ("trust" in,
++// fuzzy "rubyist" out); exactly ONE '#' is ignored ("##kiwi" is invalid); removing a tag here
++// leaves the other thread's copy alone.
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use pretty_assertions::assert_eq;
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use super::ThreadTagsPicker;
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::test_helpers::{all_lines_lowercased, capture_logs};
++use crate::thread_organization::{OrganizeError, ThreadOrganizationStore};
++
++const PROJECT: &str = "/project-a";
++/// R1.8's text, as the requirement quotes it.
++const RULE: &str = "a tag must be 1 to 32 characters with no space, '#' or ','";
++
++// ── Setup ──────────────────────────────────────────────────────────────────
++
++/// Agent UI test globals, upstream's thread stores, the organization store, and a window on
++/// `PROJECT`. Returns its workspace.
++async fn setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    cx.run_until_parked();
++    (workspace, cx)
++}
++
++/// A thread with a sent message (it has a session) in `PROJECT`.
++fn thread(title: &str, cx: &mut VisualTestContext) -> ThreadId {
++    let now = Utc::now();
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "session-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++/// Fixture write through the store (not the code under test).
++fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store accepts a valid tag on a thread with a message");
++    cx.run_until_parked();
++}
++
++/// The thread's tags as the store holds them, in first spelling.
++fn stored(thread_id: ThreadId, cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .tags(thread_id)
++            .into_iter()
++            .map(|tag| tag.display.to_string())
++            .collect()
++    })
++}
++
++fn known_tags(cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .all_tags()
++            .into_iter()
++            .map(|tag| tag.display.to_string())
++            .collect()
++    })
++}
++
++// ── Driving the picker ─────────────────────────────────────────────────────
++
++fn open_picker(
++    workspace: &Entity<Workspace>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> Entity<ThreadTagsPicker> {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.toggle_modal(window, cx, |window, cx| {
++            ThreadTagsPicker::new(thread_id, window, cx)
++        })
++    });
++    cx.run_until_parked();
++    active_picker(workspace, cx).expect("the Tags picker is the active modal")
++}
++
++fn active_picker(
++    workspace: &Entity<Workspace>,
++    cx: &mut VisualTestContext,
++) -> Option<Entity<ThreadTagsPicker>> {
++    workspace.read_with(cx, |workspace, cx| {
++        workspace.active_modal::<ThreadTagsPicker>(cx)
++    })
++}
++
++fn type_query(modal: &Entity<ThreadTagsPicker>, text: &str, cx: &mut VisualTestContext) {
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| picker.set_query(text, window, cx));
++    cx.run_until_parked();
++}
++
++fn listed(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> Vec<String> {
++    modal.read_with(cx, |modal, cx| {
++        modal.picker.read(cx).delegate.test_entries()
++    })
++}
++
++/// The tag entries only, sorted by display: WHICH tags are listed, not their order.
++fn listed_tags(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> Vec<String> {
++    let mut tags: Vec<String> = listed(modal, cx)
++        .into_iter()
++        .filter(|entry| !entry.starts_with('+'))
++        .collect();
++    tags.sort_by_key(|entry| entry[4..].to_lowercase());
++    tags
++}
++
++fn has_add_entry(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> bool {
++    listed(modal, cx).iter().any(|entry| entry.starts_with('+'))
++}
++
++fn message(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> Option<String> {
++    modal.read_with(cx, |modal, cx| {
++        modal
++            .picker
++            .read(cx)
++            .delegate
++            .test_message()
++            .map(|message| message.to_string())
++    })
++}
++
++/// Selects the entry listed as `entry` and presses Enter.
++fn confirm(modal: &Entity<ThreadTagsPicker>, entry: &str, cx: &mut VisualTestContext) {
++    let ix = listed(modal, cx)
++        .iter()
++        .position(|listed| listed == entry)
++        .unwrap_or_else(|| panic!("{entry:?} is not listed: {:?}", listed(modal, cx)));
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| {
++        picker.set_selected_index(ix, None, true, window, cx)
++    });
++    cx.dispatch_action(menu::Confirm);
++    cx.run_until_parked();
++}
++
++fn add_entry(text: &str) -> String {
++    format!("+ Add tag “{text}”")
++}
++
++// ═══ R1.2 — the list ═══════════════════════════════════════════════════════
++
++// R1.2 — every existing tag once, in its first spelling, the thread's own marked applied. "RUST"
++// typed on another thread after "Rust" is the same tag, not a second entry.
++#[gpui::test]
++async fn lists_every_tag_once_in_first_spelling_with_the_threads_own_applied(
++    cx: &mut TestAppContext,
++) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "Rust", cx);
++    tag(other, "RUST", cx);
++    tag(other, "php", cx);
++    tag(other, "Go", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    assert_eq!(
++        listed_tags(&modal, cx),
++        vec!["[ ] Go", "[ ] php", "[x] Rust"],
++        "R1.2"
++    );
++    assert!(!has_add_entry(&modal, cx), "an empty query offers no add");
++    assert_eq!(message(&modal, cx), None);
++}
++
++// ═══ R1.3, R1.4 — typing ═══════════════════════════════════════════════════
++
++// R1.3 — the typed text narrows by key substring, case-insensitively: "trust" holds "rust", the
++// fuzzy match "rubyist" does not.
++#[gpui::test]
++async fn typing_narrows_by_key_substring_case_insensitively(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    for name in ["Rust", "rustls", "trust", "rubyist", "php"] {
++        tag(other, name, cx);
++    }
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "RuSt", cx);
++    assert_eq!(
++        listed_tags(&modal, cx),
++        vec!["[ ] Rust", "[ ] rustls", "[ ] trust"],
++        "R1.3: 'rubyist' is a fuzzy match, not a substring; 'php' does not match"
++    );
++}
++
++// R1.4 — hostile halves first: a different case of an existing tag is no new tag (no "Add
++// tag"); a tag only another thread carries is no new tag either; then a prefix of an existing
++// tag IS a new tag, offered first, above the existing tag it is a prefix of.
++#[gpui::test]
++async fn add_tag_is_offered_first_only_for_a_tag_no_thread_carries(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "Rust", cx);
++    tag(other, "perl", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "RUST", cx);
++    assert_eq!(
++        listed(&modal, cx),
++        vec!["[x] Rust"],
++        "'RUST' is the applied 'Rust'"
++    );
++
++    type_query(&modal, "perl", cx);
++    assert_eq!(
++        listed(&modal, cx),
++        vec!["[ ] perl"],
++        "carried by another thread: listed, not new, not applied here"
++    );
++
++    type_query(&modal, "rus", cx);
++    assert_eq!(
++        listed(&modal, cx),
++        vec![add_entry("rus"), "[x] Rust".to_string()],
++        "R1.4: 'rus' is a new tag, offered first"
++    );
++}
++
++// ═══ R1.5, R1.6 — confirming ══════════════════════════════════════════════
++
++// R1.5 — confirming "Add tag" adds the tag in the spelling typed, keeps the picker open, and the
++// tag is then listed as applied, with no add entry left; confirming an unapplied existing tag
++// adds it too.
++#[gpui::test]
++async fn confirming_a_tag_the_thread_lacks_adds_it_and_keeps_the_picker_open(
++    cx: &mut TestAppContext,
++) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(other, "perl", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "Kiwi", cx);
++    confirm(&modal, &add_entry("Kiwi"), cx);
++    assert_eq!(stored(this, cx), vec!["Kiwi"], "R1.5: added as typed");
++    assert!(active_picker(&workspace, cx).is_some(), "R1.5: still open");
++    assert_eq!(listed(&modal, cx), vec!["[x] Kiwi"], "R1.5: marked applied");
++
++    type_query(&modal, "perl", cx);
++    confirm(&modal, "[ ] perl", cx);
++    assert_eq!(stored(this, cx), vec!["Kiwi", "perl"]);
++    assert_eq!(listed(&modal, cx), vec!["[x] perl"]);
++    assert!(active_picker(&workspace, cx).is_some());
++}
++
++// R1.6 — confirming an applied tag removes it from THIS thread only and keeps the picker open;
++// the other thread carrying it keeps it, so it stays listed, unapplied.
++#[gpui::test]
++async fn confirming_an_applied_tag_removes_it_from_this_thread_only(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "Rust", cx);
++    tag(other, "rust", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    confirm(&modal, "[x] Rust", cx);
++    assert_eq!(stored(this, cx), Vec::<String>::new(), "R1.6");
++    assert_eq!(stored(other, cx), vec!["Rust"], "the other thread keeps it");
++    assert!(active_picker(&workspace, cx).is_some(), "R1.6: still open");
++    assert_eq!(listed_tags(&modal, cx), vec!["[ ] Rust"]);
++}
++
++// ═══ R1.7, R1.8 — the query's form ════════════════════════════════════════
++
++// R1.7 — one leading '#' is ignored: "#PHP" is the existing "php"; "#kiwi" offers and adds
++// "kiwi"; a second '#' is not stripped, so "##kiwi" is invalid.
++#[gpui::test]
++async fn one_leading_hash_is_ignored(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(other, "php", cx);
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "#PHP", cx);
++    assert_eq!(listed(&modal, cx), vec!["[ ] php"], "'#PHP' is 'php'");
++
++    type_query(&modal, "##kiwi", cx);
++    assert!(!has_add_entry(&modal, cx), "only ONE '#' is ignored");
++    assert_eq!(message(&modal, cx).as_deref(), Some(RULE));
++
++    type_query(&modal, "#kiwi", cx);
++    assert_eq!(listed(&modal, cx), vec![add_entry("kiwi")]);
++    assert_eq!(message(&modal, cx), None);
++    confirm(&modal, &add_entry("kiwi"), cx);
++    assert_eq!(stored(this, cx), vec!["kiwi"], "stored without the '#'");
++}
++
++// R1.8 — a query that is not a valid tag shows the store's rule and offers no add: a comma, a
++// space, 33 characters. The converse: 32 characters is valid, with no rule shown.
++#[gpui::test]
++async fn an_invalid_query_shows_the_rule_and_offers_no_add(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let modal = open_picker(&workspace, this, cx);
++
++    let too_long = "x".repeat(33);
++    for invalid in ["a,b", "two words", too_long.as_str()] {
++        type_query(&modal, invalid, cx);
++        assert!(!has_add_entry(&modal, cx), "{invalid:?}: no add entry");
++        assert_eq!(message(&modal, cx).as_deref(), Some(RULE), "{invalid:?}");
++    }
++
++    let longest = "y".repeat(32);
++    type_query(&modal, &longest, cx);
++    assert_eq!(listed(&modal, cx), vec![add_entry(&longest)]);
++    assert_eq!(message(&modal, cx), None, "a valid query clears the rule");
++}
++
++// ═══ R1.9 — refusals ══════════════════════════════════════════════════════
++
++// R1.9, Q4, Q13 — the store refuses a 21st tag: the thread's tags and the known tags are
++// unchanged, the picker shows the refusal and stays open, and one log line names the thread id
++// while no line carries the thread's title or the tag text.
++#[gpui::test]
++async fn a_refused_add_changes_nothing_shows_the_refusal_and_logs_the_id_only(
++    cx: &mut TestAppContext,
++) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("Secret plans", cx);
++    for n in 1..=20 {
++        tag(this, &format!("t{n:02}"), cx);
++    }
++    let before = stored(this, cx);
++    let known_before = known_tags(cx);
++    assert_eq!(before.len(), 20, "fixture: the store's limit is reached");
++
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "overflowtag", cx);
++    capture_logs();
++    confirm(&modal, &add_entry("overflowtag"), cx);
++
++    assert_eq!(stored(this, cx), before, "R1.9: tags unchanged");
++    assert_eq!(known_tags(cx), known_before, "no tag created on the side");
++    assert_eq!(
++        message(&modal, cx),
++        Some(OrganizeError::TooManyTags { thread_id: this }.to_string()),
++        "R1.9: the refusal is shown in the picker"
++    );
++    assert!(active_picker(&workspace, cx).is_some());
++    let lines = all_lines_lowercased();
++    let id = this.to_key_string().to_lowercase();
++    assert_eq!(
++        lines.iter().filter(|line| line.contains(&id)).count(),
++        1,
++        "R1.9: one warning names the thread id: {lines:?}"
++    );
++    assert!(
++        lines
++            .iter()
++            .all(|line| !line.contains("overflowtag") && !line.contains("secret plans")),
++        "R1.9: no tag text, no title in a log line: {lines:?}"
++    );
++}
++
++// R1.9 — a refused removal: the thread was deleted while its picker was open, so the store
++// refuses whatever is confirmed. The refusal is shown, the other thread's tag is untouched, and
++// one log line names the id.
++#[gpui::test]
++async fn a_refused_removal_shows_the_refusal_and_touches_nothing_else(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let other = thread("Other thread", cx);
++    tag(this, "Rust", cx);
++    tag(other, "Rust", cx);
++    let modal = open_picker(&workspace, this, cx);
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(this, cx))
++    });
++    cx.run_until_parked();
++
++    capture_logs();
++    let entry = listed(&modal, cx)
++        .into_iter()
++        .find(|entry| entry.ends_with("] Rust"))
++        .expect("fixture: Rust is still listed (the other thread carries it)");
++    confirm(&modal, &entry, cx);
++
++    assert_eq!(
++        message(&modal, cx),
++        Some(OrganizeError::UnknownThread { thread_id: this }.to_string()),
++        "R1.9: the refusal is shown"
++    );
++    assert_eq!(stored(other, cx), vec!["Rust"]);
++    let id = this.to_key_string().to_lowercase();
++    assert_eq!(
++        all_lines_lowercased()
++            .iter()
++            .filter(|line| line.contains(&id))
++            .count(),
++        1
++    );
++}
++
++// R1.11 — Escape closes the picker and keeps every change already confirmed (it is not a
++// "cancel the edits").
++#[gpui::test]
++async fn escape_closes_and_keeps_confirmed_changes(cx: &mut TestAppContext) {
++    let (workspace, cx) = setup(cx).await;
++    let this = thread("This thread", cx);
++    let modal = open_picker(&workspace, this, cx);
++    type_query(&modal, "kiwi", cx);
++    confirm(&modal, &add_entry("kiwi"), cx);
++    type_query(&modal, "mango", cx);
++
++    cx.dispatch_action(menu::Cancel);
++    cx.run_until_parked();
++
++    assert!(active_picker(&workspace, cx).is_none(), "R1.11: closed");
++    assert_eq!(
++        stored(this, cx),
++        vec!["kiwi"],
++        "R1.11: the confirmed tag stays, the typed-only one was never added"
++    );
++}
+diff --git a/crates/agent_ui/src/thread_tags_picker_unicode_tests.rs b/crates/agent_ui/src/thread_tags_picker_unicode_tests.rs
+new file mode 100644
+index 0000000..135d047
+--- /dev/null
++++ b/crates/agent_ui/src/thread_tags_picker_unicode_tests.rs
+@@ -0,0 +1,221 @@
++// Story 037, task 7.2 (refine v4) — the Tags picker: removing a tag whose key outgrows its
++// spelling. Requirement: R1.6 (Q5). Found by 7.1's contract check (row 3): `normalize_tag`
++// counts the characters BEFORE lowercasing, and `İ` (U+0130) lowercases to `i` + U+0307, so a
++// valid 32-character spelling holding `İ` has a 33-character key. The store's `remove_tag`
++// re-normalizes its argument; handed that key, it refuses it as an invalid tag.
++//
++// Materialize at the end of `crates/agent_ui/src/thread_tags_picker.rs` (a child module, so the
++// tests reach the modal's private `picker` field):
++//     #[cfg(test)]
++//     #[path = "thread_tags_picker_unicode_tests.rs"]
++//     mod thread_tags_picker_unicode_tests;
++// Filter: `cargo test -p agent_ui thread_tags_picker_unicode`.
++//
++// The setup is a minimal copy of `thread_tags_picker_tests.rs`'s (that file is at its size
++// limit), driven the same way: `Workspace::toggle_modal`, `Picker::set_selected_index`, then
++// `menu::Confirm`; read through the delegate's `test_entries()` and `test_message()`.
++//
++// Hostile halves first: the ASCII twin `Istanbul-…` on the same thread is ANOTHER tag and must
++// survive the removal (wrong collapse); the same tag on another thread, first spelled in another
++// case, keeps it (the removal is this thread's only). Guard (green on the tip): an ordinary tag
++// is removed as before.
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{Entity, TestAppContext, VisualTestContext};
++use pretty_assertions::assert_eq;
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList, Workspace};
++
++use super::ThreadTagsPicker;
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::ThreadOrganizationStore;
++
++const PROJECT: &str = "/project-a";
++/// 32 characters, one of them `İ` (U+0130): valid, with a 33-character key.
++const DOTTED: &str = "İstanbul-release-plan-2026-q4-ok";
++/// The same tag in another case (same key).
++const DOTTED_UPPER: &str = "İSTANBUL-RELEASE-PLAN-2026-Q4-OK";
++/// A different tag one dot away: ASCII `I`.
++const PLAIN: &str = "Istanbul-release-plan-2026-q4-ok";
++
++// ── Setup ──────────────────────────────────────────────────────────────────
++
++async fn unicode_setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    cx.run_until_parked();
++    (workspace, cx)
++}
++
++fn picker_thread(title: &str, cx: &mut VisualTestContext) -> ThreadId {
++    let now = Utc::now();
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "unicode-picker-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: now,
++        created_at: Some(now),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++/// Fixture write through the store; its `Ok` is the proof that the spelling is a valid tag.
++fn picker_tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .unwrap_or_else(|error| panic!("fixture: the store accepts {tag:?}: {error:?}"));
++    cx.run_until_parked();
++}
++
++/// The thread's tags as the store holds them, in first spelling, sorted.
++fn picker_stored(thread_id: ThreadId, cx: &mut VisualTestContext) -> Vec<String> {
++    let mut tags: Vec<String> = cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .tags(thread_id)
++            .into_iter()
++            .map(|tag| tag.display.to_string())
++            .collect()
++    });
++    tags.sort();
++    tags
++}
++
++fn open_unicode_picker(
++    workspace: &Entity<Workspace>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> Entity<ThreadTagsPicker> {
++    workspace.update_in(cx, |workspace, window, cx| {
++        workspace.toggle_modal(window, cx, |window, cx| {
++            ThreadTagsPicker::new(thread_id, window, cx)
++        })
++    });
++    cx.run_until_parked();
++    workspace
++        .read_with(cx, |workspace, cx| {
++            workspace.active_modal::<ThreadTagsPicker>(cx)
++        })
++        .expect("the Tags picker is the active modal")
++}
++
++fn picker_entries(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> Vec<String> {
++    modal.read_with(cx, |modal, cx| {
++        modal.picker.read(cx).delegate.test_entries()
++    })
++}
++
++fn picker_message(modal: &Entity<ThreadTagsPicker>, cx: &mut VisualTestContext) -> Option<String> {
++    modal.read_with(cx, |modal, cx| {
++        modal
++            .picker
++            .read(cx)
++            .delegate
++            .test_message()
++            .map(|message| message.to_string())
++    })
++}
++
++/// Selects the entry listed as `entry` and presses Enter.
++fn confirm_entry(modal: &Entity<ThreadTagsPicker>, entry: &str, cx: &mut VisualTestContext) {
++    let ix = picker_entries(modal, cx)
++        .iter()
++        .position(|listed| listed == entry)
++        .unwrap_or_else(|| panic!("{entry:?} is not listed: {:?}", picker_entries(modal, cx)));
++    let picker = modal.read_with(cx, |modal, _| modal.picker.clone());
++    picker.update_in(cx, |picker, window, cx| {
++        picker.set_selected_index(ix, None, true, window, cx)
++    });
++    cx.dispatch_action(menu::Confirm);
++    cx.run_until_parked();
++}
++
++// ═══ Tests ═════════════════════════════════════════════════════════════════
++
++// R1.6 — confirming the applied `İstanbul-…` removes it from this thread, with no refusal shown;
++// the ASCII twin on the same thread and the other thread's copy stay. Fails on the tip: the
++// picker hands the 33-character key to `remove_tag`, which refuses it as an invalid tag.
++#[gpui::test]
++async fn confirming_an_applied_dotted_capital_i_tag_removes_it(cx: &mut TestAppContext) {
++    let (workspace, cx) = unicode_setup(cx).await;
++    let other = picker_thread("Other thread", cx);
++    let this = picker_thread("This thread", cx);
++    picker_tag(other, DOTTED_UPPER, cx);
++    picker_tag(this, DOTTED, cx);
++    picker_tag(this, PLAIN, cx);
++    assert_eq!(
++        picker_stored(this, cx),
++        vec![PLAIN.to_string(), DOTTED_UPPER.to_string()],
++        "fixture: one tag in its first spelling, and its ASCII twin"
++    );
++
++    let modal = open_unicode_picker(&workspace, this, cx);
++    confirm_entry(&modal, &format!("[x] {DOTTED_UPPER}"), cx);
++    assert_eq!(
++        picker_message(&modal, cx),
++        None,
++        "R1.6: a valid applied tag is removed, not refused"
++    );
++    assert_eq!(
++        picker_stored(this, cx),
++        vec![PLAIN.to_string()],
++        "R1.6: only the confirmed tag leaves this thread; the ASCII twin is another tag"
++    );
++    assert_eq!(
++        picker_stored(other, cx),
++        vec![DOTTED_UPPER.to_string()],
++        "the other thread keeps it"
++    );
++}
++
++// Guard (green on the tip) — an ordinary applied tag is removed as before, and the dotted tag
++// beside it is untouched.
++#[gpui::test]
++async fn confirming_an_applied_ordinary_tag_still_removes_it(cx: &mut TestAppContext) {
++    let (workspace, cx) = unicode_setup(cx).await;
++    let this = picker_thread("This thread", cx);
++    picker_tag(this, "Rust", cx);
++    picker_tag(this, DOTTED, cx);
++
++    let modal = open_unicode_picker(&workspace, this, cx);
++    confirm_entry(&modal, "[x] Rust", cx);
++    assert_eq!(picker_message(&modal, cx), None);
++    assert_eq!(picker_stored(this, cx), vec![DOTTED.to_string()]);
++}
+diff --git a/crates/agent_ui/src/threads_archive_view.rs b/crates/agent_ui/src/threads_archive_view.rs
+index 6b7b4a4..e2b09da 100644
+--- a/crates/agent_ui/src/threads_archive_view.rs
++++ b/crates/agent_ui/src/threads_archive_view.rs
+@@ -7,6 +7,8 @@ use crate::agent_connection_store::AgentConnectionStore;
+ use crate::thread_metadata_store::{
+     ThreadId, ThreadMetadata, ThreadMetadataStore, worktree_info_from_thread_paths,
+ };
++use crate::thread_organization::ThreadOrganizationStore;
++use crate::thread_tag_filter::parse_tag_query;
+ use crate::{Agent, ArchiveSelectedThread, DEFAULT_THREAD_TITLE, RemoveSelectedThread};
+ 
+ use agent::ThreadStore;
+@@ -233,6 +235,15 @@ impl ThreadsArchiveView {
+             thread_filter: ThreadFilter::All,
+         };
+ 
++        // A tag added or removed changes which threads a `#` term lists (R5.4); the store is
++        // absent in setups that never install it, and History then filters by text alone.
++        if let Some(organization_store) = ThreadOrganizationStore::try_global(cx) {
++            this._subscriptions
++                .push(cx.observe(&organization_store, |this: &mut Self, _, cx| {
++                    this.update_items(cx);
++                }));
++        }
++
+         this.update_items(cx);
+         this.reload_branch_names_if_threads_changed(cx);
+         this
+@@ -294,11 +305,25 @@ impl ThreadsArchiveView {
+ 
+         let query = self.filter_editor.read(cx).text(cx).to_lowercase();
+         let today = Local::now().naive_local().date();
++        // Parsed before any lowercasing: `İ` lowercases to two scalars, so a valid 32-character
++        // tag would read as a 33-character, invalid term (R5.1). Shadowing keeps the text match
++        // below untouched: with no `#` key the query is today's, so plain text filters exactly
++        // as before (R5.3).
++        let tag_query = parse_tag_query(&self.filter_editor.read(cx).text(cx));
++        let query = match &tag_query.text {
++            Some(text) => text.to_lowercase(),
++            None => query,
++        };
++        let organization_store = ThreadOrganizationStore::try_global(cx);
++        let organization_store = organization_store.as_ref().map(|store| store.read(cx));
+ 
+         let mut items = Vec::with_capacity(sessions.len() + 5);
+         let mut current_bucket: Option<TimeBucket> = None;
+ 
+         for session in sessions {
++            if !tag_query.admits_thread(organization_store, session.thread_id) {
++                continue;
++            }
+             let highlight_positions = if !query.is_empty() {
+                 let title = session
+                     .title
+@@ -1701,3 +1726,11 @@ mod tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++#[path = "threads_archive_view_tags_tests.rs"]
++mod threads_archive_view_tags_tests;
++
++#[cfg(test)]
++#[path = "threads_archive_view_unicode_tests.rs"]
++mod threads_archive_view_unicode_tests;
+diff --git a/crates/agent_ui/src/threads_archive_view_tags_tests.rs b/crates/agent_ui/src/threads_archive_view_tags_tests.rs
+new file mode 100644
+index 0000000..6bbcf07
+--- /dev/null
++++ b/crates/agent_ui/src/threads_archive_view_tags_tests.rs
+@@ -0,0 +1,298 @@
++// Story 037, task 6.1 — the `#tag` filter in the History view (`ThreadsArchiveView`).
++// Requirements: R5.1–R5.4 (Q5, Q11).
++//
++// Materialize at the end of `crates/agent_ui/src/threads_archive_view.rs` (a child module, so
++// the tests reach the view's private filter editor, list and All/Archived choice):
++//     #[cfg(test)]
++//     #[path = "threads_archive_view_tags_tests.rs"]
++//     mod threads_archive_view_tags_tests;
++// Filter: `cargo test -p agent_ui threads_archive_view` (the paths are
++// `threads_archive_view::threads_archive_view_tags_tests::…`).
++//
++// The real view over the real stores: a window on `/project-a`, every thread of that project, so
++// the file holds with and without 0015's project scoping (037's edit lands before 0015 in the
++// series). Text goes in through the view's own filter editor; the All/Archived choice is set
++// the way its toggle button sets it. Rows are read as sorted titles: no assertion depends on the
++// time buckets or their order.
++//
++// Hostile halves first:
++//   - a plain-text match on the project FOLDER name must not bring in an untagged thread under a
++//     tag term (every thread here is in `/project-a`, so without the tag rule "project-a" lists
++//     them all) — before the tag-and-title combination that does hold;
++//   - the tag term matches the KEY exactly: a title holding "php" and a longer tag "phpunit" stay
++//     out, while `#PHP` still matches the thread tagged "php".
++// `plain_text_filters_as_before` also passes on the series tip (a regression guard).
++
++use std::path::Path;
++
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, WeakEntity};
++use pretty_assertions::assert_eq;
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList};
++
++use super::{ArchiveListItem, ThreadFilter, ThreadsArchiveView};
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::ThreadOrganizationStore;
++use agent_client_protocol::schema::v2 as acp;
++
++const PROJECT: &str = "/project-a";
++
++// ── Setup ──────────────────────────────────────────────────────────────────
++
++/// Agent UI test globals, upstream's thread stores, the organization store, a window on
++/// `PROJECT`, and the History view of that window's workspace.
++async fn history(cx: &mut TestAppContext) -> (Entity<ThreadsArchiveView>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    let view = cx.update(|window, cx| {
++        cx.new(|cx| {
++            ThreadsArchiveView::new(
++                workspace.downgrade(),
++                WeakEntity::new_invalid(),
++                WeakEntity::new_invalid(),
++                window,
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    (view, cx)
++}
++
++/// A thread with a sent message in `PROJECT`, created `age_minutes` ago.
++fn thread(title: &str, archived: bool, age_minutes: i64, cx: &mut VisualTestContext) -> ThreadId {
++    let created = Utc::now() - chrono::Duration::minutes(age_minutes);
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "history-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: created,
++        created_at: Some(created),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store accepts a valid tag on a thread with a message");
++    cx.run_until_parked();
++}
++
++fn untag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.remove_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store removes a tag of a thread with a message");
++    cx.run_until_parked();
++}
++
++// ── Driving and reading the view ───────────────────────────────────────────
++
++fn type_filter(view: &Entity<ThreadsArchiveView>, text: &str, cx: &mut VisualTestContext) {
++    view.update_in(cx, |view, window, cx| {
++        view.filter_editor
++            .update(cx, |editor, cx| editor.set_text(text, window, cx));
++    });
++    cx.run_until_parked();
++}
++
++/// The All/Archived choice, set as its toggle button sets it.
++fn choose(view: &Entity<ThreadsArchiveView>, filter: ThreadFilter, cx: &mut VisualTestContext) {
++    view.update(cx, |view, cx| {
++        view.thread_filter = filter;
++        view.update_items(cx);
++    });
++    cx.run_until_parked();
++}
++
++/// Titles of the listed threads, sorted.
++fn listed(view: &Entity<ThreadsArchiveView>, cx: &mut VisualTestContext) -> Vec<String> {
++    let mut titles: Vec<String> = view.read_with(cx, |view, _| {
++        view.items
++            .iter()
++            .filter_map(|item| match item {
++                ArchiveListItem::Entry { thread, .. } => Some(thread.display_title().to_string()),
++                ArchiveListItem::BucketSeparator(_) => None,
++            })
++            .collect()
++    });
++    titles.sort();
++    titles
++}
++
++fn titles(titles: &[&str]) -> Vec<String> {
++    let mut titles: Vec<String> = titles.iter().map(|title| title.to_string()).collect();
++    titles.sort();
++    titles
++}
++
++/// "Fix login" [php], "Login page" [], "Write docs" [PHP], "php notes" [], "Tune cache" [phpunit],
++/// and two archived threads: "Old php work" [php], "Old mail" [].
++struct Fixture {
++    fix_login: ThreadId,
++    login_page: ThreadId,
++}
++
++fn seed(cx: &mut VisualTestContext) -> Fixture {
++    let fix_login = thread("Fix login", false, 1, cx);
++    let login_page = thread("Login page", false, 2, cx);
++    let write_docs = thread("Write docs", false, 3, cx);
++    thread("php notes", false, 4, cx);
++    let tune_cache = thread("Tune cache", false, 5, cx);
++    let old_php = thread("Old php work", true, 6, cx);
++    thread("Old mail", true, 7, cx);
++    tag(write_docs, "PHP", cx);
++    tag(fix_login, "php", cx);
++    tag(tune_cache, "phpunit", cx);
++    tag(old_php, "php", cx);
++    Fixture {
++        fix_login,
++        login_page,
++    }
++}
++
++// ═══ Tests ═════════════════════════════════════════════════════════════════
++
++// R5.2 hostile half — the folder name "project-a" matches every thread here; with a tag term it
++// brings in only the tagged ones.
++#[gpui::test]
++async fn a_folder_name_match_does_not_bring_untagged_threads_in(cx: &mut TestAppContext) {
++    let (view, cx) = history(cx).await;
++    seed(cx);
++    type_filter(&view, "project-a", cx);
++    assert_eq!(
++        listed(&view, cx).len(),
++        7,
++        "control: the folder name alone lists every thread"
++    );
++
++    type_filter(&view, "#php project-a", cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Fix login", "Old php work", "Write docs"])
++    );
++}
++
++// R5.1 hostile half, then the converse — the term matches the tag key exactly ("php notes" and
++// the "phpunit" thread stay out), case-insensitively ("PHP" on one thread, `#PHP` typed).
++#[gpui::test]
++async fn a_tag_term_matches_the_key_exactly(cx: &mut TestAppContext) {
++    let (view, cx) = history(cx).await;
++    seed(cx);
++
++    type_filter(&view, "#php", cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Fix login", "Old php work", "Write docs"]),
++        "R5.1 under All"
++    );
++    type_filter(&view, "#PHP", cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Fix login", "Old php work", "Write docs"])
++    );
++}
++
++// R5.1 — under the Archived choice, only the archived threads carrying the tag.
++#[gpui::test]
++async fn a_tag_term_holds_under_the_archived_choice(cx: &mut TestAppContext) {
++    let (view, cx) = history(cx).await;
++    seed(cx);
++    choose(&view, ThreadFilter::ArchivedOnly, cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Old mail", "Old php work"]),
++        "control: the Archived choice"
++    );
++
++    type_filter(&view, "#php", cx);
++    assert_eq!(listed(&view, cx), vec!["Old php work".to_string()]);
++}
++
++// R5.2 — a tag term and title text combine, in either order.
++#[gpui::test]
++async fn a_tag_term_and_title_text_combine(cx: &mut TestAppContext) {
++    let (view, cx) = history(cx).await;
++    seed(cx);
++    for query in ["#php login", "login #php"] {
++        type_filter(&view, query, cx);
++        assert_eq!(
++            listed(&view, cx),
++            vec!["Fix login".to_string()],
++            "{query:?}: 'Login page' matches the text without the tag"
++        );
++    }
++}
++
++// R5.3 — plain text filters exactly as before this story (regression guard; the expected rows
++// are the series tip's): a title match, and "php" read as text, not as a tag.
++#[gpui::test]
++async fn plain_text_filters_as_before(cx: &mut TestAppContext) {
++    let (view, cx) = history(cx).await;
++    seed(cx);
++    type_filter(&view, "login", cx);
++    assert_eq!(listed(&view, cx), titles(&["Fix login", "Login page"]));
++    type_filter(&view, "php", cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Old php work", "php notes"]),
++        "without '#', the tags play no part"
++    );
++}
++
++// R5.4 — while `#php` is typed, a thread gaining or losing the tag joins or leaves the list
++// without the filter being retyped.
++#[gpui::test]
++async fn a_tag_change_updates_the_list_under_a_tag_term(cx: &mut TestAppContext) {
++    let (view, cx) = history(cx).await;
++    let fixture = seed(cx);
++    type_filter(&view, "#php", cx);
++
++    tag(fixture.login_page, "Php", cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Fix login", "Login page", "Old php work", "Write docs"])
++    );
++    untag(fixture.fix_login, "php", cx);
++    assert_eq!(
++        listed(&view, cx),
++        titles(&["Login page", "Old php work", "Write docs"])
++    );
++}
+diff --git a/crates/agent_ui/src/threads_archive_view_unicode_tests.rs b/crates/agent_ui/src/threads_archive_view_unicode_tests.rs
+new file mode 100644
+index 0000000..cfe3c97
+--- /dev/null
++++ b/crates/agent_ui/src/threads_archive_view_unicode_tests.rs
+@@ -0,0 +1,217 @@
++// Story 037, task 7.2 (refine v4) — History: a tag whose key outgrows its spelling. Requirement:
++// R5.1 (Q5). Found by 7.1's contract check (row 1a): `normalize_tag` counts the characters
++// BEFORE lowercasing, and exactly one scalar grows when lowercased — `İ` (U+0130) becomes
++// `i` + U+0307. A valid 32-character spelling holding `İ` therefore has a 33-character key, and
++// a filter that lowercases the whole query before parsing it sees an invalid term.
++//
++// Materialize at the end of `crates/agent_ui/src/threads_archive_view.rs` (a child module, so
++// the tests reach the view's private filter editor and list):
++//     #[cfg(test)]
++//     #[path = "threads_archive_view_unicode_tests.rs"]
++//     mod threads_archive_view_unicode_tests;
++// Filter: `cargo test -p agent_ui threads_archive_view_unicode`.
++//
++// The setup is a minimal copy of `threads_archive_view_tags_tests.rs`'s (that file is at its
++// size limit): the real view over the real stores, a window on `/project-a`.
++//
++// Hostile halves first: the near-identical ASCII spelling `Istanbul-…` is a DIFFERENT tag and
++// must stay out (wrong collapse); the same tag typed in another case on another thread must come
++// in (wrong split); an untagged thread stays out. Guards (green on the tip): an ordinary `#php`
++// term, and the text beside a tag term still compared lowercased (`ÉTÉ` finds "notes été" — the
++// title matcher folds ASCII only, so dropping the text part's lowercasing would lose it).
++
++use std::path::Path;
++
++use agent_client_protocol::schema::v2 as acp;
++use chrono::Utc;
++use fs::FakeFs;
++use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, WeakEntity};
++use pretty_assertions::assert_eq;
++use project::Project;
++use serde_json::json;
++use workspace::{MultiWorkspace, PathList};
++
++use super::{ArchiveListItem, ThreadsArchiveView};
++use crate::thread_metadata_store::{ThreadId, ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use crate::thread_organization::{ThreadOrganizationStore, normalize_tag};
++
++const PROJECT: &str = "/project-a";
++/// 32 characters, one of them `İ` (U+0130): valid, with a 33-character key.
++const DOTTED: &str = "İstanbul-release-plan-2026-q4-ok";
++/// The same tag in another case (same key).
++const DOTTED_UPPER: &str = "İSTANBUL-RELEASE-PLAN-2026-Q4-OK";
++/// A different tag one dot away: ASCII `I`, key `istanbul-…` without U+0307.
++const PLAIN: &str = "Istanbul-release-plan-2026-q4-ok";
++
++// ── Setup ──────────────────────────────────────────────────────────────────
++
++async fn unicode_history(
++    cx: &mut TestAppContext,
++) -> (Entity<ThreadsArchiveView>, &mut VisualTestContext) {
++    crate::test_support::init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    fs.insert_tree(PROJECT, json!({ "src": {} })).await;
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        prompt_store::init(cx);
++        language_model::LanguageModelRegistry::test(cx);
++        agent::ThreadStore::init_global(cx);
++        ThreadMetadataStore::init_global(cx);
++    });
++    cx.run_until_parked();
++    cx.update(crate::thread_organization::init);
++    cx.run_until_parked();
++    let project = Project::test(fs, [Path::new(PROJECT)], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let workspace =
++        multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
++    let view = cx.update(|window, cx| {
++        cx.new(|cx| {
++            ThreadsArchiveView::new(
++                workspace.downgrade(),
++                WeakEntity::new_invalid(),
++                WeakEntity::new_invalid(),
++                window,
++                cx,
++            )
++        })
++    });
++    cx.run_until_parked();
++    (view, cx)
++}
++
++fn unicode_thread(title: &str, age_minutes: i64, cx: &mut VisualTestContext) -> ThreadId {
++    let created = Utc::now() - chrono::Duration::minutes(age_minutes);
++    let thread_id = ThreadId::new();
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(format!(
++            "unicode-{}",
++            thread_id.to_key_string()
++        ))),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: Some(title.to_string().into()),
++        title_override: None,
++        updated_at: created,
++        created_at: Some(created),
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[Path::new(PROJECT)])),
++        remote_connection: None,
++        archived: false,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx))
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++/// Fixture write through the store; its `Ok` is the proof that the spelling is a valid tag.
++fn unicode_tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .unwrap_or_else(|error| panic!("fixture: the store accepts {tag:?}: {error:?}"));
++    cx.run_until_parked();
++}
++
++fn unicode_filter(view: &Entity<ThreadsArchiveView>, text: &str, cx: &mut VisualTestContext) {
++    view.update_in(cx, |view, window, cx| {
++        view.filter_editor
++            .update(cx, |editor, cx| editor.set_text(text, window, cx));
++    });
++    cx.run_until_parked();
++}
++
++fn unicode_listed(view: &Entity<ThreadsArchiveView>, cx: &mut VisualTestContext) -> Vec<String> {
++    let mut titles: Vec<String> = view.read_with(cx, |view, _| {
++        view.items
++            .iter()
++            .filter_map(|item| match item {
++                ArchiveListItem::Entry { thread, .. } => Some(thread.display_title().to_string()),
++                ArchiveListItem::BucketSeparator(_) => None,
++            })
++            .collect()
++    });
++    titles.sort();
++    titles
++}
++
++fn sorted(titles: &[&str]) -> Vec<String> {
++    let mut titles: Vec<String> = titles.iter().map(|title| title.to_string()).collect();
++    titles.sort();
++    titles
++}
++
++/// "Plan review" [DOTTED], "Release notes" [DOTTED_UPPER, same tag], "Ascii twin" [PLAIN],
++/// "Fix login" [php], "notes été" [php], "Untagged work" [].
++fn seed_unicode(cx: &mut VisualTestContext) {
++    let plan_review = unicode_thread("Plan review", 1, cx);
++    let release_notes = unicode_thread("Release notes", 2, cx);
++    let ascii_twin = unicode_thread("Ascii twin", 3, cx);
++    let fix_login = unicode_thread("Fix login", 4, cx);
++    let notes_ete = unicode_thread("notes été", 5, cx);
++    unicode_thread("Untagged work", 6, cx);
++    unicode_tag(plan_review, DOTTED, cx);
++    unicode_tag(release_notes, DOTTED_UPPER, cx);
++    unicode_tag(ascii_twin, PLAIN, cx);
++    unicode_tag(fix_login, "php", cx);
++    unicode_tag(notes_ete, "php", cx);
++}
++
++// ═══ Tests ═════════════════════════════════════════════════════════════════
++
++// The edge itself, stated as the store's own rule sees it (a fixture check, green on the tip).
++#[gpui::test]
++async fn the_dotted_spelling_is_a_valid_tag_with_a_longer_key(_cx: &mut TestAppContext) {
++    assert_eq!(DOTTED.chars().count(), 32);
++    let (key, display) = normalize_tag(DOTTED).expect("32 characters, no space, '#' or ','");
++    assert_eq!(display.as_ref(), DOTTED);
++    assert_eq!(key.chars().count(), 33, "U+0130 lowercases to two scalars");
++    let (upper_key, _) = normalize_tag(DOTTED_UPPER).expect("the same tag in another case");
++    assert_eq!(upper_key, key);
++    let (plain_key, _) = normalize_tag(PLAIN).expect("the ASCII twin");
++    assert_ne!(plain_key, key, "one dot apart is another tag");
++}
++
++// R5.1 — `#İstanbul-…` lists exactly the threads carrying that tag, in either spelling, and
++// neither the ASCII twin nor the untagged thread. Fails on the tip: the lowercased term is 33
++// characters, read as text, and no title matches it.
++#[gpui::test]
++async fn a_dotted_capital_i_tag_is_filtered_as_a_tag_in_history(cx: &mut TestAppContext) {
++    let (view, cx) = unicode_history(cx).await;
++    seed_unicode(cx);
++    assert_eq!(unicode_listed(&view, cx).len(), 6, "control: no filter");
++
++    unicode_filter(&view, &format!("#{DOTTED}"), cx);
++    assert_eq!(
++        unicode_listed(&view, cx),
++        sorted(&["Plan review", "Release notes"]),
++        "R5.1: the tag term selects the tagged threads; 'Ascii twin' is another tag"
++    );
++
++    unicode_filter(&view, &format!("#{DOTTED_UPPER} plan"), cx);
++    assert_eq!(
++        unicode_listed(&view, cx),
++        vec!["Plan review".to_string()],
++        "the other case is the same tag, and the text beside it still narrows"
++    );
++}
++
++// Guard (green on the tip) — an ordinary tag term, and the text beside it compared lowercased:
++// "ÉTÉ" finds "notes été" only because the text is lowercased before the ASCII-folding matcher.
++#[gpui::test]
++async fn an_ordinary_tag_term_behaves_as_before_in_history(cx: &mut TestAppContext) {
++    let (view, cx) = unicode_history(cx).await;
++    seed_unicode(cx);
++
++    unicode_filter(&view, "#php", cx);
++    assert_eq!(
++        unicode_listed(&view, cx),
++        sorted(&["Fix login", "notes été"])
++    );
++    unicode_filter(&view, "#PHP ÉTÉ", cx);
++    assert_eq!(unicode_listed(&view, cx), vec!["notes été".to_string()]);
++}
+diff --git a/crates/sidebar/src/pinned_section.rs b/crates/sidebar/src/pinned_section.rs
+index eb9f1ff..1d03f24 100644
+--- a/crates/sidebar/src/pinned_section.rs
++++ b/crates/sidebar/src/pinned_section.rs
+@@ -12,6 +12,7 @@ use agent_ui::thread_metadata_store::{
+     ThreadMetadata, ThreadMetadataStore, worktree_info_from_thread_paths,
+ };
+ use agent_ui::thread_organization::ThreadOrganizationStore;
++use agent_ui::thread_tag_filter::parse_tag_query;
+ use agent_ui::threads_archive_view::fuzzy_match_positions;
+ use gpui::{App, Entity, SharedString};
+ use project::AgentId;
+@@ -134,6 +135,9 @@ pub(crate) fn filter_pinned_rows(
+     rows: Vec<Arc<ThreadEntry>>,
+     query: &str,
+ ) -> Vec<Arc<ThreadEntry>> {
++    // The `#` terms were applied by `thread_tags::retain_tagged_rows`; only the text is left.
++    let tag_query = parse_tag_query(query);
++    let query = tag_query.text_or(query);
+     if query.is_empty() {
+         return rows;
+     }
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index 02154f8..de5bbbf 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -97,6 +97,13 @@ mod organization;
+ mod sidebar_organization_filter_tests;
+ #[cfg(test)]
+ mod sidebar_organization_tests;
++#[cfg(test)]
++mod sidebar_tags_filter_tests;
++#[cfg(test)]
++mod sidebar_tags_notify_tests;
++#[cfg(test)]
++mod sidebar_tags_tests;
++mod thread_tags;
+ 
+ gpui::actions!(
+     agents_sidebar,
+@@ -1530,6 +1537,7 @@ impl Sidebar {
+             .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone());
+ 
+         let query = self.filter_editor.read(cx).text(cx);
++        let tag_query = agent_ui::thread_tag_filter::parse_tag_query(&query);
+ 
+         let previous = mem::take(&mut self.contents);
+ 
+@@ -1988,7 +1996,16 @@ impl Sidebar {
+             };
+             let has_threads = has_visible_rows || has_stored_thread_rows || has_pinned_threads;
+ 
++            let tag_only = thread_tags::retain_tagged(
++                &mut threads,
++                &mut terminals,
++                &tag_query,
++                &mut current_thread_ids,
++                cx,
++            );
+             if !query.is_empty() {
++                // Only the text part is matched below, with its case and spacing (R4.14).
++                let query = tag_query.text_or(&query);
+                 let workspace_highlight_positions =
+                     fuzzy_match_positions(&query, &label).unwrap_or_default();
+                 let workspace_matched = !workspace_highlight_positions.is_empty();
+@@ -2044,6 +2061,13 @@ impl Sidebar {
+                     }
+                 }
+ 
++                if let Some(kept) = tag_only {
++                    matched_threads = kept;
++                }
++                // Under a `#` term a project label match alone shows no header (R4.8).
++                if tag_query.has_keys() && matched_threads.is_empty() {
++                    continue;
++                }
+                 if matched_threads.is_empty() && matched_terminals.is_empty() && !workspace_matched
+                 {
+                     continue;
+@@ -2150,6 +2174,8 @@ impl Sidebar {
+             },
+             cx,
+         );
++        let pinned_rows =
++            thread_tags::retain_tagged_rows(pinned_rows, &tag_query, &mut current_thread_ids, cx);
+         // Like a group's rows, a pinned row the filter drops is not registered below, so the
+         // header is decided by, and reports notifications of, only the rows that are shown.
+         let pinned_rows = pinned_section::filter_pinned_rows(pinned_rows, &query);
+@@ -6694,6 +6720,7 @@ impl Sidebar {
+             .when_some(thread.pinned_project_label.clone(), |this, label| {
+                 this.project_name(label)
+             })
++            .tags(thread_tags::tag_chips_for(thread.metadata.thread_id, cx))
+             .timestamp(timestamp)
+             .highlight_positions(thread.highlight_positions.to_vec())
+             .title_generating(title_generating)
+@@ -7011,6 +7038,7 @@ impl Sidebar {
+                                 }
+                             });
+                         }
++                        menu = thread_tags::tags_menu_entry(menu, thread_id, sidebar.clone(), _cx);
+ 
+                         menu.separator().entry("Archive Thread", None, {
+                             let session_id = session_id.clone();
+diff --git a/crates/sidebar/src/sidebar_tags_filter_tests.rs b/crates/sidebar/src/sidebar_tags_filter_tests.rs
+new file mode 100644
+index 0000000..8775889
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_tags_filter_tests.rs
+@@ -0,0 +1,499 @@
++// Story 037, task 5.1 (part 2 of 2) — the `#tag` filter in the threads sidebar, in project
++// groups and in the Pinned section. Part 1, `sidebar_tags_tests.rs`, holds the shared fixtures
++// (`two_projects`, `save`, `tag`, `pin`, …), the menu entry and the chips. Requirements here:
++// R4.1–R4.9, R4.11–R4.14 (Q5, Q11).
++//
++// Materialize beside part 1 (see its header); filter `cargo test -p sidebar sidebar_tags`.
++//
++// Hostile halves come first in every identity rule:
++//   - a `#php` term matches the tag KEY exactly: a thread titled "php notes" with no tag and a
++//     thread tagged "phpunit" stay out (the wrong collapse of text, or of a longer tag, into the
++//     tag), before `#pHp` must still bring in the threads tagged "PHP" and "php" (the wrong
++//     split);
++//   - a project label matching the plain text must not bring an untagged thread in, nor show a
++//     header with no tagged row (R4.8), before the label match that does hold; the same for a
++//     pinned row whose label matches;
++//   - a valid tag no thread carries shows nothing even when a title holds the literal "#ghost"
++//     (it is a tag term, not text), while an invalid term "#a,b" is text and must not match the
++//     thread tagged "ab";
++//   - text beside a term keeps case and spacing (R4.14): "Fix  login" (two spaces) matches no
++//     title; "AÇÃO" matches "Ajustar AÇÃO", which a lowercased "ação" misses (ASCII-only fold).
++// Regression guards, green on the tip: `plain_text_filters_as_before`, `an_invalid_tag_term_*`.
++
++use super::*;
++use crate::sidebar_tags_tests::*;
++use crate::sidebar_tests::{
++    init_test_project_with_agent_panel, setup_sidebar_with_agent_panel, type_in_search,
++};
++use gpui::{MouseButton, Point, TestAppContext, VisualTestContext, point};
++use pretty_assertions::assert_eq;
++
++/// A draft (no session) in `folder` with prompt text: an empty one is listed only while active.
++fn save_draft(folder: &str, cx: &mut VisualTestContext) -> ThreadId {
++    let thread_id = ThreadId::new();
++    let paths = PathList::new(&[PathBuf::from(folder)]);
++    let metadata = ThreadMetadata {
++        thread_id,
++        session_id: None,
++        agent_id: ZED_AGENT_ID.clone(),
++        title: None,
++        title_override: None,
++        updated_at: Utc::now(),
++        created_at: None,
++        interacted_at: None,
++        worktree_paths: WorktreePaths::from_path_lists(paths.clone(), paths)
++            .expect("fixture: one folder is a valid worktree pair"),
++        archived: false,
++        remote_connection: None,
++    };
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
++        agent_ui::draft_prompt_store::write(thread_id, &["wip".into()], cx).detach_and_log_err(cx);
++    });
++    cx.run_until_parked();
++    thread_id
++}
++
++// ── Reading the sidebar ────────────────────────────────────────────────────
++
++/// What the sidebar shows, each list sorted so group order never matters.
++#[derive(Debug, Default, PartialEq)]
++struct Shown {
++    headers: Vec<String>,
++    /// Group rows of threads with a message.
++    threads: Vec<String>,
++    /// Rows of the Pinned section.
++    pinned: Vec<String>,
++    pinned_header: bool,
++    terminals: Vec<String>,
++    drafts: usize,
++}
++
++fn shown(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> Shown {
++    sidebar.read_with(cx, |sidebar, _| {
++        let mut shown = Shown::default();
++        for entry in &sidebar.contents.entries {
++            match entry {
++                ListEntry::ProjectHeader { label, .. } => shown.headers.push(label.to_string()),
++                ListEntry::PinnedHeader { .. } => shown.pinned_header = true,
++                ListEntry::Terminal(terminal) => shown
++                    .terminals
++                    .push(terminal.metadata.display_title().to_string()),
++                ListEntry::Thread(thread) if thread.draft.is_some() => shown.drafts += 1,
++                ListEntry::Thread(thread) => {
++                    let title = thread.metadata.display_title().to_string();
++                    if thread.pinned_project_label.is_some() {
++                        shown.pinned.push(title);
++                    } else {
++                        shown.threads.push(title);
++                    }
++                }
++            }
++        }
++        shown.headers.sort();
++        shown.threads.sort();
++        shown.pinned.sort();
++        shown.terminals.sort();
++        shown
++    })
++}
++
++fn titles(titles: &[&str]) -> Vec<String> {
++    let mut titles: Vec<String> = titles.iter().map(|title| title.to_string()).collect();
++    titles.sort();
++    titles
++}
++
++/// Press, move past GPUI's drag threshold, release where it started: whether a drag began.
++fn drag_starts_at(from: Point<Pixels>, cx: &mut VisualTestContext) -> bool {
++    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
++    cx.simulate_mouse_move(
++        point(from.x, from.y + px(6.)),
++        MouseButton::Left,
++        Modifiers::none(),
++    );
++    let started = cx.update(|_, cx| cx.has_active_drag());
++    cx.simulate_mouse_move(from, MouseButton::Left, Modifiers::none());
++    cx.simulate_mouse_up(from, MouseButton::Left, Modifiers::none());
++    cx.run_until_parked();
++    started
++}
++
++fn has_filter_query(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> bool {
++    sidebar.read_with(cx, |sidebar, cx| sidebar.has_filter_query(cx))
++}
++
++/// alpha: "Fix login" [php], "Login page" [], "Tune cache" [phpunit], "php notes" [];
++/// beta: "Write docs" [php, urgent], "Read mail" [urgent].
++struct Fixture {
++    fix_login: ThreadId,
++    login_page: ThreadId,
++    write_docs: ThreadId,
++    read_mail: ThreadId,
++}
++
++fn seed(cx: &mut VisualTestContext) -> Fixture {
++    let fix_login = save("a1", "Fix login", ALPHA, 4, cx);
++    let login_page = save("a2", "Login page", ALPHA, 3, cx);
++    let tune_cache = save("a3", "Tune cache", ALPHA, 2, cx);
++    save("a4", "php notes", ALPHA, 1, cx);
++    let write_docs = save("b1", "Write docs", BETA, 2, cx);
++    let read_mail = save("b2", "Read mail", BETA, 1, cx);
++    tag(fix_login, "PHP", cx);
++    tag(tune_cache, "phpunit", cx);
++    tag(write_docs, "php", cx);
++    tag(write_docs, "urgent", cx);
++    tag(read_mail, "urgent", cx);
++    Fixture {
++        fix_login,
++        login_page,
++        write_docs,
++        read_mail,
++    }
++}
++
++// ═══ The `#tag` filter (R4.1–R4.9, R4.11, R4.12) ═══════════════════════════
++
++// R4.1 hostile half first — the term matches the tag KEY exactly: neither a title holding the
++// text ("php notes") nor a longer tag ("phpunit") comes in. Then the converse: a different case
++// in the filter or in the stored spelling is the same tag, across both projects.
++#[gpui::test]
++async fn a_tag_term_matches_the_key_exactly_not_text_or_a_longer_tag(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    seed(cx);
++
++    type_in_search(&sidebar, "#php", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(
++        rows.threads,
++        titles(&["Fix login", "Write docs"]),
++        "{rows:?}"
++    );
++    assert_eq!(rows.headers, titles(&["alpha", "beta"]));
++
++    type_in_search(&sidebar, "#pHp", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Fix login", "Write docs"]),
++        "R4.1 compared case-insensitively ('PHP' on one thread, 'php' typed on the other)"
++    );
++}
++
++// R4.2 — a tag term and plain text together: only rows carrying the tag AND matching the text,
++// whichever order they are typed in.
++#[gpui::test]
++async fn a_tag_term_and_plain_text_combine(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    seed(cx);
++
++    for query in ["#php login", "login #php"] {
++        type_in_search(&sidebar, query, cx);
++        let rows = shown(&sidebar, cx);
++        assert_eq!(
++            rows.threads,
++            vec!["Fix login".to_string()],
++            "{query:?}: 'Login page' matches the text but carries no tag, 'Write docs' carries \
++             the tag but does not match the text"
++        );
++        assert_eq!(rows.headers, vec!["alpha".to_string()]);
++    }
++}
++
++// R4.3 — several tag terms: every one is required.
++#[gpui::test]
++async fn several_tag_terms_require_every_tag(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    seed(cx);
++
++    type_in_search(&sidebar, "#php #urgent", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        vec!["Write docs".to_string()],
++        "'Fix login' (php only) and 'Read mail' (urgent only) are out"
++    );
++}
++
++// R4.4 — a valid tag no thread carries shows no row and the "No threads match your search."
++// state, even though a title holds the literal text "#ghost" (the term is a tag, not text).
++#[gpui::test]
++async fn a_tag_no_thread_carries_shows_no_rows(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    seed(cx);
++    save("a9", "Deploy #ghost fix", ALPHA, 9, cx);
++    type_in_search(&sidebar, "ghost", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        vec!["Deploy #ghost fix".to_string()],
++        "control: the title holds the text"
++    );
++
++    type_in_search(&sidebar, "#ghost", cx);
++    assert_eq!(shown(&sidebar, cx), Shown::default(), "no row, no header");
++    assert!(
++        has_filter_query(&sidebar, cx),
++        "the empty state is the search one: \"No threads match your search.\""
++    );
++}
++
++// R4.8 hostile — with a tag term, a project label matching the plain text no longer brings in
++// every thread of the project: only its tagged rows, and no header at all when none is tagged.
++#[gpui::test]
++async fn a_project_label_match_does_not_bring_untagged_threads_in(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    seed(cx);
++    type_in_search(&sidebar, "alpha", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Fix login", "Login page", "Tune cache", "php notes"]),
++        "control: without a tag term, the label match lists the whole project"
++    );
++
++    type_in_search(&sidebar, "#php alpha", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(rows.threads, vec!["Fix login".to_string()], "{rows:?}");
++    assert_eq!(rows.headers, vec!["alpha".to_string()]);
++
++    type_in_search(&sidebar, "#urgent alpha", cx);
++    assert_eq!(
++        shown(&sidebar, cx),
++        Shown::default(),
++        "alpha's label matches but no alpha thread is urgent: no header"
++    );
++}
++
++// R4.6 — an invalid `#` term is plain text: "#a,b" matches the title holding it and not the
++// thread tagged "ab" (the term is not cleaned into a tag).
++#[gpui::test]
++async fn an_invalid_tag_term_is_plain_text(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    save("a9", "Fix #a,b parsing", ALPHA, 9, cx);
++    tag(fixture.read_mail, "ab", cx);
++
++    type_in_search(&sidebar, "#a,b", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        vec!["Fix #a,b parsing".to_string()]
++    );
++}
++
++// R4.5 — plain text filters exactly as before this story (regression guard; the expected rows
++// are the series tip's): a title match, and a label match listing the whole project.
++#[gpui::test]
++async fn plain_text_filters_as_before(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    seed(cx);
++
++    type_in_search(&sidebar, "login", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Fix login", "Login page"])
++    );
++    type_in_search(&sidebar, "beta", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Read mail", "Write docs"])
++    );
++    type_in_search(&sidebar, "php", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        vec!["php notes".to_string()],
++        "without '#', 'php' is text: the tags play no part"
++    );
++}
++
++// R4.7 — the Pinned section is filtered by the same term: a pinned untagged row whose project
++// label matches the text stays out, the tagged one stays in, once.
++#[gpui::test]
++async fn the_pinned_section_is_filtered_by_the_tag_term(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    pin(fixture.write_docs, cx);
++    pin(fixture.read_mail, cx);
++
++    type_in_search(&sidebar, "#php beta", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(rows.pinned, vec!["Write docs".to_string()], "{rows:?}");
++    assert!(rows.pinned_header);
++    assert!(
++        rows.threads.is_empty(),
++        "both beta threads are pinned, so no group row"
++    );
++
++    type_in_search(&sidebar, "#php", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(rows.pinned, vec!["Write docs".to_string()]);
++    assert_eq!(rows.threads, vec!["Fix login".to_string()]);
++
++    type_in_search(&sidebar, "#ghost", cx);
++    assert!(
++        !shown(&sidebar, cx).pinned_header,
++        "no pinned row matches: no Pinned header"
++    );
++}
++
++// R4.9 — terminal and draft rows carry no tags: a tag term hides them even where the project
++// label matches the text (without a tag term that label match would list them).
++#[gpui::test]
++async fn terminal_and_draft_rows_are_hidden_under_a_tag_term(cx: &mut TestAppContext) {
++    let project = init_test_project_with_agent_panel(ALPHA, cx).await;
++    cx.update(|cx| agent_ui::thread_organization::init(cx));
++    cx.run_until_parked();
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
++    panel
++        .update_in(cx, |panel, window, cx| {
++            panel.insert_test_terminal("php server", true, window, cx)
++        })
++        .expect("fixture: a test terminal is inserted");
++    cx.run_until_parked();
++    save_draft(ALPHA, cx);
++    let fix_login = save("a1", "Fix login", ALPHA, 1, cx);
++    tag(fix_login, "php", cx);
++    sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
++    cx.run_until_parked();
++
++    let rows = shown(&sidebar, cx);
++    assert!(rows.drafts >= 1, "fixture: the draft has a row: {rows:?}");
++    type_in_search(&sidebar, "php", cx);
++    assert_eq!(
++        shown(&sidebar, cx).terminals,
++        vec!["php server".to_string()],
++        "control: plain text reaches the terminal row"
++    );
++
++    type_in_search(&sidebar, "#php alpha", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(rows.terminals, Vec::<String>::new(), "{rows:?}");
++    assert_eq!(rows.drafts, 0, "{rows:?}");
++    assert_eq!(rows.threads, vec!["Fix login".to_string()]);
++}
++
++// R4.12 — while `#php` is typed, a thread gaining or losing the tag joins or leaves the rows
++// without the filter being retyped.
++#[gpui::test]
++async fn a_tag_change_updates_the_rows_under_a_tag_term(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    type_in_search(&sidebar, "#php", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Fix login", "Write docs"])
++    );
++
++    tag(fixture.login_page, "Php", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Fix login", "Login page", "Write docs"])
++    );
++    untag(fixture.fix_login, "php", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Login page", "Write docs"])
++    );
++}
++
++// R4.11 — a tag term is filter text: no thread drag and no pinned drag while it is typed.
++#[gpui::test]
++async fn no_thread_or_pinned_drag_under_a_tag_term(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    pin(fixture.write_docs, cx);
++    let ix = group_row_ix(&sidebar, fixture.fix_login, cx);
++    let row = entry_bounds(&sidebar, ix, cx).center();
++    assert!(
++        drag_starts_at(row, cx),
++        "control: an unfiltered thread row offers a drag"
++    );
++
++    type_in_search(&sidebar, "#php", cx);
++    let ix = group_row_ix(&sidebar, fixture.fix_login, cx);
++    let row = entry_bounds(&sidebar, ix, cx).center();
++    assert!(!drag_starts_at(row, cx), "no thread drag under a tag term");
++    let ix = pinned_row_ix(&sidebar, fixture.write_docs, cx);
++    let pinned = entry_bounds(&sidebar, ix, cx).center();
++    assert!(
++        !drag_starts_at(pinned, cx),
++        "no pinned drag under a tag term"
++    );
++}
++
++fn highlight_of(sidebar: &Entity<Sidebar>, title: &str, cx: &mut VisualTestContext) -> Vec<usize> {
++    sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .find_map(|entry| match entry {
++                ListEntry::Thread(t) if t.metadata.display_title() == title => {
++                    Some(t.highlight_positions.clone())
++                }
++                _ => None,
++            })
++            .expect("fixture: the row is shown")
++    })
++}
++
++// R4.13 — a tag term shows matches in a collapsed group and a collapsed Pinned section.
++#[gpui::test]
++async fn a_tag_term_shows_matches_in_collapsed_groups_and_pinned(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    pin(fixture.write_docs, cx);
++    let alpha = ProjectGroupKey::new(None, PathList::new(&[PathBuf::from(ALPHA)]));
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.toggle_collapse(&alpha, window, cx);
++        sidebar.set_pinned_collapsed(true, cx);
++    });
++    cx.run_until_parked();
++    let rows = shown(&sidebar, cx);
++    assert!(rows.pinned.is_empty() && !rows.threads.contains(&"Fix login".to_string()));
++
++    type_in_search(&sidebar, "#php", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(rows.threads, vec!["Fix login".to_string()], "{rows:?}");
++    assert_eq!(rows.pinned, vec!["Write docs".to_string()], "{rows:?}");
++}
++
++// Hook d — a tag-only query (no text) keeps every tagged thread of a group.
++#[gpui::test]
++async fn a_tag_only_query_keeps_every_tagged_thread_of_a_group(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    tag(fixture.login_page, "php", cx);
++    type_in_search(&sidebar, "#php", cx);
++    let rows = shown(&sidebar, cx);
++    assert_eq!(
++        rows.threads,
++        titles(&["Fix login", "Login page", "Write docs"])
++    );
++    assert_eq!(rows.headers, titles(&["alpha", "beta"]));
++}
++
++// R4.14 — the text beside a term is matched as typed, highlight included.
++#[gpui::test]
++async fn text_beside_a_tag_term_keeps_its_case_and_spacing(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fixture = seed(cx);
++    tag(fixture.login_page, "php", cx);
++    let acao = save("a8", "Ajustar AÇÃO", ALPHA, 8, cx);
++    tag(acao, "php", cx);
++
++    type_in_search(&sidebar, "#php Fix  login", cx);
++    assert!(shown(&sidebar, cx).threads.is_empty(), "two spaces typed");
++    type_in_search(&sidebar, "#php AÇÃO", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        vec!["Ajustar AÇÃO".to_string()]
++    );
++    type_in_search(&sidebar, "#php Login", cx);
++    assert_eq!(
++        shown(&sidebar, cx).threads,
++        titles(&["Fix login", "Login page"])
++    );
++    assert_eq!(
++        highlight_of(&sidebar, "Login page", cx),
++        vec![0, 1, 2, 3, 4]
++    );
++}
+diff --git a/crates/sidebar/src/sidebar_tags_notify_tests.rs b/crates/sidebar/src/sidebar_tags_notify_tests.rs
+new file mode 100644
+index 0000000..f0f4187
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_tags_notify_tests.rs
+@@ -0,0 +1,252 @@
++// Story 037, task 5.3 — rows a `#` term hides keep their unread notification and their
++// last-access time, and show them again once the term is removed. Requirement: R4.15 (Q5, Q11).
++// Tech review note N1.
++//
++// Materialize in `crates/sidebar/src/sidebar.rs`, beside the other `sidebar_tags` modules:
++//     #[cfg(test)]
++//     mod sidebar_tags_notify_tests;
++// Filter: `cargo test -p sidebar sidebar_tags`.
++//
++// Reuses 5.1's `pub(super)` fixtures (`two_projects`, `save`, `tag`, `pin`) and story 032's
++// helpers from `sidebar_tests.rs`. Assumed seams, each named in ONE helper below:
++//   - `row_state()`: whether a thread is listed, and whether its row carries the unread mark
++//     (`SidebarContents::is_thread_notified`, what the row's dot is drawn from);
++//   - `switcher_order()`: `Sidebar::mru_entries_for_switcher`, the list the ctrl-tab switcher is
++//     built from, sorted by `switcher_entry_cmp` (last access first);
++//   - `opened()`: `Sidebar::record_thread_access`, what opening a thread records.
++//
++// The rule is "a row the TAG TERM hides is hidden, not gone" — 0063's devtools-only policy.
++// Hostile halves first:
++//   - wrongly gone (the defect): an untagged thread that completes while `#review` hides it, and
++//     a thread opened before the term was typed, lose their mark and their place in the switcher;
++//     the same for a pinned row the term hides (R4.15 says EVERY row — see the note on that test);
++//   - wrongly kept: a thread deleted while the term is typed is gone, so its access time must not
++//     survive (a fix that simply skips the purge under a `#` term keeps it);
++//   - plain text stays today's: a row the TEXT hides is dropped as it is upstream (ToDo 3: with no
++//     keys nothing is registered).
++// Regression guards, green on the tip: `a_thread_deleted_under_a_tag_term_is_forgotten`,
++// `plain_text_hiding_is_todays_behaviour`.
++
++use super::*;
++use crate::sidebar_tags_tests::{ALPHA, pin, save, tag, two_projects};
++use crate::sidebar_tests::{
++    init_test_project_with_agent_panel, save_test_thread_metadata, setup_sidebar_with_agent_panel,
++    type_in_search,
++};
++use acp_thread::StubAgentConnection;
++use agent_client_protocol::schema::v1 as acp_v1;
++use agent_ui::test_support::{
++    active_session_id, active_thread_id, open_thread_with_connection, send_message,
++};
++use gpui::{TestAppContext, VisualTestContext};
++use pretty_assertions::assert_eq;
++
++const PROJECT_A: &str = "/project-a";
++
++// ── Reading the sidebar ────────────────────────────────────────────────────
++
++/// `None` when the thread has no row; `Some(notified)` when it is listed.
++fn row_state(
++    sidebar: &Entity<Sidebar>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> Option<bool> {
++    sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .find_map(|entry| match entry {
++                ListEntry::Thread(thread) if thread.metadata.thread_id == thread_id => {
++                    Some(sidebar.contents.is_thread_notified(&thread_id))
++                }
++                _ => None,
++            })
++    })
++}
++
++fn switcher_order(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> Vec<ThreadId> {
++    sidebar.read_with(cx, |sidebar, cx| {
++        sidebar
++            .mru_entries_for_switcher(cx)
++            .iter()
++            .filter_map(|entry| entry.thread_id())
++            .collect()
++    })
++}
++
++fn opened(sidebar: &Entity<Sidebar>, thread_id: ThreadId, cx: &mut VisualTestContext) {
++    sidebar.update(cx, |sidebar, _| sidebar.record_thread_access(&thread_id));
++}
++
++// ═══ R4.15 — hidden, not gone ═════════════════════════════════════════════
++
++// The defect, as N1 describes it: the filter holds `#review`; an untagged thread in a background
++// workspace goes Running -> Completed while the term hides it. Clearing the filter must show its
++// unread mark — the transition is seen only once, so a mark dropped here never comes back.
++#[gpui::test]
++async fn a_thread_completing_under_a_tag_term_shows_its_notification_after(
++    cx: &mut TestAppContext,
++) {
++    let project_a = init_test_project_with_agent_panel(PROJECT_A, cx).await;
++    cx.update(agent_ui::thread_organization::init);
++    cx.run_until_parked();
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
++    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
++
++    let connection = StubAgentConnection::new();
++    open_thread_with_connection(&panel, connection.clone(), cx);
++    send_message(&panel, cx);
++    let session = active_session_id(&panel, cx);
++    let hidden = active_thread_id(&panel, cx);
++    save_test_thread_metadata(&session, &project_a, cx).await;
++    cx.update(|_, cx| {
++        connection.send_update(
++            session.clone(),
++            acp_v1::SessionUpdate::AgentMessageChunk(acp_v1::ContentChunk::new("chunk".into())),
++            cx,
++        );
++    });
++    cx.run_until_parked();
++    let review = save("r1", "Review notes", PROJECT_A, 5, cx);
++    tag(review, "review", cx);
++
++    // A second workspace, activated: the running thread is now out of sight.
++    let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
++    let project_b = project::Project::test(fs, [], cx).await;
++    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
++        multi_workspace.test_add_workspace(project_b, window, cx);
++    });
++    cx.run_until_parked();
++    assert_eq!(
++        row_state(&sidebar, hidden, cx),
++        Some(false),
++        "fixture: listed, running, no mark yet"
++    );
++
++    type_in_search(&sidebar, "#review", cx);
++    assert_eq!(row_state(&sidebar, hidden, cx), None, "R4.1: hidden");
++    assert_eq!(row_state(&sidebar, review, cx), Some(false));
++
++    connection.end_turn(session.clone(), acp_v1::StopReason::EndTurn);
++    cx.run_until_parked();
++    assert_eq!(row_state(&sidebar, hidden, cx), None, "still hidden");
++
++    type_in_search(&sidebar, "", cx);
++    assert_eq!(
++        row_state(&sidebar, hidden, cx),
++        Some(true),
++        "R4.15: the thread that completed while the tag term hid it keeps its unread mark"
++    );
++}
++
++// A thread opened before the term was typed keeps its last-access time: with the term cleared it
++// is still first in the switcher, ahead of threads updated later than it.
++#[gpui::test]
++async fn a_thread_hidden_by_a_tag_term_keeps_its_switcher_place(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let older = save("a1", "Older thread", ALPHA, 1, cx);
++    let newer = save("a2", "Newer thread", ALPHA, 3, cx);
++    let review = save("a3", "Review notes", ALPHA, 5, cx);
++    tag(review, "review", cx);
++    opened(&sidebar, older, cx);
++    assert_eq!(
++        switcher_order(&sidebar, cx),
++        vec![older, review, newer],
++        "fixture: the opened thread first, then by time"
++    );
++
++    type_in_search(&sidebar, "#review", cx);
++    assert_eq!(row_state(&sidebar, older, cx), None, "R4.1: hidden");
++    type_in_search(&sidebar, "", cx);
++
++    assert_eq!(
++        switcher_order(&sidebar, cx),
++        vec![older, review, newer],
++        "R4.15: the hidden thread keeps its last-access time"
++    );
++}
++
++// The Pinned section's share of R4.15 ("every thread row the term hides"): an untagged pinned row
++// the term hides keeps its last-access time too. NOTE for the executor: the Pinned rows are
++// dropped by `retain_tagged_rows` (hook f), not by `retain_tagged`, so 5.3's fix as worded
++// ("`retain_tagged` registers the ids it drops") leaves this test red; it needs hook f's call
++// line, also this story's own, to pass the same set.
++#[gpui::test]
++async fn a_pinned_row_hidden_by_a_tag_term_keeps_its_switcher_place(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let pinned = save("a1", "Pinned thread", ALPHA, 1, cx);
++    let newer = save("a2", "Newer thread", ALPHA, 3, cx);
++    let review = save("a3", "Review notes", ALPHA, 5, cx);
++    pin(pinned, cx);
++    tag(review, "review", cx);
++    opened(&sidebar, pinned, cx);
++    assert_eq!(
++        switcher_order(&sidebar, cx),
++        vec![pinned, review, newer],
++        "fixture"
++    );
++
++    type_in_search(&sidebar, "#review", cx);
++    assert_eq!(row_state(&sidebar, pinned, cx), None, "R4.7: hidden");
++    type_in_search(&sidebar, "", cx);
++
++    assert_eq!(
++        switcher_order(&sidebar, cx),
++        vec![pinned, review, newer],
++        "R4.15: the hidden pinned row keeps its last-access time"
++    );
++}
++
++// ═══ Regression guards ════════════════════════════════════════════════════
++
++// Guard, the wrongly-kept half: a thread DELETED while the term is typed is gone, not hidden, so
++// the purge still forgets it (a fix that skips the purge under a `#` term would keep it).
++#[gpui::test]
++async fn a_thread_deleted_under_a_tag_term_is_forgotten(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let gone = save("a1", "Gone thread", ALPHA, 1, cx);
++    let review = save("a2", "Review notes", ALPHA, 5, cx);
++    tag(review, "review", cx);
++    opened(&sidebar, gone, cx);
++
++    type_in_search(&sidebar, "#review", cx);
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(gone, cx))
++    });
++    cx.run_until_parked();
++    type_in_search(&sidebar, "", cx);
++
++    assert_eq!(row_state(&sidebar, gone, cx), None);
++    assert!(
++        sidebar.read_with(cx, |sidebar, _| !sidebar
++            .thread_last_accessed
++            .contains_key(&gone)),
++        "a deleted thread's access time is not kept"
++    );
++}
++
++// Guard, ToDo 3: with plain text only, the rows are today's, and a row the TEXT hides loses its
++// access time as it does upstream — nothing is registered without a `#` key.
++#[gpui::test]
++async fn plain_text_hiding_is_todays_behaviour(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let older = save("a1", "Older thread", ALPHA, 1, cx);
++    let newer = save("a2", "Newer thread", ALPHA, 3, cx);
++    let review = save("a3", "Review notes", ALPHA, 5, cx);
++    tag(review, "review", cx);
++    opened(&sidebar, older, cx);
++
++    type_in_search(&sidebar, "Review", cx);
++    assert_eq!(row_state(&sidebar, review, cx), Some(false));
++    assert_eq!(row_state(&sidebar, older, cx), None);
++    assert_eq!(row_state(&sidebar, newer, cx), None);
++    type_in_search(&sidebar, "", cx);
++
++    assert_eq!(
++        switcher_order(&sidebar, cx),
++        vec![review, newer, older],
++        "R4.5: a text-hidden row is dropped from the access record, as upstream"
++    );
++}
+diff --git a/crates/sidebar/src/sidebar_tags_tests.rs b/crates/sidebar/src/sidebar_tags_tests.rs
+new file mode 100644
+index 0000000..2d60b19
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_tags_tests.rs
+@@ -0,0 +1,495 @@
++// Story 037, task 5.1 (part 1 of 2) — tags in the threads sidebar: the "Tags…" entry of the
++// thread menu and the chips on group and pinned rows, plus the fixtures both parts share. Part 2,
++// `sidebar_tags_filter_tests.rs`, holds the `#tag` filter. Two files because one would pass the
++// constitution's 500-line limit. Requirements here: R1.1, R1.2, R1.10, R2.1, R2.3, R2.4, R2.6 (Q5,
++// Q11, Q12).
++//
++// Materialize with, in `crates/sidebar/src/sidebar.rs`, beside `mod sidebar_organization_tests;`:
++//     #[cfg(test)]
++//     mod sidebar_tags_tests;
++//     #[cfg(test)]
++//     mod sidebar_tags_filter_tests;
++// Filter: `cargo test -p sidebar sidebar_tags` (both files).
++//
++// Reuses story 032's `pub(super)` helpers from `sidebar_tests.rs`. Assumed seams — each named in
++// ONE place below, adjust there if it moved:
++//   - `chips_of()`: `thread_tags::tag_chips_for(thread_id, cx) -> Vec<SharedString>` (task 5.1
++//     Objective; `pub(crate)` at least), the full list a row is given, in first spelling,
++//     ordered by key (`ThreadItem` draws three plus "+N", task 2.1);
++//   - `CHIPS_SELECTOR`: the debug selector task 2.1 puts on a row's chips, so a test can tell
++//     that a row DRAWS its chips, not only that a function returns them;
++//   - `TAGS_MENU_ITEM`: the menu entry "Tags…" (U+2026, as in R1.1), read through the
++//     `MENU_ITEM-<label>` selector every `ContextMenu` entry carries;
++//   - `tags_picker_open()`: `agent_ui::thread_tags_picker::ThreadTagsPicker` (a `pub mod`), the
++//     workspace's active modal once "Tags…" is chosen (task 4.1). The menu test types into the
++//     opened picker and confirms its first entry, so it also proves the picker targets the
++//     clicked thread;
++//   - `tooltip_lists()`: task 2.1's chips tooltip shows after GPUI's hover delay and renders one
++//     label per tag, each with the debug selector `THREAD_ITEM_TAG_TOOLTIP-<display>` (a
++//     selector, because a GPUI test cannot read painted text).
++//
++// Hostile halves first: no chip drawn anywhere while no thread carries a tag, and none on the
++// untagged neighbour, before the tagged row draws its own; a second spelling of a tag ("rust"
++// after "Rust") is not a second chip; the picker opened from one row never tags its neighbour;
++// the tooltip lists the tags hidden behind "+N", and never another thread's tag.
++// `tags_entry_is_absent_without_the_store` also passes on the series tip (a regression guard).
++//
++// NOT covered here: R2.7 (chips after a restart) — the store's persistence (0048) plus the GUI
++// proof (task 9.1).
++
++use super::*;
++use crate::sidebar_tests::{init_test, save_thread_metadata_with_main_paths, setup_sidebar};
++use agent_ui::thread_organization::ThreadOrganizationStore;
++use agent_ui::thread_tags_picker::ThreadTagsPicker;
++use fs::FakeFs;
++use gpui::{Bounds, MouseButton, Point, TestAppContext, VisualTestContext};
++use pretty_assertions::assert_eq;
++
++pub(super) const ALPHA: &str = "/alpha";
++pub(super) const BETA: &str = "/beta";
++
++/// Task 2.1's debug selector on a row's chips.
++pub(super) const CHIPS_SELECTOR: &str = "THREAD_ITEM_TAG_CHIPS";
++/// R1.1's entry, as `ContextMenu` names its debug selector.
++pub(super) const TAGS_MENU_ITEM: &str = "MENU_ITEM-Tags…";
++
++// ── Setup ──────────────────────────────────────────────────────────────────
++
++/// A window on `ALPHA` and `BETA` (two project groups) with its sidebar open; the organization
++/// store is installed before the sidebar exists when `with_store`.
++pub(super) async fn two_projects(
++    with_store: bool,
++    cx: &mut TestAppContext,
++) -> (
++    Entity<MultiWorkspace>,
++    Entity<Sidebar>,
++    &mut VisualTestContext,
++) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    for path in [ALPHA, BETA] {
++        fs.insert_tree(path, serde_json::json!({ "src": {} })).await;
++    }
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        if with_store {
++            agent_ui::thread_organization::init(cx);
++        }
++    });
++    cx.run_until_parked();
++    let alpha = project::Project::test(fs.clone(), [ALPHA.as_ref()], cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(alpha, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    let beta = project::Project::test(fs as Arc<dyn fs::Fs>, [BETA.as_ref()], cx).await;
++    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
++        multi_workspace.test_add_workspace(beta, window, cx);
++    });
++    cx.run_until_parked();
++    (multi_workspace, sidebar, cx)
++}
++
++/// Saves a thread with a sent message in the local project `folder`; a later `minute` is more
++/// recent.
++pub(super) fn save(
++    session: &str,
++    title: &str,
++    folder: &str,
++    minute: u32,
++    cx: &mut VisualTestContext,
++) -> ThreadId {
++    let paths = PathList::new(&[PathBuf::from(folder)]);
++    save_thread_metadata_with_main_paths(
++        session,
++        title,
++        paths.clone(),
++        paths,
++        chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 20, 12, minute, 0).unwrap(),
++        cx,
++    );
++    let session_id = acp::SessionId::new(Arc::from(session));
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entries()
++            .find(|entry| entry.session_id.as_ref() == Some(&session_id))
++            .map(|entry| entry.thread_id)
++            .expect("fixture: the thread was saved")
++    })
++}
++
++// ── The store, driven directly (fixtures, not the code under test) ─────────
++
++pub(super) fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store accepts a valid tag on a thread with a message");
++    cx.run_until_parked();
++}
++
++pub(super) fn untag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.remove_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store removes a tag of a thread with a message");
++    cx.run_until_parked();
++}
++
++pub(super) fn pin(thread_id: ThreadId, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| store.pin(thread_id, cx))
++    })
++    .expect("fixture: the store pins a thread with a message");
++    cx.run_until_parked();
++}
++
++pub(super) fn stored_tags(thread_id: ThreadId, cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .tags(thread_id)
++            .into_iter()
++            .map(|tag| tag.display.to_string())
++            .collect()
++    })
++}
++
++pub(super) fn group_row_ix(
++    sidebar: &Entity<Sidebar>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> usize {
++    sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .position(|entry| {
++                matches!(entry, ListEntry::Thread(thread)
++                    if thread.metadata.thread_id == thread_id
++                        && thread.pinned_project_label.is_none())
++            })
++            .expect("fixture: the thread has a row in its group")
++    })
++}
++
++pub(super) fn pinned_row_ix(
++    sidebar: &Entity<Sidebar>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) -> usize {
++    sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .position(|entry| {
++                matches!(entry, ListEntry::Thread(thread)
++                    if thread.metadata.thread_id == thread_id
++                        && thread.pinned_project_label.is_some())
++            })
++            .expect("fixture: the thread has a pinned row")
++    })
++}
++
++/// The bounds of entry `ix`, after a frame of the window.
++pub(super) fn entry_bounds(
++    sidebar: &Entity<Sidebar>,
++    ix: usize,
++    cx: &mut VisualTestContext,
++) -> Bounds<Pixels> {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++    sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .list_state
++            .bounds_for_item(ix)
++            .expect("fixture: the entry is rendered")
++    })
++}
++
++pub(super) fn right_click(position: Point<Pixels>, cx: &mut VisualTestContext) {
++    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
++    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
++    cx.run_until_parked();
++}
++
++/// The chips a row of `thread_id` is given (seam: task 5.1's `tag_chips_for`).
++pub(super) fn chips_of(thread_id: ThreadId, cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        thread_tags::tag_chips_for(thread_id, cx)
++            .into_iter()
++            .map(|chip| chip.to_string())
++            .collect()
++    })
++}
++
++/// Whether the window drew any chips (seam: task 2.1's selector), after a fresh frame.
++pub(super) fn chips_drawn(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> bool {
++    if sidebar.read_with(cx, |sidebar, _| sidebar.contents.entries.is_empty()) {
++        return false;
++    }
++    entry_bounds(sidebar, 0, cx);
++    cx.debug_bounds(CHIPS_SELECTOR).is_some()
++}
++
++/// Whether the chips the window drew sit on entry `ix`. Meaningful while one row only carries
++/// tags: a selector query answers with the first element it finds.
++pub(super) fn chips_drawn_on(
++    sidebar: &Entity<Sidebar>,
++    ix: usize,
++    cx: &mut VisualTestContext,
++) -> bool {
++    let row = entry_bounds(sidebar, ix, cx);
++    cx.debug_bounds(CHIPS_SELECTOR)
++        .is_some_and(|chips| row.contains(&chips.center()))
++}
++
++pub(super) fn tags_picker_open(
++    multi_workspace: &Entity<MultiWorkspace>,
++    cx: &mut VisualTestContext,
++) -> bool {
++    multi_workspace.read_with(cx, |multi_workspace, cx| {
++        multi_workspace
++            .workspace()
++            .read(cx)
++            .active_modal::<ThreadTagsPicker>(cx)
++            .is_some()
++    })
++}
++
++// ═══ The "Tags…" entry (R1.1, R1.2, R1.10) ═════════════════════════════════
++
++// R1.1, R1.2 — a group row and a pinned row both offer "Tags…", and choosing it opens the Tags
++// picker FOR THAT THREAD: typing a new tag and confirming the first entry (R1.4's "Add tag")
++// tags the clicked thread and no other.
++#[gpui::test]
++async fn tags_entry_on_group_and_pinned_rows_opens_the_picker_for_that_thread(
++    cx: &mut TestAppContext,
++) {
++    let (multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let fix_login = save("a1", "Fix login", ALPHA, 2, cx);
++    let neighbour = save("a2", "Login page", ALPHA, 1, cx);
++    let write_docs = save("b1", "Write docs", BETA, 1, cx);
++    pin(write_docs, cx);
++
++    let ix = group_row_ix(&sidebar, fix_login, cx);
++    right_click(entry_bounds(&sidebar, ix, cx).center(), cx);
++    cx.debug_bounds("MENU_ITEM-Archive Thread")
++        .expect("fixture: the thread's context menu is open");
++    let item = cx
++        .debug_bounds(TAGS_MENU_ITEM)
++        .expect("R1.1: a thread row of a project group offers Tags…");
++    let pin = cx
++        .debug_bounds("MENU_ITEM-Pin Thread")
++        .expect("fixture: Pin Thread is offered");
++    let gap = item.top() - pin.top();
++    assert!(
++        gap > px(0.) && gap < pin.size.height * 1.5,
++        "R1.1: right after Pin Thread"
++    );
++    cx.simulate_click(item.center(), Modifiers::none());
++    cx.run_until_parked();
++    assert!(
++        tags_picker_open(&multi_workspace, cx),
++        "R1.2: Tags… opens the Tags picker"
++    );
++    cx.simulate_input("frommenu");
++    cx.run_until_parked();
++    cx.dispatch_action(menu::Confirm);
++    cx.run_until_parked();
++    assert_eq!(stored_tags(fix_login, cx), vec!["frommenu"]);
++    assert_eq!(
++        stored_tags(neighbour, cx),
++        Vec::<String>::new(),
++        "the picker is for the clicked thread, not its neighbour"
++    );
++    cx.dispatch_action(menu::Cancel);
++    cx.run_until_parked();
++    assert!(!tags_picker_open(&multi_workspace, cx));
++
++    let ix = pinned_row_ix(&sidebar, write_docs, cx);
++    right_click(entry_bounds(&sidebar, ix, cx).center(), cx);
++    cx.debug_bounds("MENU_ITEM-Archive Thread")
++        .expect("fixture: the pinned row's context menu is open");
++    let item = cx
++        .debug_bounds(TAGS_MENU_ITEM)
++        .expect("R1.1: a pinned row offers Tags…");
++    cx.simulate_click(item.center(), Modifiers::none());
++    cx.run_until_parked();
++    assert!(tags_picker_open(&multi_workspace, cx));
++    cx.simulate_input("frompinned");
++    cx.run_until_parked();
++    cx.dispatch_action(menu::Confirm);
++    cx.run_until_parked();
++    assert_eq!(stored_tags(write_docs, cx), vec!["frompinned"]);
++    assert_eq!(stored_tags(fix_login, cx), vec!["frommenu"]);
++}
++
++// R1.10 — without the organization store, the menu has no "Tags…" (regression guard: also green
++// on the series tip).
++#[gpui::test]
++async fn tags_entry_is_absent_without_the_store(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(false, cx).await;
++    let fix_login = save("a1", "Fix login", ALPHA, 1, cx);
++
++    let ix = group_row_ix(&sidebar, fix_login, cx);
++    right_click(entry_bounds(&sidebar, ix, cx).center(), cx);
++    cx.debug_bounds("MENU_ITEM-Archive Thread")
++        .expect("fixture: the thread's context menu is open");
++    assert!(
++        cx.debug_bounds(TAGS_MENU_ITEM).is_none(),
++        "R1.10: no Tags… without the store"
++    );
++}
++
++// ═══ Chips (R2.1, R2.3, R2.4, R2.6) ══════════════════════════════════════════════
++
++// R2.4 first (no chip drawn anywhere while no thread carries a tag), then R2.1: the tagged row
++// draws chips, the untagged neighbour draws none, and the list is in first spelling, by key.
++#[gpui::test]
++async fn chips_are_drawn_on_a_tagged_group_row_only(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let tagged = save("a1", "Fix login", ALPHA, 2, cx);
++    let plain = save("a2", "Login page", ALPHA, 1, cx);
++    let elsewhere = save("b1", "Write docs", BETA, 1, cx);
++    assert!(
++        !chips_drawn(&sidebar, cx),
++        "R2.4: no thread carries a tag, no row draws chips"
++    );
++
++    // "Rust" is typed first, on another thread: that spelling is the chip's on every thread.
++    tag(elsewhere, "Rust", cx);
++    tag(tagged, "Zeta", cx);
++    tag(tagged, "rust", cx);
++    tag(tagged, "alpha", cx);
++    tag(tagged, "Mid", cx);
++    untag(elsewhere, "Rust", cx);
++
++    assert_eq!(
++        chips_of(tagged, cx),
++        vec!["alpha", "Mid", "Rust", "Zeta"],
++        "R2.1: every tag once, in its first spelling, ordered by key"
++    );
++    assert_eq!(chips_of(plain, cx), Vec::<String>::new());
++    let ix = group_row_ix(&sidebar, plain, cx);
++    assert!(
++        !chips_drawn_on(&sidebar, ix, cx),
++        "R2.4: the untagged row draws no chips"
++    );
++    let ix = group_row_ix(&sidebar, tagged, cx);
++    assert!(
++        chips_drawn_on(&sidebar, ix, cx),
++        "R2.1: the tagged row draws its chips"
++    );
++}
++
++// R2.1 — a pinned row draws its thread's chips too.
++#[gpui::test]
++async fn chips_are_drawn_on_a_pinned_row(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    save("a1", "Fix login", ALPHA, 2, cx);
++    let write_docs = save("b1", "Write docs", BETA, 1, cx);
++    pin(write_docs, cx);
++    tag(write_docs, "docs", cx);
++
++    let ix = pinned_row_ix(&sidebar, write_docs, cx);
++    assert!(
++        chips_drawn_on(&sidebar, ix, cx),
++        "R2.1 in the Pinned section"
++    );
++    assert_eq!(chips_of(write_docs, cx), vec!["docs"]);
++}
++
++// R2.6 — a tag added in the store shows on the thread's row in every window, and a removal
++// clears it there, with no action in either window.
++#[gpui::test]
++async fn a_tag_change_redraws_the_chips_in_every_window(cx: &mut TestAppContext) {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    for path in [ALPHA, BETA] {
++        fs.insert_tree(path, serde_json::json!({ "src": {} })).await;
++    }
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        agent_ui::thread_organization::init(cx);
++    });
++    cx.run_until_parked();
++    let project_a = project::Project::test(fs.clone(), [ALPHA.as_ref()], cx).await;
++    let project_b = project::Project::test(fs, [BETA.as_ref()], cx).await;
++    let window_a = cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
++    let window_b = cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
++    let mw_a = window_a.root(cx).unwrap();
++    let mw_b = window_b.root(cx).unwrap();
++    let cx_b = &mut VisualTestContext::from_window(window_b.into(), cx);
++    let sidebar_b = setup_sidebar(&mw_b, cx_b);
++    let cx_a = &mut VisualTestContext::from_window(window_a.into(), cx);
++    let sidebar_a = setup_sidebar(&mw_a, cx_a);
++    // Pinned, so both windows show a row of it.
++    let shared = save("a1", "Fix login", ALPHA, 1, cx_a);
++    pin(shared, cx_a);
++    cx_b.run_until_parked();
++    assert!(!chips_drawn(&sidebar_b, cx_b), "control: no tag yet");
++
++    tag(shared, "shared", cx_a);
++    cx_b.run_until_parked();
++
++    let ix = pinned_row_ix(&sidebar_a, shared, cx_a);
++    assert!(chips_drawn_on(&sidebar_a, ix, cx_a), "R2.6 window A");
++    let ix = pinned_row_ix(&sidebar_b, shared, cx_b);
++    assert!(
++        chips_drawn_on(&sidebar_b, ix, cx_b),
++        "R2.6 window B, which did nothing"
++    );
++
++    untag(shared, "shared", cx_a);
++    cx_b.run_until_parked();
++    assert!(!chips_drawn(&sidebar_b, cx_b), "R2.6 a removal clears it");
++}
++
++/// Whether the visible tooltip holds a label for `display` (seam: task 2.1's selectors).
++fn tooltip_lists(display: &'static str, cx: &mut VisualTestContext) -> bool {
++    let selector: &'static str = format!("THREAD_ITEM_TAG_TOOLTIP-{display}").leak();
++    cx.debug_bounds(selector).is_some()
++}
++
++// R2.3 — resting the pointer on the chips shows, after the hover delay, a tooltip listing EVERY
++// tag: the two hidden behind "+2" too. Hostile halves first: no tooltip before the delay, and
++// never a tag only another thread carries.
++#[gpui::test]
++async fn the_chips_tooltip_lists_every_tag_of_the_thread(cx: &mut TestAppContext) {
++    let (_multi_workspace, sidebar, cx) = two_projects(true, cx).await;
++    let tagged = save("a1", "Fix login", ALPHA, 2, cx);
++    let other = save("b1", "Write docs", BETA, 1, cx);
++    for name in ["eel", "dog", "cat", "bee", "ant"] {
++        tag(tagged, name, cx);
++    }
++    tag(other, "fox", cx);
++    let ix = group_row_ix(&sidebar, tagged, cx);
++    entry_bounds(&sidebar, ix, cx);
++    let chips = cx
++        .debug_bounds(CHIPS_SELECTOR)
++        .expect("fixture: the row draws its chips");
++
++    cx.simulate_mouse_move(chips.center(), None, Modifiers::none());
++    cx.run_until_parked();
++    assert!(!tooltip_lists("ant", cx), "no tooltip before the delay");
++    cx.executor()
++        .advance_clock(std::time::Duration::from_millis(600));
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++
++    for display in ["ant", "bee", "cat", "dog", "eel"] {
++        assert!(
++            tooltip_lists(display, cx),
++            "R2.3: the tooltip lists {display}"
++        );
++    }
++    assert!(
++        !tooltip_lists("fox", cx),
++        "another thread's tag is not listed"
++    );
++}
+diff --git a/crates/sidebar/src/thread_tags.rs b/crates/sidebar/src/thread_tags.rs
+new file mode 100644
+index 0000000..64e0577
+--- /dev/null
++++ b/crates/sidebar/src/thread_tags.rs
+@@ -0,0 +1,115 @@
++//! Tags in the threads sidebar (story 037): the "Tags…" menu entry, the chips on a row and the
++//! `#tag` part of the filter. `sidebar.rs` only calls into it through one-line hooks.
++
++use std::collections::HashSet;
++use std::sync::Arc;
++
++use agent_ui::ThreadId;
++use agent_ui::thread_organization::ThreadOrganizationStore;
++use agent_ui::thread_tag_filter::TagQuery;
++use agent_ui::thread_tags_picker::ThreadTagsPicker;
++use gpui::{App, Entity, SharedString, WeakEntity};
++use ui::ContextMenu;
++
++use crate::{Sidebar, TerminalEntry, ThreadEntry};
++
++/// Every tag of the thread in its first spelling. The store keeps a thread's keys sorted, which
++/// is the order R2.1 asks for. Empty without the store: there is nowhere a tag could live.
++pub(crate) fn tag_chips_for(thread_id: ThreadId, cx: &App) -> Vec<SharedString> {
++    let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++        return Vec::new();
++    };
++    store
++        .read(cx)
++        .tags(thread_id)
++        .into_iter()
++        .map(|tag| tag.display)
++        .collect()
++}
++
++/// With `#` terms, keeps only the threads carrying every tag and drops every terminal and draft,
++/// none of which can carry one (R4.9). A tag-only query gets the kept threads back: an empty text
++/// matches nothing in the group's text loop, which would otherwise drop them all.
++///
++/// Every dropped thread goes into `hidden_thread_ids`: hidden, not gone (R4.15), so the rebuild's
++/// purge keeps its notification and access time for when the term is removed — 0063's rule for
++/// the devtools-only view. A notification is seen once, so one purged here never comes back.
++pub(crate) fn retain_tagged(
++    threads: &mut Vec<Arc<ThreadEntry>>,
++    terminals: &mut Vec<TerminalEntry>,
++    tag_query: &TagQuery,
++    hidden_thread_ids: &mut HashSet<ThreadId>,
++    cx: &App,
++) -> Option<Vec<Arc<ThreadEntry>>> {
++    if !tag_query.has_keys() {
++        return None;
++    }
++    terminals.clear();
++    let store = ThreadOrganizationStore::try_global(cx);
++    threads.retain(|thread| {
++        let kept = thread.draft.is_none() && carries_tags(store.as_ref(), tag_query, thread, cx);
++        if !kept {
++            hidden_thread_ids.insert(thread.metadata.thread_id);
++        }
++        kept
++    });
++    let text_is_empty = tag_query.text.as_deref().is_none_or(str::is_empty);
++    text_is_empty.then(|| threads.clone())
++}
++
++/// The Pinned section's share of the `#` terms (R4.7); its text part is matched by
++/// `filter_pinned_rows`, as before. Dropped rows go into `hidden_thread_ids`, as in
++/// `retain_tagged`: R4.15 covers every row the term hides, pinned ones included.
++pub(crate) fn retain_tagged_rows(
++    rows: Vec<Arc<ThreadEntry>>,
++    tag_query: &TagQuery,
++    hidden_thread_ids: &mut HashSet<ThreadId>,
++    cx: &App,
++) -> Vec<Arc<ThreadEntry>> {
++    if !tag_query.has_keys() {
++        return rows;
++    }
++    let store = ThreadOrganizationStore::try_global(cx);
++    let (kept, hidden): (Vec<_>, Vec<_>) = rows
++        .into_iter()
++        .partition(|row| carries_tags(store.as_ref(), tag_query, row, cx));
++    hidden_thread_ids.extend(hidden.iter().map(|row| row.metadata.thread_id));
++    kept
++}
++
++fn carries_tags(
++    store: Option<&Entity<ThreadOrganizationStore>>,
++    tag_query: &TagQuery,
++    thread: &ThreadEntry,
++    cx: &App,
++) -> bool {
++    store.is_some_and(|store| tag_query.thread_matches(store.read(cx), thread.metadata.thread_id))
++}
++
++/// "Tags…" for the thread's menu (R1.1), offered only when the store is installed (R1.10).
++pub(crate) fn tags_menu_entry(
++    menu: ContextMenu,
++    thread_id: ThreadId,
++    sidebar: WeakEntity<Sidebar>,
++    cx: &App,
++) -> ContextMenu {
++    if ThreadOrganizationStore::try_global(cx).is_none() {
++        return menu;
++    }
++    menu.entry("Tags…", None, move |window, cx| {
++        // Resolved on click: the active workspace can change while the menu is open.
++        let workspace = sidebar
++            .read_with(cx, |sidebar, cx| sidebar.active_workspace(cx))
++            .ok()
++            .flatten();
++        let Some(workspace) = workspace else {
++            log::warn!("sidebar: no workspace to open the tags picker for thread {thread_id:?}");
++            return;
++        };
++        workspace.update(cx, |workspace, cx| {
++            workspace.toggle_modal(window, cx, |window, cx| {
++                ThreadTagsPicker::new(thread_id, window, cx)
++            });
++        });
++    })
++}
+diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
+index 7cf5748..2ecb7fb 100644
+--- a/crates/ui/src/components/ai/thread_item.rs
++++ b/crates/ui/src/components/ai/thread_item.rs
+@@ -64,6 +64,8 @@ pub struct ThreadItem {
+     on_hover: Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>,
+     action_slot: Option<AnyElement>,
+     base_bg: Option<Hsla>,
++    badges: Vec<(IconName, SharedString)>,
++    tags: Vec<SharedString>,
+ }
+ 
+ impl ThreadItem {
+@@ -99,6 +101,8 @@ impl ThreadItem {
+             on_hover: Box::new(|_, _, _| {}),
+             action_slot: None,
+             base_bg: None,
++            badges: Vec::new(),
++            tags: Vec::new(),
+         }
+     }
+ 
+@@ -246,6 +250,41 @@ impl ThreadItem {
+         self.base_bg = Some(color);
+         self
+     }
++
++    /// A small icon drawn right after the title, with `tooltip` saying what it marks.
++    pub fn badge(mut self, icon: IconName, tooltip: impl Into<SharedString>) -> Self {
++        self.badges.push((icon, tooltip.into()));
++        self
++    }
++
++    /// Tag chips drawn after every badge, in the order given; callers pass them sorted.
++    pub fn tags(mut self, tags: Vec<SharedString>) -> Self {
++        self.tags = tags;
++        self
++    }
++
++    // Badges and chips must stay visible right after the title, so a long title ends in an
++    // ellipsis instead of running under the fade, which would also paint over them.
++    fn truncates_title(&self, opaque_window: bool) -> bool {
++        !opaque_window || self.has_badge_or_chip()
++    }
++
++    fn has_badge_or_chip(&self) -> bool {
++        !self.badges.is_empty() || !self.tags.is_empty()
++    }
++}
++
++// R2.2: three chips keep a narrow sidebar row readable; the rest collapse into one "+N" chip,
++// and the chips' tooltip still names every tag.
++const MAX_TAG_CHIPS: usize = 3;
++
++fn tag_chip_labels(tags: &[SharedString]) -> Vec<SharedString> {
++    let mut labels: Vec<SharedString> = tags.iter().take(MAX_TAG_CHIPS).cloned().collect();
++    let hidden = tags.len().saturating_sub(MAX_TAG_CHIPS);
++    if hidden > 0 {
++        labels.push(format!("+{hidden}").into());
++    }
++    labels
+ }
+ 
+ impl RenderOnce for ThreadItem {
+@@ -258,6 +297,8 @@ impl RenderOnce for ThreadItem {
+         let opaque_window = cx.theme().window_background_appearance()
+             == WindowBackgroundAppearance::Opaque
+             && raw_bg.a >= 1.0;
++        let truncate_title = self.truncates_title(opaque_window);
++        let has_badge_or_chip = self.has_badge_or_chip();
+         let apparent_bg = color.background.blend(raw_bg);
+ 
+         let base_bg = if self.selected {
+@@ -349,13 +390,83 @@ impl RenderOnce for ThreadItem {
+ 
+         let title = self.title;
+         let highlight_positions = self.highlight_positions;
++        let badges = (!self.badges.is_empty()).then(|| {
++            h_flex()
++                .debug_selector(|| "THREAD_ITEM_BADGE".to_owned())
++                .flex_none()
++                .gap_1()
++                .children(
++                    self.badges
++                        .into_iter()
++                        .enumerate()
++                        .map(|(ix, (icon, tooltip))| {
++                            // One id per badge: a shared id would give two badges one hover and
++                            // tooltip state, so resting on the second would show the first's
++                            // tooltip (R3.4).
++                            h_flex()
++                                .id(("thread-item-badge", ix))
++                                .debug_selector(move || format!("THREAD_ITEM_BADGE_{ix}"))
++                                .flex_none()
++                                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
++                                .tooltip(Tooltip::element(move |_, _| {
++                                    div()
++                                        .debug_selector(move || {
++                                            format!("THREAD_ITEM_BADGE_TOOLTIP-{ix}")
++                                        })
++                                        .child(tooltip.clone())
++                                        .into_any_element()
++                                }))
++                        }),
++                )
++        });
++        let tag_chips = (!self.tags.is_empty()).then(|| {
++            let chip_labels = tag_chip_labels(&self.tags);
++            let tags = self.tags;
++            h_flex()
++                .id("thread-item-tags")
++                .debug_selector(|| "THREAD_ITEM_TAG_CHIPS".to_owned())
++                .flex_none()
++                .gap_1()
++                .children(chip_labels.into_iter().enumerate().map(|(ix, label)| {
++                    let selector = if ix < MAX_TAG_CHIPS {
++                        format!("THREAD_ITEM_TAG_CHIP_{ix}")
++                    } else {
++                        "THREAD_ITEM_TAG_MORE".to_owned()
++                    };
++                    // Q12: the chip carries its text, so a tag never depends on color alone.
++                    div()
++                        .debug_selector(move || selector)
++                        .flex_none()
++                        .max_w_20()
++                        .px_1()
++                        .rounded_sm()
++                        .border_1()
++                        .border_color(color.border_variant)
++                        .child(
++                            Label::new(label)
++                                .size(LabelSize::XSmall)
++                                .color(Color::Muted)
++                                .truncate(),
++                        )
++                }))
++                .tooltip(Tooltip::element(move |_, _| {
++                    v_flex()
++                        .children(tags.iter().map(|tag| {
++                            let selector = format!("THREAD_ITEM_TAG_TOOLTIP-{tag}");
++                            div()
++                                .debug_selector(move || selector)
++                                .child(Label::new(tag.clone()).size(LabelSize::Small))
++                        }))
++                        .into_any_element()
++                }))
++        });
+ 
+         let title_label = if let Some(title_slot) = self.title_slot {
+             title_slot
+         } else if self.title_generating {
+             Label::new(title)
+                 .color(Color::Muted)
+-                .when(!opaque_window, |label| label.truncate())
++                .when(truncate_title, |label| label.truncate())
+                 .with_animation(
+                     "generating-title",
+                     Animation::new(Duration::from_secs(2))
+@@ -367,12 +478,12 @@ impl RenderOnce for ThreadItem {
+         } else if highlight_positions.is_empty() {
+             Label::new(title)
+                 .when_some(self.title_label_color, |label, color| label.color(color))
+-                .when(!opaque_window, |label| label.truncate())
++                .when(truncate_title, |label| label.truncate())
+                 .into_any_element()
+         } else {
+             HighlightedLabel::new(title, highlight_positions)
+                 .when_some(self.title_label_color, |label, color| label.color(color))
+-                .when(!opaque_window, |label| label.truncate())
++                .when(truncate_title, |label| label.truncate())
+                 .into_any_element()
+         };
+ 
+@@ -453,11 +564,14 @@ impl RenderOnce for ThreadItem {
+                             .flex_1()
+                             .gap_1p5()
+                             .child(icon)
+-                            .child(title_label),
++                            .child(title_label)
++                            .children(badges)
++                            .children(tag_chips),
++                    )
++                    .when(
++                        self.is_truncated && opaque_window && !has_badge_or_chip,
++                        |this| this.child(gradient_overlay),
+                     )
+-                    .when(self.is_truncated && opaque_window, |this| {
+-                        this.child(gradient_overlay)
+-                    })
+                     .when(self.hovered, |this| {
+                         this.when_some(self.action_slot, |this, slot| {
+                             this.child(
+@@ -986,6 +1100,10 @@ impl Component for ThreadItem {
+     }
+ }
+ 
++#[cfg(test)]
++#[path = "thread_item_badge_tests.rs"]
++mod badge_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/ui/src/components/ai/thread_item_badge_tests.rs b/crates/ui/src/components/ai/thread_item_badge_tests.rs
+new file mode 100644
+index 0000000..8ac3231
+--- /dev/null
++++ b/crates/ui/src/components/ai/thread_item_badge_tests.rs
+@@ -0,0 +1,365 @@
++// Story 055, task 14.1 (ui half) — `ThreadItem::badge(icon, tooltip)`, a builder drawn after the
++// title (design.md §B8). Requirement: R8.1 (Q2, Q5).
++// Story 037, task 2.1 — the badge became a list (`badges`, in call order) and the row gained tag
++// chips (`tags`), drawn after every badge, at most three plus "+N", with a tooltip naming every
++// tag. Requirements: R3.1, R3.3, R3.4, R2.2, R2.4, R2.5.
++//
++// Mounted in `crates/ui/src/components/ai/thread_item.rs`, beside `mod tests`:
++//     #[cfg(test)]
++//     #[path = "thread_item_badge_tests.rs"]
++//     mod badge_tests;
++// Filter: `cargo test -p ui thread_item` (paths `components::ai::thread_item::badge_tests::…`).
++//
++// A child module of `thread_item`, so it reads the builder's private fields. `badge_of()` reads
++// the first badge, which is what story 055's tests were written against.
++// Rendering is checked with debug selectors (the pattern of the existing `ACTION_SLOT` test),
++// because a GPUI test cannot read painted text: `THREAD_ITEM_BADGE` (the container, kept for 055
++// and story 039), `THREAD_ITEM_BADGE_<ix>`, `THREAD_ITEM_TAG_CHIPS`, `THREAD_ITEM_TAG_CHIP_<ix>`,
++// `THREAD_ITEM_TAG_MORE`, and inside tooltips `THREAD_ITEM_BADGE_TOOLTIP-<ix>` and
++// `THREAD_ITEM_TAG_TOOLTIP-<tag>`.
++//
++// Hostile halves first: a row WITHOUT the builder calls has no badge and no chip (a default would
++// mark every editor thread), and neither displaces the action slot — the row still routes a click
++// on its action slot to the action, not to the row.
++
++use super::*;
++use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point};
++use std::time::Duration;
++
++const LONG_TITLE: &str = "A rather long thread title that will truncate";
++
++fn badge_of(item: &ThreadItem) -> Option<(IconName, SharedString)> {
++    item.badges.first().cloned()
++}
++
++fn shared(values: &[&str]) -> Vec<SharedString> {
++    values
++        .iter()
++        .map(|value| SharedString::from(*value))
++        .collect()
++}
++
++fn init(cx: &mut TestAppContext) {
++    cx.update(|cx| {
++        let settings_store = settings::SettingsStore::test(cx);
++        cx.set_global(settings_store);
++        theme_settings::init(theme::LoadThemes::JustBase, cx);
++    });
++}
++
++#[test]
++fn hostile_no_badge_unless_asked() {
++    let item = ThreadItem::new("t", "Editor thread");
++    assert_eq!(badge_of(&item), None);
++    assert!(item.badges.is_empty());
++    assert!(item.tags.is_empty(), "R2.4: no chip unless asked");
++}
++
++#[test]
++fn the_builder_records_icon_and_tooltip() {
++    let item = ThreadItem::new("t", "Browser thread").badge(IconName::ToolWeb, "Devtools thread");
++    assert_eq!(
++        badge_of(&item),
++        Some((IconName::ToolWeb, SharedString::from("Devtools thread")))
++    );
++}
++
++#[test]
++fn two_badges_are_kept_in_call_order() {
++    let item = ThreadItem::new("t", "Subagent thread")
++        .badge(IconName::ArrowDownRight, "Ungrouped")
++        .badge(IconName::ToolWeb, "Devtools thread");
++    assert_eq!(
++        item.badges,
++        vec![
++            (IconName::ArrowDownRight, SharedString::from("Ungrouped")),
++            (IconName::ToolWeb, SharedString::from("Devtools thread")),
++        ],
++        "R3.1: call order"
++    );
++}
++
++#[test]
++fn tags_are_recorded_in_the_given_order() {
++    let item = ThreadItem::new("t", "Tagged").tags(shared(&["zeta", "alpha", "mid"]));
++    assert_eq!(item.tags, shared(&["zeta", "alpha", "mid"]));
++}
++
++#[test]
++fn four_tags_make_three_chips_and_plus_one() {
++    assert_eq!(
++        tag_chip_labels(&shared(&["a", "b", "c", "d"])),
++        shared(&["a", "b", "c", "+1"]),
++        "R2.2"
++    );
++    assert_eq!(
++        tag_chip_labels(&shared(&["a", "b", "c"])),
++        shared(&["a", "b", "c"])
++    );
++    assert_eq!(
++        tag_chip_labels(&shared(&["a", "b", "c", "d", "e", "f"])),
++        shared(&["a", "b", "c", "+3"])
++    );
++    assert!(tag_chip_labels(&[]).is_empty());
++}
++
++#[test]
++fn the_title_truncates_when_only_chips_are_present() {
++    let bare = ThreadItem::new("t", LONG_TITLE);
++    assert!(
++        !bare.truncates_title(true),
++        "R2.4: a bare row fades as before"
++    );
++    let chips = ThreadItem::new("t", LONG_TITLE).tags(shared(&["alpha"]));
++    assert!(
++        chips.truncates_title(true),
++        "R2.5: chips end the title in an ellipsis"
++    );
++    let badge = ThreadItem::new("t", LONG_TITLE).badge(IconName::ToolWeb, "Devtools thread");
++    assert!(badge.truncates_title(true));
++}
++
++#[derive(Default)]
++struct Row {
++    badges: usize,
++    tags: Vec<SharedString>,
++    row_clicks: usize,
++}
++
++impl Row {
++    fn badge() -> Self {
++        Self {
++            badges: 1,
++            ..Self::default()
++        }
++    }
++}
++
++impl Render for Row {
++    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let mut item = ThreadItem::new("thread", LONG_TITLE)
++            .hovered(true)
++            .action_slot(
++                div()
++                    .debug_selector(|| "ACTION_SLOT".to_owned())
++                    .child(IconButton::new("action", IconName::Archive).on_click(|_, _, _| {})),
++            )
++            .on_click(cx.listener(|row, _, _, _| row.row_clicks += 1));
++        if self.badges >= 2 {
++            item = item.badge(IconName::ArrowDownRight, "Ungrouped");
++        }
++        if self.badges >= 1 {
++            item = item.badge(IconName::ToolWeb, "Devtools thread");
++        }
++        if !self.tags.is_empty() {
++            item = item.tags(self.tags.clone());
++        }
++        div()
++            .size_full()
++            .p(px(20.))
++            .child(div().w(px(260.)).child(item))
++    }
++}
++
++fn open(cx: &mut TestAppContext, row: Row) -> (Entity<Row>, &mut VisualTestContext) {
++    init(cx);
++    cx.add_window_view(|_, _| row)
++}
++
++fn hover_for_tooltip(cx: &mut VisualTestContext, selector: &'static str) {
++    let bounds = cx.debug_bounds(selector).expect(selector);
++    cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
++    // Past gpui's 500 ms tooltip show delay.
++    cx.executor().advance_clock(Duration::from_millis(600));
++    cx.run_until_parked();
++}
++
++fn click_action_slot(view: &Entity<Row>, cx: &mut VisualTestContext) -> usize {
++    let action = cx.debug_bounds("ACTION_SLOT").expect("action bounds");
++    let position = point(action.center().x, action.center().y);
++    cx.simulate_mouse_move(position, None, Modifiers::default());
++    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
++    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
++    view.read_with(cx, |row, _| row.row_clicks)
++}
++
++#[gpui::test]
++fn the_badge_is_drawn_only_when_set(cx: &mut TestAppContext) {
++    let (_with, with_cx) = open(cx, Row::badge());
++    assert!(
++        with_cx.debug_bounds("THREAD_ITEM_BADGE").is_some(),
++        "R8.1: drawn"
++    );
++    assert!(with_cx.debug_bounds("THREAD_ITEM_BADGE_0").is_some());
++    assert!(with_cx.debug_bounds("THREAD_ITEM_BADGE_1").is_none());
++    let (_without, without_cx) = cx.add_window_view(|_, _| Row::default());
++    assert!(without_cx.debug_bounds("THREAD_ITEM_BADGE").is_none());
++    assert!(
++        without_cx.debug_bounds("THREAD_ITEM_TAG_CHIPS").is_none(),
++        "R2.4: no empty container"
++    );
++}
++
++#[gpui::test]
++fn two_badges_draw_in_order_with_their_own_selectors(cx: &mut TestAppContext) {
++    let (_view, cx) = open(
++        cx,
++        Row {
++            badges: 2,
++            ..Row::default()
++        },
++    );
++    assert!(cx.debug_bounds("THREAD_ITEM_BADGE").is_some());
++    let first = cx.debug_bounds("THREAD_ITEM_BADGE_0").expect("first badge");
++    let second = cx
++        .debug_bounds("THREAD_ITEM_BADGE_1")
++        .expect("second badge");
++    assert!(
++        first.right() <= second.left(),
++        "R3.1: {first:?} before {second:?}"
++    );
++}
++
++#[gpui::test]
++fn each_badge_shows_its_own_tooltip(cx: &mut TestAppContext) {
++    let (_view, cx) = open(
++        cx,
++        Row {
++            badges: 2,
++            ..Row::default()
++        },
++    );
++    hover_for_tooltip(cx, "THREAD_ITEM_BADGE_1");
++    assert!(
++        cx.debug_bounds("THREAD_ITEM_BADGE_TOOLTIP-1").is_some(),
++        "R3.4: the hovered badge's tooltip"
++    );
++    assert!(
++        cx.debug_bounds("THREAD_ITEM_BADGE_TOOLTIP-0").is_none(),
++        "R3.4: and no other badge's"
++    );
++}
++
++#[gpui::test]
++fn chips_are_drawn_after_every_badge(cx: &mut TestAppContext) {
++    let (_view, cx) = open(
++        cx,
++        Row {
++            badges: 2,
++            tags: shared(&["alpha"]),
++            ..Row::default()
++        },
++    );
++    let badge = cx.debug_bounds("THREAD_ITEM_BADGE_1").expect("last badge");
++    let chips = cx.debug_bounds("THREAD_ITEM_TAG_CHIPS").expect("chips");
++    assert!(
++        badge.right() <= chips.left(),
++        "R3.1: {badge:?} vs {chips:?}"
++    );
++}
++
++#[gpui::test]
++fn four_tags_draw_three_chips_and_a_plus_chip(cx: &mut TestAppContext) {
++    let (_view, cx) = open(
++        cx,
++        Row {
++            tags: shared(&["a", "b", "c", "d"]),
++            ..Row::default()
++        },
++    );
++    for selector in [
++        "THREAD_ITEM_TAG_CHIP_0",
++        "THREAD_ITEM_TAG_CHIP_1",
++        "THREAD_ITEM_TAG_CHIP_2",
++        "THREAD_ITEM_TAG_MORE",
++    ] {
++        assert!(cx.debug_bounds(selector).is_some(), "R2.2: {selector}");
++    }
++    assert!(cx.debug_bounds("THREAD_ITEM_TAG_CHIP_3").is_none());
++    assert!(
++        cx.debug_bounds("THREAD_ITEM_BADGE").is_none(),
++        "chips alone draw no badge container"
++    );
++
++    hover_for_tooltip(cx, "THREAD_ITEM_TAG_CHIPS");
++    for selector in [
++        "THREAD_ITEM_TAG_TOOLTIP-a",
++        "THREAD_ITEM_TAG_TOOLTIP-b",
++        "THREAD_ITEM_TAG_TOOLTIP-c",
++        "THREAD_ITEM_TAG_TOOLTIP-d",
++    ] {
++        assert!(
++            cx.debug_bounds(selector).is_some(),
++            "the tooltip names every tag, the hidden one too: {selector}"
++        );
++    }
++}
++
++#[gpui::test]
++fn three_tags_draw_no_plus_chip(cx: &mut TestAppContext) {
++    let (_view, cx) = open(
++        cx,
++        Row {
++            tags: shared(&["a", "b", "c"]),
++            ..Row::default()
++        },
++    );
++    assert!(cx.debug_bounds("THREAD_ITEM_TAG_CHIP_2").is_some());
++    assert!(cx.debug_bounds("THREAD_ITEM_TAG_MORE").is_none());
++}
++
++#[gpui::test]
++fn hostile_the_badge_does_not_displace_the_action_slot(cx: &mut TestAppContext) {
++    let (view, cx) = open(cx, Row::badge());
++    let badge = cx.debug_bounds("THREAD_ITEM_BADGE").expect("badge bounds");
++    let action = cx.debug_bounds("ACTION_SLOT").expect("action bounds");
++    assert!(
++        badge.right() <= action.left(),
++        "the badge sits after the title and before the action slot: {badge:?} vs {action:?}"
++    );
++    assert_eq!(
++        click_action_slot(&view, cx),
++        0,
++        "the click went to the action"
++    );
++}
++
++#[gpui::test]
++fn hostile_chips_and_badges_do_not_displace_the_action_slot(cx: &mut TestAppContext) {
++    let (view, cx) = open(
++        cx,
++        Row {
++            badges: 2,
++            tags: shared(&["alpha", "beta", "gamma", "delta"]),
++            ..Row::default()
++        },
++    );
++    let chips = cx.debug_bounds("THREAD_ITEM_TAG_CHIPS").expect("chips");
++    let action = cx.debug_bounds("ACTION_SLOT").expect("action bounds");
++    assert!(
++        chips.right() <= action.left(),
++        "R2.5: the title gives way, the chips stay before the action slot: {chips:?} vs {action:?}"
++    );
++    assert_eq!(
++        click_action_slot(&view, cx),
++        0,
++        "R3.3: the click went to the action"
++    );
++}
++
++#[gpui::test]
++fn chips_alone_stay_visible_beside_a_long_title(cx: &mut TestAppContext) {
++    let (_view, cx) = open(
++        cx,
++        Row {
++            tags: shared(&["alpha"]),
++            ..Row::default()
++        },
++    );
++    let chips = cx.debug_bounds("THREAD_ITEM_TAG_CHIPS").expect("chips");
++    let action = cx.debug_bounds("ACTION_SLOT").expect("action bounds");
++    assert!(
++        chips.right() <= action.left(),
++        "R2.5: {chips:?} vs {action:?}"
++    );
++}

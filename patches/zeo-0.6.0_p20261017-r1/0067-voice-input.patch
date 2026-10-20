@@ -495,10 +495,10 @@ index c985917..592c5fb 100644
  editor = { workspace = true, features = ["test-support"] }
  eval_utils.workspace = true
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index fec4afd..d03847d 100644
+index 1714109..a35450d 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -50,6 +50,8 @@ pub mod thread_worktree_archive;
+@@ -52,6 +52,8 @@ pub mod thread_worktree_archive;
  pub mod threads_archive_view;
  mod ui;
  mod unicode_confusables;
@@ -507,7 +507,7 @@ index fec4afd..d03847d 100644
  
  use std::rc::Rc;
  use std::sync::Arc;
-@@ -770,6 +772,7 @@ pub fn init(
+@@ -772,6 +774,7 @@ pub fn init(
          init_language_model_settings(cx);
      }
      agent_panel::init(cx);
@@ -515,7 +515,7 @@ index fec4afd..d03847d 100644
      context_server_configuration::init(language_registry, fs.clone(), cx);
      thread_metadata_store::init(cx);
      thread_organization::init(cx);
-@@ -1123,6 +1126,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1125,6 +1128,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
      Some(command)
  }
  

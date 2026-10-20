@@ -596,7 +596,7 @@ index 8a4203c..c985917 100644
  
  [dev-dependencies]
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 8a55068..92b827e 100644
+index 41d96e1..4f2affa 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -7,6 +7,8 @@ mod agent_panel;
@@ -608,7 +608,7 @@ index 8a55068..92b827e 100644
  mod buffer_codegen;
  mod completion_provider;
  mod config_options;
-@@ -91,7 +93,10 @@ pub use crate::agent_session_router::{
+@@ -93,7 +95,10 @@ pub use crate::agent_session_router::{
      OpenAgentSessionOptions, OpenedAgentSession, open_agent_session,
  };
  pub use crate::inline_assistant::InlineAssistant;
@@ -620,7 +620,7 @@ index 8a55068..92b827e 100644
  pub use crate::message_editor::MessageEditorEvent;
  pub use crate::task_label::{
      TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
-@@ -1109,6 +1114,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1111,6 +1116,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
  #[cfg(test)]
  mod slash_command_in_code_block_tests;
  

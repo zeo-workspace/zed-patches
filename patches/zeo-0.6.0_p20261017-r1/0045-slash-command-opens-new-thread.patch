@@ -713,10 +713,10 @@ index 0000000..a7fa618
 +    );
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index f1135a3..e3b8c34 100644
+index 6861897..6b60647 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -1081,6 +1081,23 @@ fn update_active_language_model_from_settings(cx: &mut App) {
+@@ -1083,6 +1083,23 @@ fn update_active_language_model_from_settings(cx: &mut App) {
      });
  }
  

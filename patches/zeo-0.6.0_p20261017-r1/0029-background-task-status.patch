@@ -328,10 +328,10 @@ index 2742101..44d373c 100644
                  // A redraw is all this needs: the account section is built from the thread
                  // when the tooltip opens, so there is no per-turn state to recompute.
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index b4dc14b..af841f7 100644
+index 9059c82..3895368 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -449,7 +449,14 @@ fn apply_live_row_state(
+@@ -456,7 +456,14 @@ fn apply_live_row_state(
          && session_id
              .as_ref()
              .and_then(|sid| context.old_statuses.get(sid))
@@ -347,7 +347,7 @@ index b4dc14b..af841f7 100644
      {
          notified_threads.insert(thread.metadata.thread_id);
      }
-@@ -2014,7 +2021,10 @@ impl Sidebar {
+@@ -2022,7 +2029,10 @@ impl Sidebar {
                          let old_status = old_statuses.get(&info.session_id).map(|(s, _)| *s);
                          new_live_statuses.insert(info.session_id.clone(), (info.status, thread_id));
                          if info.status == AgentThreadStatus::Completed
@@ -359,7 +359,7 @@ index b4dc14b..af841f7 100644
                          {
                              notified_threads.insert(thread_id);
                          }
-@@ -6147,7 +6157,9 @@ impl Sidebar {
+@@ -6173,7 +6183,9 @@ impl Sidebar {
                      AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation => {
                          return;
                      }
@@ -370,7 +370,7 @@ index b4dc14b..af841f7 100644
                  }
                  if thread.draft.is_some() {
                      let workspace = thread.workspace.clone();
-@@ -8654,6 +8666,9 @@ fn all_thread_infos_for_workspace(
+@@ -8682,6 +8694,9 @@ fn all_thread_infos_for_workspace(
              } else {
                  match thread.status() {
                      ThreadStatus::Generating => AgentThreadStatus::Running,
@@ -689,7 +689,7 @@ index 2e4e04b..f5bac68 100644
      sidebar: &Entity<Sidebar>,
      query: &str,
 diff --git a/crates/ui/src/components/ai/thread_item.rs b/crates/ui/src/components/ai/thread_item.rs
-index 7cf5748..ba13b04 100644
+index 2ecb7fb..dd8ff9e 100644
 --- a/crates/ui/src/components/ai/thread_item.rs
 +++ b/crates/ui/src/components/ai/thread_item.rs
 @@ -12,6 +12,9 @@ pub enum AgentThreadStatus {
@@ -702,7 +702,7 @@ index 7cf5748..ba13b04 100644
      WaitingForConfirmation,
      Error,
  }
-@@ -341,6 +344,17 @@ impl RenderOnce for ThreadItem {
+@@ -382,6 +385,17 @@ impl RenderOnce for ThreadItem {
                          .with_rotate_animation(2),
                  )
                  .into_any_element()
@@ -720,7 +720,7 @@ index 7cf5748..ba13b04 100644
          } else if let Some(status_icon) = status_icon {
              icon_container().child(status_icon).into_any_element()
          } else {
-@@ -402,7 +416,9 @@ impl RenderOnce for ThreadItem {
+@@ -513,7 +527,9 @@ impl RenderOnce for ThreadItem {
  
          let show_tooltip = matches!(
              self.status,
@@ -731,7 +731,7 @@ index 7cf5748..ba13b04 100644
          );
  
          let linked_worktrees: Vec<ThreadItemWorktreeInfo> = self
-@@ -628,6 +644,15 @@ impl RenderOnce for ThreadItem {
+@@ -742,6 +758,15 @@ impl RenderOnce for ThreadItem {
                          )
                          .child(Label::new("Waiting for Confirmation"))
                          .into_any_element(),
@@ -747,7 +747,7 @@ index 7cf5748..ba13b04 100644
                      _ => gpui::Empty.into_any_element(),
                  }))
              })
-@@ -699,6 +724,17 @@ impl Component for ThreadItem {
+@@ -813,6 +838,17 @@ impl Component for ThreadItem {
                      )
                      .into_any_element(),
              ),
