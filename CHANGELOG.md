@@ -31,6 +31,49 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.6.0_p20261017] — 2026-10-19 (tagged)
+
+The release train (story 058) ships as Zeo 0.6.0 on Zed `56934ec`, the snapshot
+`0.5.1_p20261017` already packaged.
+
+### Added
+
+- `0063`, `0065`, `0066` and `0067` join the series, each recorded in
+  `zeo/CHANGELOG.md` 0.6.0:
+  - `0063`, the devtools panel, USE `devtools-panel`, which needs
+    `browser-extension` (story 055);
+  - `0065`, sidebar drag reorder, with no flag, right after `0049` (036);
+  - `0066`, the Epic Stories panel, USE `epic`, which needs
+    `claude-agent-acp-plus` (042);
+  - `0067`, voice input, USE `voice`, which needs `claude-agent-acp-plus` and
+    pulls in the new `app-accessibility/whisper-models` (044).
+- `release/next/` held the candidate ebuild, the three flags' `metadata.xml`
+  wording and `whisper-models` while the train ran; they are shipped now.
+
+### Changed
+
+- The train's series, built on `0.5.0_p20261016-r3`, was carried onto `56934ec`
+  by cherry-pick in a tree prepared for `0.5.1_p20261017`; `0028`–`0030` are
+  regenerated on top of `0065`.
+- `0066`'s header now states its 186 tests and why it touches `crates/fs`.
+- The ebuild's `CRATES` gains `whisper-rs@0.16.0` and `whisper-rs-sys@0.15.0`,
+  with `Unlicense` conditional on USE `voice`.
+
+### Verification
+
+- verify 64/64; check-sync in sync with the overlay; `test.sh` 5290 passed;
+  selftest 109/109.
+- The series applies with `devtools-panel`, `epic` and `voice` each off and all on.
+- `ebuild prepare` as the user for zeo (default USE and the host's), zeo-bin and
+  whisper-models; `pkgcheck` shows only the existing `llvm-r1` deprecation and x32
+  profile notes.
+- osv-scanner reports nothing new against `0.5.1_p20261017`; CRATES equals the
+  `Cargo.lock` registry set.
+- `zeo-bin` has no AVX-512 outside dispatched functions; the portable `.deb` and
+  `zeo-bin` start in a Debian 12 container and in a VM without AVX-512.
+- Release `v0.6.0_p20261017` on `zeo-workspace/zeo` was downloaded back and
+  checked against `SHA256SUMS`.
+
 ## [0.5.0_p20261014] — 2026-10-14 (tagged)
 
 The release train (story 048) ships as Zeo 0.5.0 on Zed `c403bc6af`, the snapshot
