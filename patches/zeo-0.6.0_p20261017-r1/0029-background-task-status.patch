@@ -328,10 +328,10 @@ index 2742101..44d373c 100644
                  // A redraw is all this needs: the account section is built from the thread
                  // when the tooltip opens, so there is no per-turn state to recompute.
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 9059c82..3895368 100644
+index fe5292a..15fa11e 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
-@@ -456,7 +456,14 @@ fn apply_live_row_state(
+@@ -464,7 +464,14 @@ fn apply_live_row_state(
          && session_id
              .as_ref()
              .and_then(|sid| context.old_statuses.get(sid))
@@ -347,7 +347,7 @@ index 9059c82..3895368 100644
      {
          notified_threads.insert(thread.metadata.thread_id);
      }
-@@ -2022,7 +2029,10 @@ impl Sidebar {
+@@ -2030,7 +2037,10 @@ impl Sidebar {
                          let old_status = old_statuses.get(&info.session_id).map(|(s, _)| *s);
                          new_live_statuses.insert(info.session_id.clone(), (info.status, thread_id));
                          if info.status == AgentThreadStatus::Completed
@@ -359,7 +359,7 @@ index 9059c82..3895368 100644
                          {
                              notified_threads.insert(thread_id);
                          }
-@@ -6173,7 +6183,9 @@ impl Sidebar {
+@@ -6203,7 +6213,9 @@ impl Sidebar {
                      AgentThreadStatus::Running | AgentThreadStatus::WaitingForConfirmation => {
                          return;
                      }
@@ -370,7 +370,7 @@ index 9059c82..3895368 100644
                  }
                  if thread.draft.is_some() {
                      let workspace = thread.workspace.clone();
-@@ -8682,6 +8694,9 @@ fn all_thread_infos_for_workspace(
+@@ -8723,6 +8735,9 @@ fn all_thread_infos_for_workspace(
              } else {
                  match thread.status() {
                      ThreadStatus::Generating => AgentThreadStatus::Running,
