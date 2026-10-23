@@ -10718,7 +10718,7 @@ index d091060..37f2bc5 100644
  tempfile.workspace = true
 +workspace = { workspace = true, features = ["test-support"] }
 diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs
-index 55c50a9..fc23254 100644
+index cd4eaca..d387a35 100644
 --- a/crates/agent_servers/src/acp.rs
 +++ b/crates/agent_servers/src/acp.rs
 @@ -10,6 +10,7 @@ use debug_log::AcpDebugLog;
@@ -10797,7 +10797,7 @@ index 55c50a9..fc23254 100644
          cx,
      )
      .await
-@@ -1272,6 +1296,7 @@ done
+@@ -1276,6 +1300,7 @@ done
                          WeakEntity::new_invalid(),
                          None,
                          HashMap::default(),
@@ -10805,7 +10805,7 @@ index 55c50a9..fc23254 100644
                          &mut cx,
                      )
                      .await
-@@ -1425,6 +1450,7 @@ done
+@@ -1429,6 +1454,7 @@ done
                          WeakEntity::new_invalid(),
                          None,
                          HashMap::default(),
@@ -11027,7 +11027,7 @@ index 86f3d0c..0dc9ca6 100644
 +    }
  }
 diff --git a/crates/agent_servers/src/acp/v1.rs b/crates/agent_servers/src/acp/v1.rs
-index 69b3489..c1e3577 100644
+index 47b0a8b..34de72d 100644
 --- a/crates/agent_servers/src/acp/v1.rs
 +++ b/crates/agent_servers/src/acp/v1.rs
 @@ -378,22 +378,35 @@ impl AgentSessionList for AcpSessionList {
@@ -13239,7 +13239,7 @@ index 0000000..1a9c116
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 5693c81..1ef6d5f 100644
+index ae4569d..78bd403 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -723,6 +723,7 @@ pub fn init(cx: &mut App) {
@@ -13276,7 +13276,7 @@ index 5693c81..1ef6d5f 100644
              retained_thread_subscriptions: HashMap::default(),
              last_context_source: None,
              tasks_card,
-@@ -6940,7 +6946,12 @@ impl AgentPanel {
+@@ -6966,7 +6972,12 @@ impl AgentPanel {
                  .active_conversation_view()
                  .and_then(|conversation_view| conversation_view.read(cx).root_thread_view())
                  .and_then(|thread_view| {
@@ -13510,7 +13510,7 @@ index 0000000..51b1d6b
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 8679f01..76253d4 100644
+index ad1cf0f..1c9430e 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -1,9 +1,11 @@
@@ -13525,7 +13525,7 @@ index 8679f01..76253d4 100644
  mod agent_session_router;
  mod buffer_codegen;
  mod completion_provider;
-@@ -1113,6 +1115,9 @@ mod slash_command_in_code_block_tests;
+@@ -1114,6 +1116,9 @@ mod slash_command_in_code_block_tests;
  #[cfg(test)]
  mod devtools_mention_tests;
  
@@ -13536,7 +13536,7 @@ index 8679f01..76253d4 100644
  mod devtools_delivery_tests;
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index a730a99..36a63d6 100644
+index d8caf19..15ed1e9 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -6238,6 +6238,22 @@ impl ThreadView {

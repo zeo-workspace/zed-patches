@@ -2127,6 +2127,14 @@ src_prepare() {
 			# a Git LFS agent or extension) or cannot be read; the error names the
 			# key and nothing is created. Pure Zed, BY CHOICE (PARITY item 105).
 			"${FILESDIR}/0062-git-refuse-worktree-when-repo-config-can-run-programs.patch"
+			# 0070 (story 039): select text in an agent reply, right-click, and
+			# open a "Clean sub-thread" or a "Sub-thread with context" (the
+			# session forked through ACP session/fork, still unstable_), linked
+			# to the parent in 0048's store with a header and a sidebar marker
+			# through 0068's badge. Last of this group: it calls 0045's prefilled
+			# thread and extends 0036's config recorder; 0052, 0057, 0058, 0063
+			# and 0067 are generated on top of it.
+			"${FILESDIR}/0070-agent-ui-sub-thread-from-selection.patch"
 		)
 	fi
 

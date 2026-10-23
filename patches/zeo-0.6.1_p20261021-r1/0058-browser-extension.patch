@@ -134,7 +134,7 @@ index c346cee..f08bd8c 100644
      "crates/zlog",
      "crates/zlog_settings",
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
-index 9cc9334..878d648 100644
+index 906f076..dabf307 100644
 --- a/crates/acp_thread/src/acp_thread.rs
 +++ b/crates/acp_thread/src/acp_thread.rs
 @@ -8,6 +8,8 @@ mod diff;
@@ -147,10 +147,10 @@ index 9cc9334..878d648 100644
  pub mod notices;
  pub mod prompt_capabilities;
 diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
-index f9b7a3b..a6c40c1 100644
+index f5192d1..29c3928 100644
 --- a/crates/acp_thread/src/connection.rs
 +++ b/crates/acp_thread/src/connection.rs
-@@ -981,7 +981,7 @@ mod test_support {
+@@ -999,7 +999,7 @@ mod test_support {
      use gpui::{AppContext as _, WeakEntity};
      use parking_lot::Mutex;
  
@@ -159,7 +159,7 @@ index f9b7a3b..a6c40c1 100644
  
      use super::*;
  
-@@ -1047,6 +1047,7 @@ mod test_support {
+@@ -1066,6 +1066,7 @@ mod test_support {
          cancel_calls: Arc<Mutex<Vec<acp_v2::SessionId>>>,
          shutdown_calls: Arc<AtomicUsize>,
          next_cancel_error: Arc<Mutex<Option<anyhow::Error>>>,
@@ -167,7 +167,7 @@ index f9b7a3b..a6c40c1 100644
          supports_receipt_submissions: bool,
          supports_retry: bool,
          supports_load_session: bool,
-@@ -1094,6 +1095,7 @@ mod test_support {
+@@ -1115,6 +1116,7 @@ mod test_support {
                  cancel_calls: Default::default(),
                  shutdown_calls: Default::default(),
                  next_cancel_error: Default::default(),
@@ -175,7 +175,7 @@ index f9b7a3b..a6c40c1 100644
                  permission_requests: HashMap::default(),
                  sessions: Arc::default(),
                  supports_receipt_submissions: false,
-@@ -1180,6 +1182,11 @@ mod test_support {
+@@ -1202,6 +1204,11 @@ mod test_support {
              self.receipt_prompt.lock().take()
          }
  
@@ -187,7 +187,7 @@ index f9b7a3b..a6c40c1 100644
          pub fn take_set_title_calls(&self) -> Vec<(acp_v2::SessionId, SharedString)> {
              std::mem::take(&mut *self.set_title_calls.lock())
          }
-@@ -1478,9 +1485,10 @@ mod test_support {
+@@ -1544,9 +1551,10 @@ mod test_support {
                      } else {
                          None
                      };
@@ -199,7 +199,7 @@ index f9b7a3b..a6c40c1 100644
                                  .update(cx, |thread, cx| {
                                      thread.request_tool_call_authorization(
                                          tool_call.clone().into(),
-@@ -1490,6 +1498,7 @@ mod test_support {
+@@ -1556,6 +1564,7 @@ mod test_support {
                                      )
                                  })??
                                  .await;
@@ -605,7 +605,7 @@ index b3c9b39..66b9f67 100644
  
  [dev-dependencies]
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 76253d4..0fa7a82 100644
+index 1c9430e..38b702c 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -7,6 +7,8 @@ mod agent_panel;
@@ -617,7 +617,7 @@ index 76253d4..0fa7a82 100644
  mod buffer_codegen;
  mod completion_provider;
  mod config_options;
-@@ -94,7 +96,10 @@ pub use crate::agent_session_router::{
+@@ -95,7 +97,10 @@ pub use crate::agent_session_router::{
      OpenAgentSessionOptions, OpenedAgentSession, open_agent_session,
  };
  pub use crate::inline_assistant::InlineAssistant;
@@ -629,7 +629,7 @@ index 76253d4..0fa7a82 100644
  pub use crate::message_editor::MessageEditorEvent;
  pub use crate::task_label::{
      TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
-@@ -1112,6 +1117,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1113,6 +1118,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
  #[cfg(test)]
  mod slash_command_in_code_block_tests;
  
@@ -6705,10 +6705,10 @@ index 0000000..82bee58
 +    }
 +}
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index b1ebc5f..4ce29af 100644
+index 31b488a..69a4722 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -739,7 +739,7 @@ pub struct StateChange;
+@@ -740,7 +740,7 @@ pub struct StateChange;
  
  impl EventEmitter<StateChange> for ConversationView {}
  
@@ -6718,7 +6718,7 @@ index b1ebc5f..4ce29af 100644
      selection: Option<&thread_view::PermissionSelection>,
      is_allow: bool,
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 36a63d6..ff15fda 100644
+index 15ed1e9..9436307 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -1399,7 +1399,7 @@ impl ThreadView {
@@ -7071,7 +7071,7 @@ index 36a63d6..ff15fda 100644
      pub fn cancel_generation(&mut self, cx: &mut Context<Self>) {
          self.thread_retry_status.take();
          self.thread_error.take();
-@@ -14984,6 +15102,7 @@ pub(crate) fn open_link(
+@@ -15002,6 +15120,7 @@ pub(crate) fn open_link(
              MentionUri::TerminalSelection { .. } => {}
              MentionUri::GitDiff { .. } => {}
              MentionUri::MergeConflict { .. } => {}

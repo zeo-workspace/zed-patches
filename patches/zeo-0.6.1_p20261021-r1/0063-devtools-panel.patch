@@ -166,10 +166,10 @@ index e9c089e..4101322 100644
    // that receives element selections from a dev-server page and hands them to
    // the agent panel. Turning it off stops listening and removes the socket.
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 1ef6d5f..6ea3752 100644
+index 78bd403..2fe7b22 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -3818,6 +3818,58 @@ impl AgentPanel {
+@@ -3830,6 +3830,58 @@ impl AgentPanel {
          thread_id
      }
  
@@ -228,7 +228,7 @@ index 1ef6d5f..6ea3752 100644
      pub fn activate_retained_thread(
          &mut self,
          id: ThreadId,
-@@ -4702,6 +4754,19 @@ impl AgentPanel {
+@@ -4714,6 +4766,19 @@ impl AgentPanel {
              .collect()
      }
  
@@ -248,7 +248,7 @@ index 1ef6d5f..6ea3752 100644
      pub fn active_thread_view(&self, cx: &App) -> Option<Entity<ThreadView>> {
          let server_view = self.active_conversation_view()?;
          server_view.read(cx).root_thread_view()
-@@ -5002,13 +5067,17 @@ impl AgentPanel {
+@@ -5014,13 +5079,17 @@ impl AgentPanel {
          let mut potential_removals = self
              .retained_threads
              .iter()
@@ -268,7 +268,7 @@ index 1ef6d5f..6ea3752 100644
                  };
                  let thread = thread_view.read(cx).thread.read(cx);
                  thread.connection().supports_load_session() && thread.is_idle_for_retention()
-@@ -5025,7 +5094,11 @@ impl AgentPanel {
+@@ -5037,7 +5106,11 @@ impl AgentPanel {
              .take(n)
              .collect::<Vec<_>>();
          for id in to_remove {
@@ -282,7 +282,7 @@ index 1ef6d5f..6ea3752 100644
      }
  
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 0fa7a82..a049115 100644
+index 38b702c..f53dfb0 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -15,7 +15,11 @@ mod config_options;
@@ -297,7 +297,7 @@ index 0fa7a82..a049115 100644
  mod diagnostics;
  pub mod draft_prompt_store;
  mod entry_view_state;
-@@ -306,6 +310,8 @@ pub enum AgentThreadSource {
+@@ -307,6 +311,8 @@ pub enum AgentThreadSource {
      AgentPanel,
      GitPanel,
      Sidebar,
@@ -306,7 +306,7 @@ index 0fa7a82..a049115 100644
  }
  
  impl AgentThreadSource {
-@@ -314,6 +320,7 @@ impl AgentThreadSource {
+@@ -315,6 +321,7 @@ impl AgentThreadSource {
              Self::AgentPanel => "agent_panel",
              Self::GitPanel => "git_panel",
              Self::Sidebar => "sidebar",
@@ -314,7 +314,7 @@ index 0fa7a82..a049115 100644
          }
      }
  }
-@@ -769,8 +776,13 @@ pub fn init(
+@@ -770,8 +777,13 @@ pub fn init(
      context_server_configuration::init(language_registry, fs.clone(), cx);
      thread_metadata_store::init(cx);
      thread_organization::init(cx);
@@ -11639,7 +11639,7 @@ index 1d03f24..08f1224 100644
              apply_live_row_state(
                  &mut row,
 diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
-index 491cf2d..c6daacc 100644
+index 8adeb99..1aa0f60 100644
 --- a/crates/sidebar/src/sidebar.rs
 +++ b/crates/sidebar/src/sidebar.rs
 @@ -6,6 +6,7 @@ use action_log::DiffStats;
@@ -11650,7 +11650,7 @@ index 491cf2d..c6daacc 100644
  use agent_ui::terminal_thread_metadata_store::{
      TerminalThreadMetadata, TerminalThreadMetadataStore, terminal_title_prefix,
  };
-@@ -105,6 +106,9 @@ mod sidebar_tags_notify_tests;
+@@ -108,6 +109,9 @@ mod sidebar_tags_notify_tests;
  mod sidebar_tags_tests;
  mod thread_tags;
  
@@ -11660,7 +11660,7 @@ index 491cf2d..c6daacc 100644
  mod lists_view;
  #[cfg(test)]
  mod sidebar_lists_tests;
-@@ -397,6 +401,9 @@ struct ThreadEntry {
+@@ -400,6 +404,9 @@ struct ThreadEntry {
      /// `Some` only on a row of the Pinned section, which names the thread's project because it
      /// sits outside its project group.
      pinned_project_label: Option<SharedString>,
@@ -11670,7 +11670,7 @@ index 491cf2d..c6daacc 100644
  }
  
  #[derive(Clone)]
-@@ -955,6 +962,10 @@ pub struct Sidebar {
+@@ -958,6 +965,10 @@ pub struct Sidebar {
      cross_channel_import_channels: Vec<SharedString>,
      /// Never serialized: the Pinned section's collapsed state lasts for the session.
      pinned_collapsed: bool,
@@ -11681,7 +11681,7 @@ index 491cf2d..c6daacc 100644
  }
  
  impl Sidebar {
-@@ -1042,6 +1053,20 @@ impl Sidebar {
+@@ -1045,6 +1056,20 @@ impl Sidebar {
          })
          .detach();
  
@@ -11702,7 +11702,7 @@ index 491cf2d..c6daacc 100644
          cx.observe(
              &TerminalThreadMetadataStore::global(cx),
              |this, _store, cx| {
-@@ -1108,6 +1133,8 @@ impl Sidebar {
+@@ -1111,6 +1136,8 @@ impl Sidebar {
              import_banners_use_verbose_labels: None,
              cross_channel_import_channels: Vec::new(),
              pinned_collapsed: false,
@@ -11711,7 +11711,7 @@ index 491cf2d..c6daacc 100644
          }
      }
  
-@@ -1611,6 +1638,14 @@ impl Sidebar {
+@@ -1614,6 +1641,14 @@ impl Sidebar {
  
          let query = self.filter_editor.read(cx).text(cx);
          let tag_query = agent_ui::thread_tag_filter::parse_tag_query(&query);
@@ -11726,7 +11726,7 @@ index 491cf2d..c6daacc 100644
  
          let previous = mem::take(&mut self.contents);
  
-@@ -1800,6 +1835,9 @@ impl Sidebar {
+@@ -1803,6 +1838,9 @@ impl Sidebar {
                      .has_notification
                      .then_some(terminal.metadata.terminal_id)
              }));
@@ -11736,7 +11736,7 @@ index 491cf2d..c6daacc 100644
              if group_key.path_list().paths().is_empty() {
                  continue;
              }
-@@ -1807,7 +1845,7 @@ impl Sidebar {
+@@ -1810,7 +1848,7 @@ impl Sidebar {
              let label = group_key.display_name(&path_detail_map);
  
              let is_collapsed = self.is_group_collapsed(group_key, cx);
@@ -11745,7 +11745,7 @@ index 491cf2d..c6daacc 100644
  
              let is_active = active_workspace
                  .as_ref()
-@@ -1843,6 +1881,7 @@ impl Sidebar {
+@@ -1846,6 +1884,7 @@ impl Sidebar {
                          // pass below downgrades them to `Empty` if no draft
                          // label can be derived.
                          let draft = row.is_draft().then_some(DraftKind::WithContent);
@@ -11753,7 +11753,7 @@ index 491cf2d..c6daacc 100644
                          Arc::new(ThreadEntry {
                              metadata: row,
                              icon,
-@@ -1857,6 +1896,7 @@ impl Sidebar {
+@@ -1860,6 +1899,7 @@ impl Sidebar {
                              worktrees,
                              diff_stats: DiffStats::default(),
                              pinned_project_label: None,
@@ -11761,7 +11761,7 @@ index 491cf2d..c6daacc 100644
                          })
                      };
  
-@@ -1970,6 +2010,11 @@ impl Sidebar {
+@@ -1973,6 +2013,11 @@ impl Sidebar {
                      if thread.draft != Some(DraftKind::Empty) {
                          return true;
                      }
@@ -11773,7 +11773,7 @@ index 491cf2d..c6daacc 100644
                      if pending_activation.is_some() {
                          return false;
                      }
-@@ -2012,6 +2057,18 @@ impl Sidebar {
+@@ -2015,6 +2060,18 @@ impl Sidebar {
                      let b_time = Self::thread_display_time(&b.metadata);
                      b_time.cmp(&a_time)
                  });
@@ -11792,7 +11792,7 @@ index 491cf2d..c6daacc 100644
              } else {
                  for info in live_infos {
                      if info.status == AgentThreadStatus::Running {
-@@ -2144,7 +2201,10 @@ impl Sidebar {
+@@ -2147,7 +2204,10 @@ impl Sidebar {
                  if tag_query.has_keys() && matched_threads.is_empty() {
                      continue;
                  }
@@ -11804,7 +11804,7 @@ index 491cf2d..c6daacc 100644
                  {
                      continue;
                  }
-@@ -2179,6 +2239,10 @@ impl Sidebar {
+@@ -2182,6 +2242,10 @@ impl Sidebar {
                      cx,
                  );
              } else {
@@ -11815,7 +11815,7 @@ index 491cf2d..c6daacc 100644
                  let has_terminal_notifications = terminals
                      .iter()
                      .any(|t| notified_terminals.contains(&t.metadata.terminal_id));
-@@ -2220,7 +2284,8 @@ impl Sidebar {
+@@ -2223,7 +2287,8 @@ impl Sidebar {
                      has_threads,
                  });
  
@@ -11825,7 +11825,7 @@ index 491cf2d..c6daacc 100644
                      continue;
                  }
  
-@@ -2245,6 +2310,7 @@ impl Sidebar {
+@@ -2248,6 +2313,7 @@ impl Sidebar {
                  path_detail_map: &path_detail_map,
                  branch_by_path: &branch_by_path,
                  resolve_agent_icon: &resolve_agent_icon,
@@ -11833,7 +11833,7 @@ index 491cf2d..c6daacc 100644
                  new_live_statuses: &mut new_live_statuses,
                  notified_threads: &mut notified_threads,
              },
-@@ -2254,7 +2320,16 @@ impl Sidebar {
+@@ -2257,7 +2323,16 @@ impl Sidebar {
              thread_tags::retain_tagged_rows(pinned_rows, &tag_query, &mut current_thread_ids, cx);
          // Like a group's rows, a pinned row the filter drops is not registered below, so the
          // header is decided by, and reports notifications of, only the rows that are shown.
@@ -11851,7 +11851,7 @@ index 491cf2d..c6daacc 100644
          if !pinned_rows.is_empty() {
              // Registered even while the section is collapsed, so the retains below keep the
              // notifications its header reports.
-@@ -2270,7 +2345,7 @@ impl Sidebar {
+@@ -2273,7 +2348,7 @@ impl Sidebar {
              project_header_indices.push(entries.len());
              entries.push(ListEntry::PinnedHeader { has_notifications });
              // Like a project group, a collapsed section still shows what the filter matches.
@@ -11860,7 +11860,7 @@ index 491cf2d..c6daacc 100644
                  entries.extend(pinned_rows.into_iter().map(ListEntry::Thread));
              }
          }
-@@ -2286,6 +2361,7 @@ impl Sidebar {
+@@ -2289,6 +2364,7 @@ impl Sidebar {
                          path_detail_map: &path_detail_map,
                          branch_by_path: &branch_by_path,
                          resolve_agent_icon: &resolve_agent_icon,
@@ -11868,7 +11868,7 @@ index 491cf2d..c6daacc 100644
                          new_live_statuses: &mut new_live_statuses,
                          notified_threads: &mut notified_threads,
                      };
-@@ -2629,7 +2705,7 @@ impl Sidebar {
+@@ -2632,7 +2708,7 @@ impl Sidebar {
      ) -> AnyElement {
          let host = key.host();
  
@@ -11877,7 +11877,7 @@ index 491cf2d..c6daacc 100644
  
          let id_prefix = if is_sticky { "sticky-" } else { "" };
          let id = SharedString::from(format!("{id_prefix}project-header-{ix}"));
-@@ -2815,7 +2891,7 @@ impl Sidebar {
+@@ -2818,7 +2894,7 @@ impl Sidebar {
                  cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                      if event.modifiers().secondary() {
                          this.activate_or_open_workspace_for_group(&key_for_focus, window, cx);
@@ -11886,7 +11886,7 @@ index 491cf2d..c6daacc 100644
                          this.toggle_collapse(&key_for_toggle, window, cx);
                      }
                  }),
-@@ -2869,7 +2945,7 @@ impl Sidebar {
+@@ -2872,7 +2948,7 @@ impl Sidebar {
              SharedString::from(format!("{id_prefix}project-header-new-thread-{ix}")),
              IconName::Plus,
          )
@@ -11895,7 +11895,7 @@ index 491cf2d..c6daacc 100644
              let color = cx.theme().colors();
              button
                  .hover_background(color.element_background)
-@@ -3179,7 +3255,7 @@ impl Sidebar {
+@@ -3182,7 +3258,7 @@ impl Sidebar {
              .with_handle(menu_handle)
              .trigger(
                  IconButton::new(trigger_id, IconName::Ellipsis)
@@ -11904,7 +11904,7 @@ index 491cf2d..c6daacc 100644
                          let color = cx.theme().colors();
                          button
                              .hover_background(color.element_background)
-@@ -3568,7 +3644,7 @@ impl Sidebar {
+@@ -3571,7 +3647,7 @@ impl Sidebar {
                          .color(Color::Accent),
                  )
              })
@@ -11913,7 +11913,7 @@ index 491cf2d..c6daacc 100644
                  this.child(
                      Icon::new(disclosure_icon)
                          .size(IconSize::Small)
-@@ -3577,7 +3653,7 @@ impl Sidebar {
+@@ -3580,7 +3656,7 @@ impl Sidebar {
              })
              .cursor_pointer()
              .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
@@ -11922,7 +11922,7 @@ index 491cf2d..c6daacc 100644
                      this.set_pinned_collapsed(!this.pinned_collapsed, cx);
                  }
              }))
-@@ -3801,6 +3877,28 @@ impl Sidebar {
+@@ -3804,6 +3880,28 @@ impl Sidebar {
          !self.filter_editor.read(cx).text(cx).is_empty()
      }
  
@@ -11951,17 +11951,17 @@ index 491cf2d..c6daacc 100644
      fn start_renaming_entry(
          &mut self,
          ix: usize,
-@@ -6827,6 +6925,9 @@ impl Sidebar {
+@@ -6830,6 +6928,9 @@ impl Sidebar {
              .when_some(thread.pinned_project_label.clone(), |this, label| {
                  this.project_name(label)
              })
 +            .when(thread.is_devtools, |this| {
 +                this.badge(IconName::ToolWeb, "Devtools thread")
 +            })
+             .map(|item| sub_thread_marker::mark_sub_thread(item, thread.metadata.thread_id, cx))
              .tags(thread_tags::tag_chips_for(thread.metadata.thread_id, cx))
              .timestamp(timestamp)
-             .highlight_positions(thread.highlight_positions.to_vec())
-@@ -7929,6 +8030,8 @@ impl Sidebar {
+@@ -7933,6 +8034,8 @@ impl Sidebar {
          let has_query = self.has_filter_query(cx);
          let message = if has_query {
              "No threads match your search."
@@ -11970,7 +11970,7 @@ index 491cf2d..c6daacc 100644
          } else {
              "No threads yet"
          };
-@@ -8035,6 +8138,20 @@ impl Sidebar {
+@@ -8039,6 +8142,20 @@ impl Sidebar {
                                      && !self.filter_editor.focus_handle(cx).is_focused(window),
                                  |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
                              )
