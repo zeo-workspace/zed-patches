@@ -398,6 +398,18 @@
 # refuses the same keys and switches filters off instead of refusing them.
 # Pure Zed, so it rides this flag BY CHOICE (PARITY-REPORT item 105).
 0062-git-refuse-worktree-when-repo-config-can-run-programs.patch
+# 0070: a sub-thread from a selection in an agent message -- "Clean
+# sub-thread" (a new thread, nothing inherited) and "Sub-thread with context"
+# (the agent session forked through ACP session/fork, still unstable_) in the
+# message's context menu, the excerpt quoted and unsent in the new composer, the
+# parent link in 0048's store, a "Sub-thread of:" header and a sidebar marker
+# through 0068's ThreadItem::badge. Adds fork support to the agent connection
+# (ACP v1 only). Last of this group BY DEPENDENCY: it calls 0045's
+# new_thread_with_prefilled_prompt and extends 0036's config recorder, and only
+# this adapter advertises fork today; 0048 and 0068 are ungrouped, so they are
+# already in place. 0052, 0057, 0058, 0063 and 0067 are generated on top of it.
+# Numbered 0070 because 0069 was the last number taken (story 039).
+0070-agent-ui-sub-thread-from-selection.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch

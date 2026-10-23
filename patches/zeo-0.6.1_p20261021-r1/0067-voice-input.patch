@@ -495,10 +495,10 @@ index 66b9f67..a19c044 100644
  editor = { workspace = true, features = ["test-support"] }
  eval_utils.workspace = true
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index a049115..dcfa33d 100644
+index f53dfb0..5ce4532 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -53,6 +53,8 @@ pub mod thread_worktree_archive;
+@@ -54,6 +54,8 @@ pub mod thread_worktree_archive;
  pub mod threads_archive_view;
  mod ui;
  mod unicode_confusables;
@@ -507,7 +507,7 @@ index a049115..dcfa33d 100644
  
  use std::rc::Rc;
  use std::sync::Arc;
-@@ -773,6 +775,7 @@ pub fn init(
+@@ -774,6 +776,7 @@ pub fn init(
          init_language_model_settings(cx);
      }
      agent_panel::init(cx);
@@ -515,7 +515,7 @@ index a049115..dcfa33d 100644
      context_server_configuration::init(language_registry, fs.clone(), cx);
      thread_metadata_store::init(cx);
      thread_organization::init(cx);
-@@ -1126,6 +1129,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1127,6 +1130,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
      Some(command)
  }
  
@@ -560,12 +560,12 @@ index a049115..dcfa33d 100644
  mod slash_command_in_code_block_tests;
  
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 4ce29af..62b2c11 100644
+index 69a4722..8091e3d 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -114,7 +114,7 @@ mod message_queue;
- mod sent_history;
+@@ -115,7 +115,7 @@ mod sent_history;
  mod session_stats;
+ mod sub_thread_header;
  mod thread_search_bar;
 -mod thread_view;
 +pub(crate) mod thread_view;
@@ -573,7 +573,7 @@ index 4ce29af..62b2c11 100644
  pub use thread_view::*;
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index ff15fda..ab49a0f 100644
+index 9436307..746acad 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -27,12 +27,22 @@ use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
@@ -952,7 +952,7 @@ index ff15fda..ab49a0f 100644
      /// Mirrors the conversation's pending question into the composer's key
      /// context. Read on every render rather than on the elicitation events, so
      /// every way a question ends -- answered, declined, cancelled, the turn
-@@ -14500,6 +14807,8 @@ impl Render for ThreadView {
+@@ -14517,6 +14824,8 @@ impl Render for ThreadView {
          // renders (settings, connection state, feature flags).
          self.sync_local_commands(cx);
          self.sync_question_pending(cx);
@@ -961,7 +961,7 @@ index ff15fda..ab49a0f 100644
  
          let has_messages = self.has_visible_conversation(cx);
          let list_state = self.list_state.clone();
-@@ -14523,8 +14832,16 @@ impl Render for ThreadView {
+@@ -14541,8 +14850,16 @@ impl Render for ThreadView {
              });
  
          v_flex()
