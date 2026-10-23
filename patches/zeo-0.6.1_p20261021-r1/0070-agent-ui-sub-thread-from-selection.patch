@@ -2712,10 +2712,10 @@ index b1ebc5f..31b488a 100644
              }
 diff --git a/crates/agent_ui/src/conversation_view/sub_thread_header.rs b/crates/agent_ui/src/conversation_view/sub_thread_header.rs
 new file mode 100644
-index 0000000..6bc8edf
+index 0000000..a44821a
 --- /dev/null
 +++ b/crates/agent_ui/src/conversation_view/sub_thread_header.rs
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,258 @@
 +//! Story 039 (R4): "Sub-thread of: <parent>" and the inherited band above a sub-thread's
 +//! messages. Re-rendered by `ConversationView`'s observation of both stores
 +//! (`crate::sub_thread::observe_sub_thread_stores`): `ThreadView` observes neither.
@@ -2867,6 +2867,48 @@ index 0000000..6bc8edf
 +// R4.9, word for word.
 +const NEVER_USED_FORK_TEXT: &str = "This sub-thread was never used and can't be reopened";
 +
++/// A reopen through the real ACP connection fails inside `open_or_create_session`'s shared task,
++/// which holds the error as `Arc<anyhow::Error>`; its caller re-wraps that `Arc` with `anyhow!`,
++/// and an `Arc<anyhow::Error>` is no `std::error::Error`, so anyhow keeps it as an ad-hoc message
++/// and a direct downcast to `acp::Error` misses it. Found by the task 8.1 live proof, 2026-10-23:
++/// the GPUI tests' fake connection skips that task.
++fn is_resource_not_found(error: &anyhow::Error) -> bool {
++    let acp_error = error
++        .downcast_ref::<agent_client_protocol::Error>()
++        .or_else(|| {
++            error
++                .downcast_ref::<std::sync::Arc<anyhow::Error>>()
++                .and_then(|shared| shared.downcast_ref::<agent_client_protocol::Error>())
++        });
++    acp_error.is_some_and(|error| error.code == agent_client_protocol::ErrorCode::ResourceNotFound)
++}
++
++#[cfg(test)]
++mod resource_not_found_tests {
++    use super::is_resource_not_found;
++    use agent_client_protocol::Error as AcpError;
++    use std::sync::Arc;
++
++    #[test]
++    fn found_directly_and_through_the_shared_load_task() {
++        let direct = anyhow::anyhow!(AcpError::resource_not_found(None));
++        assert!(is_resource_not_found(&direct));
++        // The shape `open_or_create_session` hands back: `anyhow!(Arc<anyhow::Error>)`.
++        let shared = anyhow::anyhow!(Arc::new(anyhow::anyhow!(AcpError::resource_not_found(
++            None
++        ))));
++        assert!(is_resource_not_found(&shared));
++    }
++
++    #[test]
++    fn other_codes_and_plain_messages_are_not() {
++        let internal = anyhow::anyhow!(Arc::new(anyhow::anyhow!(AcpError::internal_error())));
++        assert!(!is_resource_not_found(&internal));
++        let message = anyhow::anyhow!("Resource not found");
++        assert!(!is_resource_not_found(&message));
++    }
++}
++
 +impl ConversationView {
 +    /// R4.9. The adapter reloads a fork by resuming its SDK session, and a fork nobody prompted
 +    /// left no transcript, so after a restart the reload answers resource-not-found (the 2026-10-21
@@ -2874,10 +2916,7 @@ index 0000000..6bc8edf
 +    /// clean one, an unlinked thread or another code keeps upstream's load error. `map_acp_error`
 +    /// keeps the `acp::Error` inside the `anyhow::Error`, under any context it adds.
 +    pub(super) fn is_never_used_fork(&self, error: &anyhow::Error, cx: &App) -> bool {
-+        let not_found = error
-+            .downcast_ref::<agent_client_protocol::Error>()
-+            .is_some_and(|error| error.code == agent_client_protocol::ErrorCode::ResourceNotFound);
-+        not_found
++        is_resource_not_found(error)
 +            && ThreadOrganizationStore::try_global(cx)
 +                .and_then(|store| store.read(cx).parent(self.thread_id))
 +                .is_some_and(|(_, kind)| kind == ForkKind::WithContext)
@@ -3012,10 +3051,10 @@ index bd786d0..d35c8f2 100644
              })
 diff --git a/crates/agent_ui/src/sub_thread.rs b/crates/agent_ui/src/sub_thread.rs
 new file mode 100644
-index 0000000..4c36846
+index 0000000..a1dec63
 --- /dev/null
 +++ b/crates/agent_ui/src/sub_thread.rs
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,348 @@
 +//! Sub-threads opened from a selection in a thread (story 039): a clean thread that starts
 +//! from the quoted excerpt, or a fork of the parent session that inherits its conversation.
 +
@@ -3338,10 +3377,7 @@ index 0000000..4c36846
 +#[path = "sub_thread_tests/clean.rs"]
 +mod clean;
 +
-+// The authored fork tests clone a session id their last use could move; their assertions are
-+// frozen, so the lint is silenced here rather than edited there.
 +#[cfg(test)]
-+#[allow(clippy::redundant_clone)]
 +#[path = "sub_thread_tests/fork.rs"]
 +mod fork;
 +
@@ -3349,7 +3385,8 @@ index 0000000..4c36846
 +#[path = "sub_thread_tests/fork_abandoned.rs"]
 +mod fork_abandoned;
 +
-+// Same as `fork`: a frozen assertion clones a session id on its last use.
++// A frozen assertion clones a session id on its last use; the lint is silenced here rather than
++// edited there.
 +#[cfg(test)]
 +#[allow(clippy::redundant_clone)]
 +#[path = "sub_thread_tests/menu.rs"]
@@ -4125,7 +4162,7 @@ index 0000000..67f6725
 +}
 diff --git a/crates/agent_ui/src/sub_thread_tests/fork.rs b/crates/agent_ui/src/sub_thread_tests/fork.rs
 new file mode 100644
-index 0000000..7687437
+index 0000000..9099337
 --- /dev/null
 +++ b/crates/agent_ui/src/sub_thread_tests/fork.rs
 @@ -0,0 +1,329 @@
@@ -4367,7 +4404,7 @@ index 0000000..7687437
 +    assert_eq!(entry_count(&fork, &cx), 0, "still empty");
 +    assert_eq!(
 +        fork.read_with(&cx, |t, _| t.forked_from().cloned()),
-+        Some(parent.session.clone()),
++        Some(parent.session),
 +        "the registered, marked thread"
 +    );
 +    assert!(!fork.read_with(&cx, |t, _| t.is_draft_thread()));
@@ -4403,7 +4440,7 @@ index 0000000..7687437
 +    );
 +    let child = thread_view.read_with(&cx, |view, cx| view.thread.read(cx).session_id().clone());
 +    assert_ne!(child, parent.session, "a fork was opened all the same");
-+    assert_eq!(h.connection.forked_from(), vec![parent.session.clone()]);
++    assert_eq!(h.connection.forked_from(), vec![parent.session]);
 +}
 +
 +// The forked entity is held only until the view has it: once the sub-thread is closed, nothing
