@@ -145,6 +145,8 @@ CRATES="
 	bon-macros@3.8.2
 	bon@3.8.2
 	borrow-or-share@0.2.4
+	borsh-derive@1.8.1
+	borsh@1.8.1
 	brush-parser@0.3.0
 	bs58@0.5.1
 	bstr@1.12.1
@@ -231,6 +233,7 @@ CRATES="
 	core-services@1.0.0
 	core-text@21.0.0
 	core2@0.4.0
+	core_detect@1.0.0
 	core_maths@0.1.1
 	coreaudio-rs@0.12.1
 	coreaudio-rs@0.14.2
@@ -844,6 +847,8 @@ CRATES="
 	profiling@1.0.17
 	prometheus@0.14.0
 	proptest-derive@0.8.0
+	proptest-macro@0.6.0
+	proptest@1.12.0
 	prost-build@0.14.4
 	prost-derive@0.14.4
 	prost-reflect@0.16.5
@@ -887,7 +892,7 @@ CRATES="
 	rand_core@0.9.3
 	rand_pcg@0.10.2
 	rand_pcg@0.3.1
-	rand_xorshift@0.4.0
+	rand_xorshift@0.5.0
 	random_choice@0.3.2
 	range-alloc@0.1.4
 	range-map@0.2.0
@@ -1515,8 +1520,6 @@ declare -A GIT_CRATES=(
 	[pet-windows-store]='https://github.com/zed-industries/python-environment-tools;5aad7164bfc2a58977b103c8ef8fdd7302ed2e9f;python-environment-tools-%commit%/crates/pet-windows-store'
 	[pet-winpython]='https://github.com/zed-industries/python-environment-tools;5aad7164bfc2a58977b103c8ef8fdd7302ed2e9f;python-environment-tools-%commit%/crates/pet-winpython'
 	[pet]='https://github.com/zed-industries/python-environment-tools;5aad7164bfc2a58977b103c8ef8fdd7302ed2e9f;python-environment-tools-%commit%/crates/pet'
-	[proptest-macro]='https://github.com/proptest-rs/proptest;3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b;proptest-%commit%/proptest-macro'
-	[proptest]='https://github.com/proptest-rs/proptest;3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b;proptest-%commit%/proptest'
 	[rodio]='https://github.com/RustAudio/rodio;3ee9745862279ce1d18db593155016e7ce024aeb;rodio-%commit%'
 	[trash]='https://github.com/zed-industries/trash-rs;41c6c800d884a89351f3b8856d12894cccee261d;trash-rs-%commit%'
 	[tree-sitter-cpp]='https://github.com/tree-sitter/tree-sitter-cpp;5cb9b693cfd7bfacab1d9ff4acac1a4150700609;tree-sitter-cpp-%commit%'
@@ -1560,7 +1563,7 @@ declare -A GIT_CRATES=(
 # rewrites the date and EGIT_COMMIT; a second version variable it could not
 # keep current would leave a new tarball under an old, already-manifested name).
 
-EGIT_COMMIT="56934ec0560bce8929025497411de7f5322fb6ca"
+EGIT_COMMIT="92447a17cc008225c73619f1c3f0cdefc8ababf3"
 # LLVM 23 only, so it is the default slot: llvm-r1 would always prefer slot 22
 # (its newest stable) whenever 22 is listed. RUST_NEEDS_LLVM ties the Rust slot
 # to it, so this builds with Rust 1.99, one release past upstream's 1.98.1 pin
@@ -1614,7 +1617,7 @@ LICENSE+=" BSD"
 LICENSE+="
 	Apache-2.0 Apache-2.0-with-LLVM-exceptions BSD-2 BSD Boost-1.0
 	CC0-1.0 CDLA-Permissive-2.0 ISC LGPL-3 MIT MIT-0 MPL-2.0 UoI-NCSA
-	Unicode-3.0 ZLIB BZIP2
+	Unicode-3.0 Unlicense ZLIB BZIP2
 "
 # whisper-rs and whisper-rs-sys (0067) are Unlicense, and whisper.cpp, which
 # whisper-rs-sys bundles, is MIT. They reach the binary only with USE=voice, so
@@ -1882,6 +1885,18 @@ src_prepare() {
 		# 0048's store and 0049's Pinned section, so it sits right after them;
 		# no flag gates it. 0028-0030 and 0063 are regenerated on top of it.
 		"${FILESDIR}/0065-agent-sidebar-drag-reorder.patch"
+		# 0068 (story 037) tags threads from their context menu, draws the tags
+		# as chips on thread rows and filters the sidebar and History by #tag.
+		# It consumes 0048's store, 0049's Pinned section and 0065's drag guard,
+		# so it sits right after 0065; no flag gates it. It also owns the
+		# multi-badge thread row 0063 builds on.
+		"${FILESDIR}/0068-agent-thread-tags-and-filter.patch"
+		# 0069 (story 038) adds a Lists view beside the thread list and History,
+		# "Move to List" in the thread context menu and list management. It
+		# consumes 0048's store and 0049's row builder and edits the regions
+		# 0068 edits, so it sits right after 0068; no flag gates it. 0028-0030
+		# and 0063 are regenerated on top of it.
+		"${FILESDIR}/0069-sidebar-thread-lists-view.patch"
 		# 0061 starts every agent with ZEO_THREAD=1, so zeo-systray's hook can
 		# tell Zeo's sessions from any other Claude Code process and offer the
 		# tray link (0024) only for those. Ungrouped like 0024.
@@ -2112,6 +2127,19 @@ src_prepare() {
 			# a Git LFS agent or extension) or cannot be read; the error names the
 			# key and nothing is created. Pure Zed, BY CHOICE (PARITY item 105).
 			"${FILESDIR}/0062-git-refuse-worktree-when-repo-config-can-run-programs.patch"
+			# 0070 (story 039): select text in an agent reply, right-click, and
+			# open a "Clean sub-thread" or a "Sub-thread with context" (the
+			# session forked through ACP session/fork, still unstable_), linked
+			# to the parent in 0048's store with a header and a sidebar marker
+			# through 0068's badge. Last of this group: it calls 0045's prefilled
+			# thread and extends 0036's config recorder; 0052, 0057, 0058, 0063
+			# and 0067 are generated on top of it.
+			"${FILESDIR}/0070-agent-ui-sub-thread-from-selection.patch"
+			# 0071: Send to Parent in a sub-thread's footer, and sub-threads as
+			# items of 0035's panel and 0037's card (task history steps 5 and
+			# 6). After 0070, whose parent links it reads; 0052, 0057, 0058,
+			# 0063 and 0067 are regenerated on top of it.
+			"${FILESDIR}/0071-agent-send-to-parent-and-sub-thread-items.patch"
 		)
 	fi
 
