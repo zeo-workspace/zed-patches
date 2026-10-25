@@ -31,6 +31,53 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.7.0_p20261021] — 2026-10-25 (tagged)
+
+The release train (story 059) ships as Zeo 0.7.0 on Zed `92447a17`, the snapshot
+`0.6.1_p20261021` already packaged. The train's series directory
+`zeo-0.6.1_p20261021-r1` was renamed to the new `PF`; no patch was carried onto
+another base.
+
+### Added
+
+- `0068`–`0071` join the series, each recorded in `zeo/CHANGELOG.md` 0.7.0:
+  - `0068`, thread tags and the `#tag` filter, with no flag, right after `0065`
+    (story 037);
+  - `0069`, the thread Lists view, with no flag, right after `0068` (038);
+  - `0070`, a sub-thread from a selection in an agent message, USE
+    `claude-agent-acp-plus` (039);
+  - `0071`, Send to Parent and sub-thread items in the tasks card and the Agent
+    Tasks panel, USE `claude-agent-acp-plus`, right after `0070`; its task-history
+    migration step 6 keeps a deleted sub-thread item deleted across restarts (040).
+- `scripts/proofs/` gains the live-proof drivers of stories 037–040 and the release
+  smoke driver `059-release-smoke/run.sh`, which checks one feature of each of
+  `0068`–`0071` in an installed build.
+
+### Changed
+
+- The series reached Zed `92447a17` first as `0.6.1_p20261021`, through the bump of
+  2026-10-21 (`4e2138e`, untagged, which has no section of its own); the train was
+  raised onto it before `0070` and `0071` were authored.
+- `0070`'s header now states its 89 tests (it said 87); `0071`'s states 115.
+- The patches after `0068`–`0071` were regenerated in their context lines only,
+  which is why twenty of them differ from 0.6.1's in the overlay.
+- The never-published series directory `zeo-0.6.0_p20261017-r1`, read by no ebuild,
+  was removed.
+
+### Verification
+
+- verify 68/68; check-sync in sync with the overlay; `test.sh` 5688 passed;
+  selftest 109/109.
+- The series applies under each of the four USE combinations the train tests.
+- `ebuild prepare` as the user for zeo (default USE) and zeo-bin; `pkgcheck` reports
+  no new error.
+- osv-scanner reports nothing new against `0.6.1_p20261021` (50 = 50); CRATES equals
+  the `Cargo.lock` registry set (1462).
+- `zeo-bin` targets x86-64-v3 with glibc ≤ 2.35 and no AVX-512 function; the portable
+  `.deb` and the tarball start in a Debian 12 container and in a VM without AVX-512.
+- Release `v0.7.0_p20261021` on `zeo-workspace/zeo` was downloaded back and checked
+  against `SHA256SUMS`.
+
 ## [0.6.0_p20261017] — 2026-10-19 (tagged)
 
 The release train (story 058) ships as Zeo 0.6.0 on Zed `56934ec`, the snapshot
