@@ -119,12 +119,13 @@ sidebar.rs: module lines, and in sidebar.rs one render_thread line
 between the project-name label and 0068's tag chips. No Cargo.toml, no
 Cargo.lock, no new crate or feature.
 
-Tests: 87 in twelve new files -- acp_thread connection/fork_tests.rs
-(10); agent_servers acp/v1/fork_session_tests.rs (6) and
-fork_config_tests.rs (6); agent_ui sub_thread_tests/ pure (10), clean
-(11), fork (9), fork_abandoned (3), menu (8), menu_subagent (2), header
-(10), reopen (4), with support.rs; sidebar sidebar_sub_thread_tests.rs
-(8).
+Tests: 89 -- 87 in twelve new test files, acp_thread
+connection/fork_tests.rs (10); agent_servers acp/v1/fork_session_tests.rs
+(6) and fork_config_tests.rs (6); agent_ui sub_thread_tests/ pure (10),
+clean (11), fork (9), fork_abandoned (3), menu (8), menu_subagent (2),
+header (10), reopen (4), with support.rs; sidebar
+sidebar_sub_thread_tests.rs (8) -- and 2 in the test module of the new
+agent_ui conversation_view/sub_thread_header.rs.
 
 Group claude-agent-acp-plus, last of it: it calls 0045's
 new_thread_with_prefilled_prompt and extends 0036's config recorder, and
