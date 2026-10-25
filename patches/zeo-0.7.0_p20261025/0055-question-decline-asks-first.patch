@@ -1,0 +1,1701 @@
+From d8b15d5803b0738a103a2cbbf9ed14a2d8b02922 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Sun, 11 Oct 2026 15:19:58 -0300
+Subject: [PATCH] agent_ui: Decline asks first only when an answer would be
+ lost
+
+Decline on an AskUserQuestion card threw away whatever the operator had typed
+or picked, with no warning. Now it asks first, but only when something would
+be lost: an untouched question still declines in one click. Either way a
+declined question leaves a "Skipped" line in the conversation, so the reason
+the agent went on without an answer stays visible (story 035, R2-R4).
+
+**Confirm only when an answer would be lost.** `ElicitationFormState` keeps
+the values the card showed right after construction -- schema defaults and a
+required single-select's preselection applied -- and `has_input` compares the
+current ones against them on every page, shown or not. Text is compared
+trimmed, so whitespace alone is no answer; selections are sets, so a choice
+made and undone is no answer either. "Untouched" therefore means "as it was
+shown", not "empty".
+
+**Only question cards.** `is_question_shaped(schema)` is true when a property
+carries the `_askUserQuestionCustomAnswer` marker -- the rule 0027 already
+paginates on -- and reuses `custom_answer_companion_of`; a field merely named
+like the adapter's custom box does not count. Every other form, the adapter's
+refusal-fallback "Retry with ...?" prompt and MCP connection-scoped forms
+included, declines exactly as before.
+
+**The prompt.** `ThreadView::decline_elicitation`, which the card's Decline
+button and its keyboard path both reach in the pinned and the inline
+placement, opens `window.prompt(PromptLevel::Warning, "Skip this question?",
+...)` with "Skip Question" and "Keep Answering" -- the pattern 0037 and 0042
+use. Only index 0 declines. Any other answer, Escape or a closed prompt keeps
+the question pending with its text, selection and page untouched. One prompt
+per card: a second Decline while it is open does nothing. When the prompt is
+answered after the question was answered, cancelled or ended with the turn,
+nothing is sent (logged at DEBUG), and a queued second question is never
+declined in its place. Cancel, Escape in the composer and URL dismissal are
+unchanged. One INFO line per outcome carries the session id, the elicitation
+id, `confirmation=asked|not_needed` and `outcome=declined|kept`, never a field
+value.
+
+**The "Skipped" line.** A declined, question-shaped form now renders, at its
+place in the conversation, as one muted row -- "Skipped" and the request's
+message cut to one line, no buttons -- in both placements. It is a separate
+branch in `render_entry`'s `Elicitation` arm: `should_render_elicitation` and
+`renders_elicitation_as_card` are unchanged, so 0027's truth table holds and
+the pinned slot moves on to the next queued question.
+
+The adapter is unchanged: `applyAskElicitationResponse` maps `decline` to
+`answers: {}` and lets the turn continue, and maps every other non-accept
+action to an abort.
+
+Tests: 13 unit tests for `has_input`/`is_question_shaped`, 12 for the
+conditional prompt, 7 for the "Skipped" line and 4 that go through the
+rendered card's keyboard Decline in both placements.
+
+Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
+0043 and 0045, and needs no adapter feature.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/agent_ui/src/conversation_view/elicitation.rs b/crates/agent_ui/src/conversation_view/elicitation.rs
+index b895b63..e56e60b 100644
+--- a/crates/agent_ui/src/conversation_view/elicitation.rs
++++ b/crates/agent_ui/src/conversation_view/elicitation.rs
+@@ -59,6 +59,10 @@ pub(crate) struct ElicitationFormState {
+     pages: Vec<Vec<SharedString>>,
+     /// Index into `pages`. Always in range: every mutator clamps it.
+     page: usize,
++    /// The values the card showed right after construction, with schema
++    /// defaults and a required single-select's preselection applied. "Has
++    /// input" means "differs from this", not "is non-empty".
++    initial: ElicitationFormSubmission,
+ }
+ 
+ impl ElicitationFormState {
+@@ -135,7 +139,7 @@ impl ElicitationFormState {
+             fields.insert(name.clone(), field);
+         }
+ 
+-        Self {
++        let mut state = Self {
+             fields,
+             field_errors: HashMap::default(),
+             expanded_previews: HashSet::default(),
+@@ -143,7 +147,28 @@ impl ElicitationFormState {
+             is_submitting: false,
+             pages: form_pages(schema),
+             page: 0,
+-        }
++            initial: ElicitationFormSubmission {
++                fields: HashMap::default(),
++            },
++        };
++        state.initial = state.snapshot(cx);
++        state
++    }
++
++    /// Whether any field, on any page, differs from the card's initial
++    /// values. Text is compared trimmed, so whitespace alone is no answer;
++    /// selections are sets, so a choice made and undone is no answer either.
++    pub(crate) fn has_input(&self, cx: &App) -> bool {
++        let current = self.snapshot(cx);
++        current.fields.iter().any(
++            |(name, value)| match (value, self.initial.fields.get(name)) {
++                (ElicitationFieldValue::Text(text), Some(ElicitationFieldValue::Text(initial))) => {
++                    text.trim() != initial.trim()
++                }
++                (value, Some(initial)) => value != initial,
++                (_, None) => true,
++            },
++        )
+     }
+ 
+     /// The field groups a paginated card steps through. One entry when the
+@@ -2092,6 +2117,15 @@ fn property_meta(property: &acp::ElicitationPropertySchema) -> Option<&acp::Meta
+     }
+ }
+ 
++/// Whether a form is an AskUserQuestion card: some property carries the
++/// custom-answer marker. The marker is the rule, never the field's name.
++pub(crate) fn is_question_shaped(schema: &acp::ElicitationSchema) -> bool {
++    schema
++        .properties
++        .values()
++        .any(|property| custom_answer_companion_of(property).is_some())
++}
++
+ /// The field this one is the custom-answer companion of, if it is one.
+ /// Tolerant in the same way as the option previews above: an absent key, a
+ /// non-object entry or a wrong-typed field all yield `None`, never an error.
+@@ -3341,3 +3375,6 @@ impl<'a> ElicitationCard<'a> {
+             .into_any_element()
+     }
+ }
++
++#[cfg(test)]
++mod elicitation_has_input_tests;
+diff --git a/crates/agent_ui/src/conversation_view/elicitation/elicitation_has_input_tests.rs b/crates/agent_ui/src/conversation_view/elicitation/elicitation_has_input_tests.rs
+new file mode 100644
+index 0000000..5f74176
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/elicitation/elicitation_has_input_tests.rs
+@@ -0,0 +1,275 @@
++//! Was the question card touched, and is a form question-shaped (story 035, Task 3.1; R2.1-R2.4,
++//! R2.9, assumption A1).
++//!
++//! Wiring: in `crates/agent_ui/src/conversation_view/elicitation.rs` declare
++//!
++//!     #[cfg(test)]
++//!     mod elicitation_has_input_tests;
++//!
++//! -- a module of a non-mod-rs file, so it resolves to
++//! `crates/agent_ui/src/conversation_view/elicitation/elicitation_has_input_tests.rs`.
++//!
++//! Contract (Task 3.1 Objective):
++//!   - `ElicitationFormState::has_input(&self, cx: &App) -> bool` -- true when any field differs
++//!     from the state the form had right after construction (defaults and preselection applied).
++//!   - `pub(crate) fn is_question_shaped(schema: &acp::ElicitationSchema) -> bool` -- true when any
++//!     property carries the `_askUserQuestionCustomAnswer` marker in its `_meta`.
++//!
++//! Hostile halves, authored first:
++//!   - has_input wrongly TRUE: a preselected required option, a schema default, whitespace typed,
++//!     a choice made and undone -- the card still holds its initial state (R2.1, R2.4, A1).
++//!   - has_input wrongly FALSE: text typed on a page that is not shown, a choice that differs from
++//!     a non-empty initial selection, a multi-select pick (R2.2, R2.3).
++//!   - is_question_shaped wrongly TRUE: a field NAMED like the adapter's custom box
++//!     (`question_0_custom`) without the marker; wrongly FALSE: the marker on a field with any
++//!     other name. The marker is the rule, never the name (R2.9).
++//! The marker key is spelled out literally: it is the wire contract with the adapter.
++
++use super::*;
++use gpui::TestAppContext;
++
++const MARKER: &str = "_askUserQuestionCustomAnswer";
++
++fn marked(question_id: &str) -> acp::StringPropertySchema {
++    let mut schema = acp::StringPropertySchema::new().title("Other");
++    let mut meta = serde_json::Map::new();
++    meta.insert(
++        MARKER.to_string(),
++        serde_json::json!({ "questionId": question_id, "isCustomAnswer": true }),
++    );
++    schema.meta = Some(meta);
++    schema
++}
++
++fn choices(values: &[&str]) -> acp::StringPropertySchema {
++    acp::StringPropertySchema::new()
++        .enum_values(values.iter().map(|v| v.to_string()).collect::<Vec<_>>())
++}
++
++/// What AskUserQuestion sends for two questions (single-select, then multi-select): nothing
++/// required, one "Other" box per question, one page per question.
++fn ask_user_question_schema() -> acp::ElicitationSchema {
++    acp::ElicitationSchema::new()
++        .property("question_0", choices(&["Red", "Blue"]), false)
++        .property("question_0_custom", marked("question_0"), false)
++        .property(
++            "question_1",
++            acp::MultiSelectPropertySchema::new(vec!["Rust".into(), "Go".into()]),
++            false,
++        )
++        .property("question_1_custom", marked("question_1"), false)
++}
++
++fn set_text(
++    form: &ElicitationFormState,
++    field: &str,
++    text: &str,
++    window: &mut Window,
++    cx: &mut App,
++) {
++    form.text_field_editor(field)
++        .unwrap_or_else(|| panic!("{field} is a text field"))
++        .update(cx, |editor, cx| editor.set_text(text, window, cx));
++}
++
++/// Runs `body` with a window, for forms whose text fields are editors.
++fn with_window(cx: &mut TestAppContext, body: impl FnOnce(&mut Window, &mut App) + 'static) {
++    crate::conversation_view::tests::init_test(cx);
++    cx.add_window(|window, cx| {
++        body(window, cx);
++        Editor::single_line(window, cx)
++    });
++}
++
++// ---- has_input: the cases where it must NOT fire (hostile: wrongly collapse into "touched") ----
++
++#[gpui::test]
++fn elicitation_has_input_false_for_a_fresh_question_card(cx: &mut TestAppContext) {
++    with_window(cx, |window, cx| {
++        let form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        assert!(!form.has_input(cx), "R2.1: an untouched card has no input");
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_false_for_a_preselected_required_option(cx: &mut TestAppContext) {
++    // A required single-select starts with its first option picked: not empty, and not input.
++    with_window(cx, |window, cx| {
++        let schema = acp::ElicitationSchema::new().property("pick", choices(&["a", "b"]), true);
++        let form = ElicitationFormState::new(&schema, window, cx);
++        assert!(
++            !form.has_input(cx),
++            "R2.1: the preselection is the initial state, not something the operator did"
++        );
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_false_for_schema_defaults(cx: &mut TestAppContext) {
++    with_window(cx, |window, cx| {
++        let mut text = acp::StringPropertySchema::new();
++        text.default = Some("prefilled".into());
++        let mut flag = acp::BooleanPropertySchema::new();
++        flag.default = Some(true);
++        let schema = acp::ElicitationSchema::new()
++            .property("text", text, false)
++            .property("flag", flag, false)
++            .property("pick", choices(&["a", "b"]), false);
++        let form = ElicitationFormState::new(&schema, window, cx);
++        assert!(!form.has_input(cx), "R2.1: defaults are the initial state");
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_false_for_whitespace_only_text(cx: &mut TestAppContext) {
++    with_window(cx, |window, cx| {
++        let form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        set_text(&form, "question_0_custom", "   \n\t ", window, cx);
++        assert!(!form.has_input(cx), "A1: whitespace is not something typed");
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_false_after_a_choice_is_made_and_undone(cx: &mut TestAppContext) {
++    // R2.4, every field kind: picked then unpicked, typed then erased, toggled then toggled back,
++    // and a required preselection moved away and back.
++    with_window(cx, |window, cx| {
++        let schema = ask_user_question_schema()
++            .property("flag", acp::BooleanPropertySchema::new(), false)
++            .property("required_pick", choices(&["x", "y"]), true);
++        let mut form = ElicitationFormState::new(&schema, window, cx);
++
++        form.set_multi_select("question_1", "Go".into(), true);
++        assert!(form.has_input(cx), "precondition: a pick is input");
++        form.set_multi_select("question_1", "Go".into(), false);
++        assert!(!form.has_input(cx), "R2.4: unpicked again");
++
++        set_text(&form, "question_1_custom", "Zig", window, cx);
++        assert!(form.has_input(cx), "precondition: typed text is input");
++        set_text(&form, "question_1_custom", "", window, cx);
++        assert!(!form.has_input(cx), "R2.4: erased again");
++
++        form.set_boolean("flag", true);
++        assert!(form.has_input(cx), "precondition: a toggle is input");
++        form.set_boolean("flag", false);
++        assert!(!form.has_input(cx), "R2.4: toggled back");
++
++        form.set_single_select("required_pick", "y".into());
++        assert!(
++            form.has_input(cx),
++            "R2.3: moving off the preselection is input"
++        );
++        form.set_single_select("required_pick", "x".into());
++        assert!(!form.has_input(cx), "R2.4: back on the preselection");
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_ignores_the_page_shown(cx: &mut TestAppContext) {
++    // Moving between pages is navigation, not an answer.
++    with_window(cx, |window, cx| {
++        let mut form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        assert_eq!(form.pages().len(), 2, "precondition: one page per question");
++        form.set_page(1);
++        assert!(!form.has_input(cx));
++    });
++}
++
++// ---- has_input: the cases where it MUST fire (hostile: wrongly split away from "touched") ----
++
++#[gpui::test]
++fn elicitation_has_input_true_for_text_on_a_page_not_shown(cx: &mut TestAppContext) {
++    // R2.2: "on any page" -- text on page 2 counts while page 1 is shown, and vice versa.
++    with_window(cx, |window, cx| {
++        let mut form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        set_text(&form, "question_1_custom", "Zig", window, cx);
++        form.set_page(0);
++        assert!(form.has_input(cx), "R2.2: text on the hidden page 2");
++
++        let mut form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        set_text(&form, "question_0_custom", "Green", window, cx);
++        form.set_page(1);
++        assert!(form.has_input(cx), "R2.2: text on the hidden page 1");
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_true_for_a_selection(cx: &mut TestAppContext) {
++    with_window(cx, |window, cx| {
++        let mut form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        form.set_single_select("question_0", "Blue".into());
++        assert!(form.has_input(cx), "R2.3: a single-select pick");
++
++        let mut form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        form.set_multi_select("question_1", "Rust".into(), true);
++        assert!(form.has_input(cx), "R2.3: a multi-select pick on page 2");
++    });
++}
++
++#[gpui::test]
++fn elicitation_has_input_true_for_text_around_whitespace(cx: &mut TestAppContext) {
++    // The converse of A1: whitespace around a real answer does not hide it.
++    with_window(cx, |window, cx| {
++        let form = ElicitationFormState::new(&ask_user_question_schema(), window, cx);
++        set_text(&form, "question_0_custom", "  Green \n", window, cx);
++        assert!(form.has_input(cx), "R2.2: non-whitespace text is input");
++    });
++}
++
++// ---- is_question_shaped ----
++
++#[test]
++fn elicitation_has_input_is_question_shaped_for_ask_user_question_forms() {
++    assert!(is_question_shaped(&ask_user_question_schema()));
++}
++
++#[test]
++fn elicitation_has_input_is_question_shaped_rejects_the_name_without_the_marker() {
++    // Hostile: wrongly collapse a look-alike into a question.
++    let schema = acp::ElicitationSchema::new()
++        .property("question_0", choices(&["Red", "Blue"]), false)
++        .property(
++            "question_0_custom",
++            acp::StringPropertySchema::new().title("Other"),
++            false,
++        );
++    assert!(
++        !is_question_shaped(&schema),
++        "R2.9: the field name is not the rule; the marker is"
++    );
++}
++
++#[test]
++fn elicitation_has_input_is_question_shaped_accepts_the_marker_under_any_name() {
++    // Hostile: wrongly split a marked form away from questions because its names differ.
++    let schema = acp::ElicitationSchema::new()
++        .property("colour", choices(&["Red", "Blue"]), false)
++        .property("notes", marked("colour"), false);
++    assert!(
++        is_question_shaped(&schema),
++        "the marker alone makes it a question"
++    );
++}
++
++#[test]
++fn elicitation_has_input_is_question_shaped_false_for_ordinary_forms() {
++    // MCP-style forms and the adapter's refusal-fallback "Retry with ...?" prompt carry no marker.
++    let plain = acp::ElicitationSchema::new()
++        .string("host", true)
++        .string("port", false);
++    assert!(!is_question_shaped(&plain));
++    let retry = acp::ElicitationSchema::new().property("retry", choices(&["Retry", "Skip"]), false);
++    assert!(!is_question_shaped(&retry));
++    let mut other_meta = acp::StringPropertySchema::new();
++    let mut meta = serde_json::Map::new();
++    meta.insert(
++        "_claude/askUserQuestionOption".into(),
++        serde_json::json!({}),
++    );
++    other_meta.meta = Some(meta);
++    let unrelated = acp::ElicitationSchema::new().property("x", other_meta, false);
++    assert!(
++        !is_question_shaped(&unrelated),
++        "another `_meta` key on a field is not the marker"
++    );
++}
+diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
+index e7cd37c..a7ddc0a 100644
+--- a/crates/agent_ui/src/conversation_view/thread_view.rs
++++ b/crates/agent_ui/src/conversation_view/thread_view.rs
+@@ -36,6 +36,7 @@ use crate::unicode_confusables;
+ 
+ use db::kvp::KeyValueStore;
+ use gpui::List;
++use gpui::PromptLevel;
+ use gpui::Stateful;
+ use gpui::TaskExt;
+ use heapless::Vec as ArrayVec;
+@@ -57,7 +58,7 @@ use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
+ 
+ use super::elicitation::{
+     ElicitationCard, ElicitationCardHandlers, ElicitationFormState, QuestionQueue,
+-    should_render_elicitation,
++    is_question_shaped, should_render_elicitation,
+ };
+ use super::subagent_card::{SubagentCardId, SubagentCardState, SubagentStatus, acp_subagent_card};
+ use super::*;
+@@ -818,6 +819,9 @@ pub struct ThreadView {
+     pub new_server_version_available: Option<SharedString>,
+     pub resumed_without_history: bool,
+     elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
++    /// Questions whose "Skip this question?" prompt is open, so a second
++    /// Decline on the same card opens no second prompt.
++    open_decline_confirmations: HashSet<ElicitationEntryId>,
+     question_queue: QuestionQueue,
+     pub _cancel_task: Option<Task<()>>,
+     _save_task: Option<Task<()>>,
+@@ -1346,6 +1350,7 @@ impl ThreadView {
+             is_loading_contents: false,
+             new_server_version_available: None,
+             elicitation_form_states: HashMap::default(),
++            open_decline_confirmations: HashSet::default(),
+             question_queue: QuestionQueue::default(),
+             _cancel_task: None,
+             _save_task: None,
+@@ -3788,12 +3793,113 @@ impl ThreadView {
+         }
+     }
+ 
++    /// Declines a question at once when nothing would be lost; when the
++    /// operator has typed or selected something, asks first and declines only
++    /// on "Skip Question". Forms that are not questions decline as they always
++    /// did.
+     fn decline_elicitation(
+         &mut self,
+         elicitation_id: ElicitationEntryId,
+-        _window: &mut Window,
++        window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
++        if self.open_decline_confirmations.contains(&elicitation_id) {
++            return;
++        }
++        if !self.decline_needs_confirmation(&elicitation_id, cx) {
++            self.log_decline_outcome(&elicitation_id, "not_needed", "declined");
++            self.send_decline(elicitation_id, cx);
++            return;
++        }
++
++        self.open_decline_confirmations
++            .insert(elicitation_id.clone());
++        let answer = window.prompt(
++            PromptLevel::Warning,
++            "Skip this question?",
++            Some(
++                "What you typed or selected will be discarded, \
++                 and the agent will continue without an answer.",
++            ),
++            &["Skip Question", "Keep Answering"],
++            cx,
++        );
++        cx.spawn_in(window, async move |this, cx| {
++            // Index 0 is "Skip Question"; `Err` is a prompt whose sender was
++            // dropped, which keeps the question like "Keep Answering" does.
++            let confirmed = matches!(answer.await, Ok(0));
++            this.update(cx, |this, cx| {
++                this.open_decline_confirmations.remove(&elicitation_id);
++                if !confirmed {
++                    this.log_decline_outcome(&elicitation_id, "asked", "kept");
++                    return;
++                }
++                // The question may have been answered, cancelled or ended
++                // with the turn while the prompt was open: it is no longer
++                // the operator's to decline.
++                if !this.is_elicitation_pending(&elicitation_id, cx)
++                    || !this.elicitation_form_states.contains_key(&elicitation_id)
++                {
++                    log::debug!(
++                        "elicitation decline: session_id={} elicitation_id={} \
++                         resolved before the skip was confirmed; nothing sent",
++                        this.session_id,
++                        elicitation_id.0
++                    );
++                    return;
++                }
++                this.log_decline_outcome(&elicitation_id, "asked", "declined");
++                this.send_decline(elicitation_id, cx);
++            })
++            .log_err();
++        })
++        .detach();
++    }
++
++    /// Whether declining this elicitation would discard an answer in
++    /// progress: only a question-shaped form whose fields differ from their
++    /// initial values.
++    fn decline_needs_confirmation(&self, elicitation_id: &ElicitationEntryId, cx: &App) -> bool {
++        let Some(form_state) = self.elicitation_form_states.get(elicitation_id) else {
++            return false;
++        };
++        let is_question = self
++            .thread
++            .read(cx)
++            .elicitation(elicitation_id)
++            .is_some_and(|(_, elicitation)| match &elicitation.request.mode {
++                acp_v2::ElicitationMode::Form(mode) => is_question_shaped(&mode.requested_schema),
++                _ => false,
++            });
++        is_question && form_state.has_input(cx)
++    }
++
++    fn is_elicitation_pending(&self, elicitation_id: &ElicitationEntryId, cx: &App) -> bool {
++        self.thread
++            .read(cx)
++            .elicitation(elicitation_id)
++            .is_some_and(|(_, elicitation)| {
++                matches!(elicitation.status, ElicitationStatus::Pending { .. })
++            })
++    }
++
++    /// One line per decline outcome. Identifiers only: never the typed text
++    /// or the options chosen.
++    fn log_decline_outcome(
++        &self,
++        elicitation_id: &ElicitationEntryId,
++        confirmation: &str,
++        outcome: &str,
++    ) {
++        log::info!(
++            "elicitation decline: session_id={} elicitation_id={} \
++             confirmation={confirmation} outcome={outcome}",
++            self.session_id,
++            elicitation_id.0
++        );
++    }
++
++    fn send_decline(&mut self, elicitation_id: ElicitationEntryId, cx: &mut Context<Self>) {
+         self.respond_to_elicitation(
+             elicitation_id,
+             acp_v2::CreateElicitationResponse::new(acp_v2::ElicitationAction::Decline),
+@@ -8020,6 +8126,10 @@ impl ThreadView {
+             AgentThreadEntry::Elicitation(elicitation_id) => {
+                 let thread = self.thread.read(cx);
+                 if let Some((_, elicitation)) = thread.elicitation(elicitation_id)
++                    && Self::is_skipped_question(elicitation)
++                {
++                    Self::render_skipped_question(entry_ix, elicitation).into_any_element()
++                } else if let Some((_, elicitation)) = thread.elicitation(elicitation_id)
+                     && should_render_elicitation(elicitation)
+                     && !Self::renders_elicitation_as_card(elicitation, cx)
+                 {
+@@ -8204,6 +8314,43 @@ impl ThreadView {
+         .render(cx)
+     }
+ 
++    /// A declined AskUserQuestion card. It leaves a one-line trace in the
++    /// conversation; resolved forms are otherwise not drawn, and the pinned
++    /// slot moves on to the next queued question.
++    fn is_skipped_question(elicitation: &Elicitation) -> bool {
++        matches!(elicitation.status, ElicitationStatus::Declined)
++            && matches!(
++                &elicitation.request.mode,
++                acp_v2::ElicitationMode::Form(mode) if is_question_shaped(&mode.requested_schema)
++            )
++    }
++
++    fn render_skipped_question(entry_ix: usize, elicitation: &Elicitation) -> impl IntoElement {
++        h_flex()
++            .debug_selector(move || format!("elicitation-skipped-{entry_ix}"))
++            .mx_5()
++            .my_1()
++            .gap_1p5()
++            .min_w_0()
++            .child(
++                Icon::new(IconName::Close)
++                    .size(IconSize::Small)
++                    .color(Color::Muted),
++            )
++            .child(
++                Label::new("Skipped")
++                    .size(LabelSize::Small)
++                    .color(Color::Muted),
++            )
++            .child(
++                Label::new(elicitation.request.message.clone())
++                    .size(LabelSize::Small)
++                    .color(Color::Muted)
++                    .single_line()
++                    .truncate(),
++            )
++    }
++
+     fn elicitation_card_handlers(&self, cx: &Context<Self>) -> ElicitationCardHandlers {
+         let view = cx.entity().downgrade();
+ 
+@@ -15285,6 +15432,14 @@ fn strip_leading_command(text: &str, command_name: &str) -> String {
+ 
+ #[cfg(test)]
+ mod tests {
++    mod elicitation_decline_harness;
++
++    mod decline_confirmation_tests;
++
++    mod elicitation_skipped_tests;
++
++    mod decline_contract_tests;
++
+     use super::*;
+     use gpui::UpdateGlobal;
+     use project::{FakeFs, Project};
+diff --git a/crates/agent_ui/src/conversation_view/thread_view/tests/decline_confirmation_tests.rs b/crates/agent_ui/src/conversation_view/thread_view/tests/decline_confirmation_tests.rs
+new file mode 100644
+index 0000000..d53eb66
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/thread_view/tests/decline_confirmation_tests.rs
+@@ -0,0 +1,370 @@
++//! Decline asks first only when an answer would be lost (story 035, Task 3.2; R2.1-R2.10, Q4).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view/thread_view.rs`'s `mod tests { .. }`,
++//! declare `mod decline_confirmation_tests;` beside `mod elicitation_decline_harness;`.
++//! Resolves to `crates/agent_ui/src/conversation_view/thread_view/tests/decline_confirmation_tests.rs`.
++//!
++//! Contract (Task 3.2 Objective): `ThreadView::decline_elicitation` on a question-shaped form
++//! declines at once when untouched; when touched it opens a `window.prompt` with the buttons
++//! "Skip Question" (index 0, declines) and "Keep Answering", and declines only on index 0.
++//!
++//! Hostile halves, authored first: the confirmation firing wrongly (untouched card, a choice
++//! undone, a non-question form -- even one whose field NAMES look like a question's -- Cancel)
++//! and the confirmation wrongly skipped (text on a page not shown, a selection alone). Then the
++//! prompt's outcomes: kept leaves everything as it was; confirmed sends Decline; a question that
++//! ended meanwhile gets nothing, and a second queued question is never declined in its place.
++//!
++//! Not asserted: the prompt's title and detail wording (story Out of Scope), R4.1's log line,
++//! and the `Err` (prompt closed) branch -- the test platform can only answer by label.
++
++use gpui::TestAppContext;
++
++use super::elicitation_decline_harness::*;
++
++// ---- the confirmation must NOT fire ----
++
++#[gpui::test]
++async fn decline_confirmation_not_asked_for_an_untouched_question(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(
++        &thread,
++        two_questions(),
++        "Pick a colour and a language.",
++        &mut cx,
++    );
++    assert!(
++        view.read_with(&cx, |v, _| v.has_elicitation_form_state(&q.id)),
++        "precondition: the pending question has a form state"
++    );
++
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++
++    assert!(
++        !cx.has_pending_prompt(),
++        "R2.1: no confirmation for an untouched card"
++    );
++    assert_eq!(
++        status(&thread, &q.id, &cx),
++        "declined",
++        "R2.1: declined at once"
++    );
++    assert_eq!(sent(&q), "decline", "R2.5: the agent receives Decline");
++}
++
++#[gpui::test]
++async fn decline_confirmation_not_asked_after_input_is_undone(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    type_into(&view, &q, "question_0_custom", "Green", &mut cx);
++    type_into(&view, &q, "question_0_custom", "   ", &mut cx);
++
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++
++    assert!(
++        !cx.has_pending_prompt(),
++        "R2.4/A1: text typed then erased to whitespace is untouched"
++    );
++    assert_eq!(status(&thread, &q.id, &cx), "declined");
++}
++
++#[gpui::test]
++async fn decline_confirmation_not_asked_for_a_form_that_is_not_a_question(cx: &mut TestAppContext) {
++    // R2.9: an ordinary form (MCP-style), with typed input, declines exactly as today.
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(
++        &thread,
++        agent_client_protocol::schema::v2::ElicitationSchema::new().string("name", false),
++        "Provide a name",
++        &mut cx,
++    );
++    type_into(&view, &q, "name", "zeo", &mut cx);
++
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++
++    assert!(
++        !cx.has_pending_prompt(),
++        "R2.9: no confirmation outside questions"
++    );
++    assert_eq!(status(&thread, &q.id, &cx), "declined");
++    assert_eq!(sent(&q), "decline");
++}
++
++#[gpui::test]
++async fn decline_confirmation_not_asked_for_question_like_names_without_the_marker(
++    cx: &mut TestAppContext,
++) {
++    // Hostile: field names copied from AskUserQuestion, but no marker -- not a question.
++    let (view, thread, mut cx) = setup(cx).await;
++    let schema = agent_client_protocol::schema::v2::ElicitationSchema::new()
++        .property("question_0", choices(&["Retry", "Skip"]), false)
++        .property(
++            "question_0_custom",
++            agent_client_protocol::schema::v2::StringPropertySchema::new(),
++            false,
++        );
++    let q = ask(&thread, schema, "Retry with another model?", &mut cx);
++    type_into(&view, &q, "question_0_custom", "note", &mut cx);
++
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++
++    assert!(
++        !cx.has_pending_prompt(),
++        "R2.9: the marker is the rule, not the names"
++    );
++    assert_eq!(status(&thread, &q.id, &cx), "declined");
++}
++
++#[gpui::test]
++async fn decline_confirmation_not_asked_by_cancel(cx: &mut TestAppContext) {
++    // R2.10: Cancel on a touched card aborts at once, as today.
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    type_into(&view, &q, "question_0_custom", "Green", &mut cx);
++
++    let id = q.id.clone();
++    view.update_in(&mut cx, |v, window, cx| {
++        v.cancel_elicitation(id, window, cx)
++    });
++    settle(&mut cx);
++
++    assert!(!cx.has_pending_prompt(), "R2.10: Cancel never asks");
++    assert_eq!(status(&thread, &q.id, &cx), "canceled");
++    assert_eq!(sent(&q), "cancel");
++}
++
++// ---- the confirmation MUST fire ----
++
++#[gpui::test]
++async fn decline_confirmation_asked_for_text_on_a_page_not_shown(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(
++        &thread,
++        two_questions(),
++        "Pick a colour and a language.",
++        &mut cx,
++    );
++    set_page(&view, &q, 1, &mut cx);
++    type_into(&view, &q, "question_1_custom", "Zig", &mut cx);
++    set_page(&view, &q, 0, &mut cx);
++
++    decline(&view, &q, &mut cx);
++
++    assert!(cx.has_pending_prompt(), "R2.2: text on any page asks first");
++    assert_eq!(
++        status(&thread, &q.id, &cx),
++        "pending",
++        "nothing declined before the answer"
++    );
++    assert_eq!(sent(&q), "nothing");
++
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++    assert_eq!(
++        status(&thread, &q.id, &cx),
++        "declined",
++        "R2.5: confirming declines"
++    );
++    assert_eq!(
++        sent(&q),
++        "decline",
++        "R2.5: as Decline does today -- not Cancel"
++    );
++}
++
++#[gpui::test]
++async fn decline_confirmation_asked_for_a_selection_alone(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    select(&view, &q, "question_0", "Blue", &mut cx);
++
++    decline(&view, &q, &mut cx);
++
++    assert!(cx.has_pending_prompt(), "R2.3: a selection asks first");
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++    assert_eq!(status(&thread, &q.id, &cx), "declined");
++}
++
++// ---- the prompt's outcomes ----
++
++#[gpui::test]
++async fn decline_confirmation_kept_leaves_the_card_as_it_was(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(
++        &thread,
++        two_questions(),
++        "Pick a colour and a language.",
++        &mut cx,
++    );
++    select(&view, &q, "question_0", "Blue", &mut cx);
++    set_page(&view, &q, 1, &mut cx);
++    type_into(&view, &q, "question_1_custom", "Zig", &mut cx);
++    let before = card_state(&view, &q, &cx).expect("the card has state");
++    assert_eq!(before.1, 1, "precondition: page 2 is shown");
++
++    decline(&view, &q, &mut cx);
++    assert!(cx.has_pending_prompt());
++    cx.simulate_prompt_answer("Keep Answering");
++    settle(&mut cx);
++
++    assert_eq!(
++        status(&thread, &q.id, &cx),
++        "pending",
++        "R2.6: the question stays pending"
++    );
++    assert_eq!(sent(&q), "nothing", "R2.6: nothing is sent");
++    assert_eq!(
++        card_state(&view, &q, &cx),
++        Some(before),
++        "R2.6: typed text, selection and page are unchanged"
++    );
++    assert!(!cx.has_pending_prompt());
++
++    // Still answerable: a second Decline asks again (the guard of R2.8 was released).
++    decline(&view, &q, &mut cx);
++    assert!(
++        cx.has_pending_prompt(),
++        "a kept question can be declined again"
++    );
++    cx.simulate_prompt_answer("Keep Answering");
++    settle(&mut cx);
++}
++
++#[gpui::test]
++async fn decline_confirmation_opens_one_prompt_per_card(cx: &mut TestAppContext) {
++    // R2.8: Decline twice while the prompt is open -- one prompt, so one answer clears it.
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    type_into(&view, &q, "question_0_custom", "Green", &mut cx);
++
++    decline(&view, &q, &mut cx);
++    decline(&view, &q, &mut cx);
++    assert!(cx.has_pending_prompt());
++    cx.simulate_prompt_answer("Keep Answering");
++    settle(&mut cx);
++
++    assert!(
++        !cx.has_pending_prompt(),
++        "R2.8: the second Decline opened no second confirmation"
++    );
++    assert_eq!(status(&thread, &q.id, &cx), "pending");
++}
++
++#[gpui::test]
++async fn decline_confirmation_sends_nothing_for_a_question_cancelled_meanwhile(
++    cx: &mut TestAppContext,
++) {
++    // R2.7/Q4, with a second question queued behind: confirming must neither re-answer the
++    // ended question nor decline the next one in its place.
++    let (view, thread, mut cx) = setup(cx).await;
++    let first = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    let second = ask(&thread, one_question(), "Pick another colour.", &mut cx);
++    type_into(&view, &first, "question_0_custom", "Green", &mut cx);
++
++    decline(&view, &first, &mut cx);
++    assert!(cx.has_pending_prompt());
++    let id = first.id.clone();
++    view.update_in(&mut cx, |v, window, cx| {
++        v.cancel_elicitation(id, window, cx)
++    });
++    settle(&mut cx);
++    assert_eq!(status(&thread, &first.id, &cx), "canceled");
++
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++
++    assert_eq!(
++        status(&thread, &first.id, &cx),
++        "canceled",
++        "R2.7: still cancelled"
++    );
++    assert_eq!(
++        sent(&first),
++        "cancel",
++        "R2.7: no Decline followed the Cancel"
++    );
++    assert_eq!(
++        status(&thread, &second.id, &cx),
++        "pending",
++        "the queued question is untouched"
++    );
++    assert_eq!(sent(&second), "nothing");
++}
++
++#[gpui::test]
++async fn decline_confirmation_sends_nothing_for_a_question_answered_meanwhile(
++    cx: &mut TestAppContext,
++) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    type_into(&view, &q, "question_0_custom", "Green", &mut cx);
++
++    decline(&view, &q, &mut cx);
++    assert!(cx.has_pending_prompt());
++    let id = q.id.clone();
++    thread.update(&mut cx, |thread, cx| {
++        thread.respond_to_elicitation(
++            &id,
++            agent_client_protocol::schema::v2::CreateElicitationResponse::new(
++                agent_client_protocol::schema::v2::ElicitationAction::Accept(
++                    agent_client_protocol::schema::v2::ElicitationAcceptAction::new(),
++                ),
++            ),
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++
++    assert_eq!(
++        status(&thread, &q.id, &cx),
++        "accepted",
++        "R2.7: the answer stands"
++    );
++    assert_eq!(sent(&q), "accept");
++    assert!(
++        !view.read_with(&cx, |v, _| v.has_elicitation_form_state(&q.id)),
++        "no form state is resurrected for a resolved question"
++    );
++}
++
++#[gpui::test]
++async fn decline_confirmation_sends_nothing_for_a_question_ended_with_the_turn(
++    cx: &mut TestAppContext,
++) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    select(&view, &q, "question_0", "Red", &mut cx);
++
++    decline(&view, &q, &mut cx);
++    assert!(cx.has_pending_prompt());
++    thread.update(&mut cx, |thread, cx| {
++        thread.cancel_outstanding_elicitations(cx)
++    });
++    settle(&mut cx);
++    let ended = status(&thread, &q.id, &cx);
++    assert_ne!(
++        ended, "pending",
++        "precondition: the turn ended the question"
++    );
++
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++
++    assert_eq!(
++        status(&thread, &q.id, &cx),
++        ended,
++        "R2.7: nothing changes it"
++    );
++    assert_ne!(
++        sent(&q),
++        "decline",
++        "R2.7: no Decline is sent after the turn ended"
++    );
++}
+diff --git a/crates/agent_ui/src/conversation_view/thread_view/tests/decline_contract_tests.rs b/crates/agent_ui/src/conversation_view/thread_view/tests/decline_contract_tests.rs
+new file mode 100644
+index 0000000..8e98f71
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/thread_view/tests/decline_contract_tests.rs
+@@ -0,0 +1,140 @@
++//! Contract: the card's own Decline reaches the conditional path, in both placements (story 035,
++//! Task 3.4; R2.2, R2.5, R2.10, Q11, Q12).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view/thread_view.rs`'s `mod tests { .. }`,
++//! declare `mod decline_contract_tests;` beside `mod elicitation_decline_harness;`.
++//! Resolves to `crates/agent_ui/src/conversation_view/thread_view/tests/decline_contract_tests.rs`.
++//!
++//! Where 3.2's tests call `decline_elicitation` directly, these go through the rendered card:
++//! the operator's keyboard route (Q12). Focus the question's "Other" box, type into it with real
++//! keystrokes (so the form state the card renders from is the one that changes), then Tab past
++//! Submit to Decline and press Enter -- the card's tab order is [fields...] [Submit] [Decline]
++//! [Cancel], as `elicitation.rs`'s `form_tab_order_*` test pins for the card itself.
++//!
++//! Audited surface: the key sequence ("tab tab enter" from the last field) is the one pin on
++//! the card's layout. If Run mode finds the panel inserts another focus stop, adjust the
++//! sequence -- never the assertions. Buttons carry no debug selector, so a mouse click on
++//! Decline cannot be located here; the GUI proof (Task 4.2) clicks it with the mouse.
++//! ⚠ Fidelity: drives the real card, but not a pointer click on it.
++
++use gpui::{KeyUpEvent, Keystroke, PlatformInput, TestAppContext, VisualTestContext};
++use settings::ElicitationPlacement;
++
++use super::super::ThreadView;
++use super::elicitation_decline_harness::*;
++
++fn bind_default_keymap(cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        let bindings = settings::KeymapFile::load_asset_allow_partial_failure(
++            "keymaps/default-linux.json",
++            cx,
++        )
++        .expect("default keymap should load");
++        cx.bind_keys(bindings);
++    });
++}
++
++fn press_keys(cx: &mut VisualTestContext, keys: &'static str) {
++    for key in keys.split_whitespace() {
++        cx.simulate_keystrokes(key);
++        cx.update(|window, cx| {
++            // Click handlers activate buttons on key release.
++            window.dispatch_event(
++                PlatformInput::KeyUp(KeyUpEvent {
++                    keystroke: Keystroke::parse(key).expect("valid test keystroke"),
++                }),
++                cx,
++            );
++        });
++        cx.run_until_parked();
++    }
++}
++
++/// Focuses `question`'s "Other" box on the rendered card and optionally types into it.
++fn focus_other_box(
++    view: &gpui::Entity<ThreadView>,
++    question: &Question,
++    text: Option<&str>,
++    cx: &mut VisualTestContext,
++) {
++    draw(cx);
++    let editor = view
++        .read_with(cx, |v, _| {
++            v.elicitation_text_field(&question.id, "question_0_custom")
++        })
++        .expect("the pending question renders its Other box");
++    cx.update(|window, cx| {
++        let handle = gpui::Focusable::focus_handle(editor.read(cx), cx);
++        window.focus(&handle, cx);
++    });
++    cx.run_until_parked();
++    if let Some(text) = text {
++        cx.simulate_input(text);
++        cx.run_until_parked();
++    }
++}
++
++async fn touched_card_decline_asks(placement: ElicitationPlacement, cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    bind_default_keymap(&mut cx);
++    set_placement(placement, &mut cx);
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++
++    focus_other_box(&view, &q, Some("Green"), &mut cx);
++    press_keys(&mut cx, "tab tab enter");
++
++    assert!(
++        cx.has_pending_prompt(),
++        "R2.2: the card's Decline on a touched card asks first ({placement:?})"
++    );
++    assert_eq!(status(&thread, &q.id, &cx), "pending");
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++    assert_eq!(status(&thread, &q.id, &cx), "declined");
++    assert_eq!(
++        sent(&q),
++        "decline",
++        "R2.5: the adapter receives Decline (its mapping yields empty answers)"
++    );
++}
++
++#[gpui::test]
++async fn decline_contract_pinned_card_decline_asks_when_touched(cx: &mut TestAppContext) {
++    touched_card_decline_asks(ElicitationPlacement::Card, cx).await;
++}
++
++#[gpui::test]
++async fn decline_contract_inline_card_decline_asks_when_touched(cx: &mut TestAppContext) {
++    touched_card_decline_asks(ElicitationPlacement::Inline, cx).await;
++}
++
++#[gpui::test]
++async fn decline_contract_untouched_card_decline_does_not_ask(cx: &mut TestAppContext) {
++    // Hostile half: the same keyboard route on an untouched card must not ask.
++    let (view, thread, mut cx) = setup(cx).await;
++    bind_default_keymap(&mut cx);
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++
++    focus_other_box(&view, &q, None, &mut cx);
++    press_keys(&mut cx, "tab tab enter");
++    settle(&mut cx);
++
++    assert!(!cx.has_pending_prompt(), "R2.1: untouched, no confirmation");
++    assert_eq!(status(&thread, &q.id, &cx), "declined");
++    assert_eq!(sent(&q), "decline");
++}
++
++#[gpui::test]
++async fn decline_contract_card_cancel_does_not_ask(cx: &mut TestAppContext) {
++    // R2.10: one stop further, the card's Cancel on a touched card aborts at once.
++    let (view, thread, mut cx) = setup(cx).await;
++    bind_default_keymap(&mut cx);
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++
++    focus_other_box(&view, &q, Some("Green"), &mut cx);
++    press_keys(&mut cx, "tab tab tab enter");
++    settle(&mut cx);
++
++    assert!(!cx.has_pending_prompt(), "R2.10: Cancel never asks");
++    assert_eq!(status(&thread, &q.id, &cx), "canceled");
++}
+diff --git a/crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_decline_harness.rs b/crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_decline_harness.rs
+new file mode 100644
+index 0000000..f3b5a61
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_decline_harness.rs
+@@ -0,0 +1,299 @@
++//! Shared harness for story 035's Decline tests (Tasks 3.2, 3.3, 3.4). Holds no tests.
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view/thread_view.rs`'s `mod tests { .. }`,
++//! declare `mod elicitation_decline_harness;` beside `mod decline_confirmation_tests;`,
++//! `mod elicitation_skipped_tests;` and `mod decline_contract_tests;`. An inline module of a
++//! non-mod-rs file, so these resolve to
++//! `crates/agent_ui/src/conversation_view/thread_view/tests/<name>.rs`. Living under
++//! `thread_view` is what lets them reach `ThreadView`'s private `decline_elicitation`,
++//! `cancel_elicitation` and `elicitation_form_states`.
++//!
++//! Setup: a visible agent panel in a workspace window (the shape of story 020's
++//! `setup_panel_in_workspace`, restated here because that one is private to `agent_panel`'s
++//! tests), a thread on a `StubAgentConnection`, and questions raised on that thread exactly as
++//! the adapter raises them: a session-scoped form elicitation. Each question's response is
++//! captured, so a test can see what was SENT to the agent, not only the card's status.
++//!
++//! Prompts: `window.prompt` lands on the test platform (`init_test` installs no in-app prompt
++//! renderer), driven with `cx.has_pending_prompt()` / `cx.simulate_prompt_answer(label)` as in
++//! `tasks_card/stop_tests.rs`. Answering by label necessarily pins R2.11's two button labels.
++
++use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc, time::Duration};
++
++use acp_thread::{AcpThread, ElicitationEntryId, ElicitationStatus, StubAgentConnection};
++use agent_client_protocol::schema::v2 as acp_v2;
++use fs::FakeFs;
++use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal as _, VisualTestContext};
++use project::Project;
++use serde_json::json;
++use settings::{ElicitationPlacement, SettingsStore};
++use workspace::MultiWorkspace;
++
++use super::super::ThreadView;
++use crate::AgentPanel;
++
++pub(super) const MARKER: &str = "_askUserQuestionCustomAnswer";
++
++pub(super) type Response = Rc<RefCell<Option<acp_v2::CreateElicitationResponse>>>;
++
++pub(super) struct Question {
++    pub id: ElicitationEntryId,
++    pub schema: acp_v2::ElicitationSchema,
++    pub response: Response,
++}
++
++/// A visible panel with one thread open on a stub connection.
++pub(super) async fn setup(
++    cx: &mut TestAppContext,
++) -> (Entity<ThreadView>, Entity<AcpThread>, VisualTestContext) {
++    crate::conversation_view::tests::init_test(cx);
++    cx.update(|cx| {
++        agent::ThreadStore::init_global(cx);
++        language_model::LanguageModelRegistry::test(cx);
++    });
++    let fs = FakeFs::new(cx.executor());
++    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
++    fs.insert_tree("/project", json!({ "file.txt": "" })).await;
++    let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
++    let multi_workspace =
++        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
++    let workspace = multi_workspace
++        .read_with(cx, |multi_workspace, _cx| {
++            multi_workspace.workspace().clone()
++        })
++        .expect("workspace");
++    let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
++    cx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
++    let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
++        let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
++        workspace.add_panel(panel.clone(), window, cx);
++        workspace.focus_panel::<AgentPanel>(window, cx);
++        panel
++    });
++    cx.run_until_parked();
++    crate::test_support::open_thread_with_custom_connection(
++        &panel,
++        StubAgentConnection::new(),
++        &mut cx,
++    );
++    cx.run_until_parked();
++    let thread_view = panel
++        .read_with(&cx, |panel, cx| panel.active_thread_view(cx))
++        .expect("a thread view is active");
++    let thread = panel
++        .read_with(&cx, |panel, cx| panel.active_agent_thread(cx))
++        .expect("a thread is active");
++    (thread_view, thread, cx)
++}
++
++/// A free-text field carrying the custom-answer marker for `question_id`.
++pub(super) fn marked(question_id: &str) -> acp_v2::StringPropertySchema {
++    let mut schema = acp_v2::StringPropertySchema::new().title("Other");
++    let mut meta = serde_json::Map::new();
++    meta.insert(
++        MARKER.to_string(),
++        json!({ "questionId": question_id, "isCustomAnswer": true }),
++    );
++    schema.meta = Some(meta);
++    schema
++}
++
++pub(super) fn choices(values: &[&str]) -> acp_v2::StringPropertySchema {
++    acp_v2::StringPropertySchema::new()
++        .enum_values(values.iter().map(|v| v.to_string()).collect::<Vec<_>>())
++}
++
++/// One AskUserQuestion question: options plus its "Other" box.
++pub(super) fn one_question() -> acp_v2::ElicitationSchema {
++    acp_v2::ElicitationSchema::new()
++        .property("question_0", choices(&["Red", "Blue"]), false)
++        .property("question_0_custom", marked("question_0"), false)
++}
++
++/// Two AskUserQuestion questions: two pages on the card.
++pub(super) fn two_questions() -> acp_v2::ElicitationSchema {
++    acp_v2::ElicitationSchema::new()
++        .property("question_0", choices(&["Red", "Blue"]), false)
++        .property("question_0_custom", marked("question_0"), false)
++        .property("question_1", choices(&["Rust", "Go"]), false)
++        .property("question_1_custom", marked("question_1"), false)
++}
++
++/// Raises a form elicitation on `thread` and captures its response.
++pub(super) fn ask(
++    thread: &Entity<AcpThread>,
++    schema: acp_v2::ElicitationSchema,
++    message: &str,
++    cx: &mut VisualTestContext,
++) -> Question {
++    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
++    let request = acp_v2::CreateElicitationRequest::new(
++        acp_v2::ElicitationFormMode::new(
++            acp_v2::ElicitationSessionScope::new(session_id),
++            schema.clone(),
++        ),
++        message,
++    );
++    let (id, task) = thread.update(cx, |thread, cx| {
++        thread
++            .request_elicitation_with_id(request, cx)
++            .expect("the question is a valid elicitation")
++    });
++    let response: Response = Rc::default();
++    let slot = response.clone();
++    cx.update(|_, cx| {
++        cx.spawn(async move |_| {
++            *slot.borrow_mut() = Some(task.await);
++        })
++        .detach()
++    });
++    cx.run_until_parked();
++    Question {
++        id,
++        schema,
++        response,
++    }
++}
++
++pub(super) fn status(
++    thread: &Entity<AcpThread>,
++    id: &ElicitationEntryId,
++    cx: &VisualTestContext,
++) -> &'static str {
++    thread.read_with(cx, |thread, _| {
++        match thread.elicitation(id).map(|(_, e)| &e.status) {
++            Some(ElicitationStatus::Pending { .. }) => "pending",
++            Some(ElicitationStatus::Accepted) => "accepted",
++            Some(ElicitationStatus::Declined) => "declined",
++            Some(ElicitationStatus::Canceled) => "canceled",
++            Some(ElicitationStatus::Completed) => "completed",
++            None => "missing",
++        }
++    })
++}
++
++/// What was sent to the agent for `question`: "decline", "accept", "cancel", or "nothing".
++pub(super) fn sent(question: &Question) -> &'static str {
++    match question.response.borrow().as_ref().map(|r| &r.action) {
++        None => "nothing",
++        Some(acp_v2::ElicitationAction::Decline) => "decline",
++        Some(acp_v2::ElicitationAction::Accept(_)) => "accept",
++        Some(_) => "cancel",
++    }
++}
++
++pub(super) fn entry_ix(
++    thread: &Entity<AcpThread>,
++    id: &ElicitationEntryId,
++    cx: &VisualTestContext,
++) -> usize {
++    thread
++        .read_with(cx, |thread, _| thread.elicitation(id).map(|(ix, _)| ix))
++        .expect("the elicitation is in the thread")
++}
++
++pub(super) fn type_into(
++    thread_view: &Entity<ThreadView>,
++    question: &Question,
++    field: &str,
++    text: &str,
++    cx: &mut VisualTestContext,
++) {
++    let editor = thread_view
++        .read_with(cx, |view, _| {
++            view.elicitation_text_field(&question.id, field)
++        })
++        .unwrap_or_else(|| panic!("{field} is a text field of a pending question"));
++    editor.update_in(cx, |editor, window, cx| editor.set_text(text, window, cx));
++    cx.run_until_parked();
++}
++
++pub(super) fn select(
++    thread_view: &Entity<ThreadView>,
++    question: &Question,
++    field: &str,
++    value: &str,
++    cx: &mut VisualTestContext,
++) {
++    thread_view.update(cx, |view, cx| {
++        view.elicitation_form_states
++            .get_mut(&question.id)
++            .expect("a pending question has a form state")
++            .set_single_select(field, value.to_string());
++        cx.notify();
++    });
++    cx.run_until_parked();
++}
++
++pub(super) fn set_page(
++    thread_view: &Entity<ThreadView>,
++    question: &Question,
++    page: usize,
++    cx: &mut VisualTestContext,
++) {
++    thread_view.update(cx, |view, cx| {
++        view.elicitation_form_states
++            .get_mut(&question.id)
++            .expect("a pending question has a form state")
++            .set_page(page);
++        cx.notify();
++    });
++    cx.run_until_parked();
++}
++
++/// Everything the operator has put on the card: the collected answers and the page shown.
++pub(super) fn card_state(
++    thread_view: &Entity<ThreadView>,
++    question: &Question,
++    cx: &VisualTestContext,
++) -> Option<(BTreeMap<String, String>, usize)> {
++    thread_view.read_with(cx, |view, cx| {
++        let form = view.elicitation_form_states.get(&question.id)?;
++        let answers = form
++            .collect(&question.schema, cx)
++            .ok()?
++            .into_iter()
++            .map(|(name, value)| (name, format!("{value:?}")))
++            .collect();
++        Some((answers, form.page()))
++    })
++}
++
++pub(super) fn decline(
++    thread_view: &Entity<ThreadView>,
++    question: &Question,
++    cx: &mut VisualTestContext,
++) {
++    let id = question.id.clone();
++    thread_view.update_in(cx, |view, window, cx| {
++        view.decline_elicitation(id, window, cx)
++    });
++    cx.run_until_parked();
++}
++
++pub(super) fn settle(cx: &mut VisualTestContext) {
++    cx.run_until_parked();
++    cx.executor().advance_clock(Duration::from_secs(2));
++    cx.run_until_parked();
++}
++
++pub(super) fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++pub(super) fn set_placement(placement: ElicitationPlacement, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        SettingsStore::update_global(cx, |store, cx| {
++            store.update_user_settings(cx, |settings| {
++                settings.agent.get_or_insert_default().elicitation_placement = Some(placement);
++            });
++        });
++    });
++    cx.run_until_parked();
++}
++
++/// The debug selector of the "Skipped" row for the entry at `ix` (Task 3.3 Objective).
++pub(super) fn skipped_selector(ix: usize) -> &'static str {
++    Box::leak(format!("elicitation-skipped-{ix}").into_boxed_str())
++}
+diff --git a/crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_skipped_tests.rs b/crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_skipped_tests.rs
+new file mode 100644
+index 0000000..082717f
+--- /dev/null
++++ b/crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_skipped_tests.rs
+@@ -0,0 +1,224 @@
++//! A declined question leaves a "Skipped" line (story 035, Task 3.3; R3.1-R3.4, Q11).
++//!
++//! Wiring: inside `crates/agent_ui/src/conversation_view/thread_view.rs`'s `mod tests { .. }`,
++//! declare `mod elicitation_skipped_tests;` beside `mod elicitation_decline_harness;`.
++//! Resolves to `crates/agent_ui/src/conversation_view/thread_view/tests/elicitation_skipped_tests.rs`.
++//!
++//! Contract (Task 3.3 Objective): a declined, question-shaped form renders in the conversation
++//! as one muted line, "Skipped" + the request's message cut to one line, no buttons, under the
++//! debug selector `elicitation-skipped-<entry_ix>`, in both placements.
++//!
++//! Hostile halves, authored first: the line drawn WRONGLY -- for a cancelled question, an
++//! accepted one, a declined form that is not a question, a question still pending, a question
++//! kept after the prompt -- and, for the derived selector, a THIRD element: with two questions
++//! queued, declining the first must not draw a line at the second's index. Then the line drawn
++//! where it must be: untouched decline, confirmed decline, inline placement.
++//!
++//! Not asserted: the line's text (no text read-back from a painted frame here) -- one line is
++//! asserted as height, "Skipped" + message by the GUI proof (Task 4.2).
++
++use gpui::{TestAppContext, px};
++use settings::ElicitationPlacement;
++
++use super::super::ThreadView;
++use super::elicitation_decline_harness::*;
++
++const LONG: &str = "Which of these three deployment strategies should the agent use for the staging \
++    cluster, given that the database migration is irreversible and the cache must be warmed before \
++    traffic shifts, and the rollback window is fifteen minutes at most?";
++
++fn skipped_painted(
++    ix: usize,
++    cx: &mut gpui::VisualTestContext,
++) -> Option<gpui::Bounds<gpui::Pixels>> {
++    draw(cx);
++    cx.debug_bounds(skipped_selector(ix))
++}
++
++// ---- the line must NOT be drawn ----
++
++#[gpui::test]
++async fn elicitation_skipped_absent_for_cancelled_accepted_and_pending(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let cancelled = ask(&thread, one_question(), "Cancelled one?", &mut cx);
++    let accepted = ask(&thread, one_question(), "Accepted one?", &mut cx);
++    let pending = ask(&thread, one_question(), "Pending one?", &mut cx);
++
++    let id = cancelled.id.clone();
++    view.update_in(&mut cx, |v, window, cx| {
++        v.cancel_elicitation(id, window, cx)
++    });
++    let id = accepted.id.clone();
++    thread.update(&mut cx, |thread, cx| {
++        thread.respond_to_elicitation(
++            &id,
++            agent_client_protocol::schema::v2::CreateElicitationResponse::new(
++                agent_client_protocol::schema::v2::ElicitationAction::Accept(
++                    agent_client_protocol::schema::v2::ElicitationAcceptAction::new(),
++                ),
++            ),
++            cx,
++        );
++    });
++    settle(&mut cx);
++
++    for (question, why) in [
++        (&cancelled, "R3.3: cancelled"),
++        (&accepted, "R3.3: accepted"),
++        (&pending, "still pending"),
++    ] {
++        let ix = entry_ix(&thread, &question.id, &cx);
++        assert!(
++            skipped_painted(ix, &mut cx).is_none(),
++            "{why}: no Skipped line"
++        );
++    }
++}
++
++#[gpui::test]
++async fn elicitation_skipped_absent_for_a_declined_form_that_is_not_a_question(
++    cx: &mut TestAppContext,
++) {
++    // R2.9/Constraint: for the refusal-fallback prompt and MCP forms, Decline means "no", not
++    // "skipped" -- no line.
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(
++        &thread,
++        agent_client_protocol::schema::v2::ElicitationSchema::new().property(
++            "retry",
++            choices(&["Retry", "Skip"]),
++            false,
++        ),
++        "Retry with another model?",
++        &mut cx,
++    );
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++    assert_eq!(status(&thread, &q.id, &cx), "declined", "precondition");
++    let ix = entry_ix(&thread, &q.id, &cx);
++    assert!(skipped_painted(ix, &mut cx).is_none());
++}
++
++#[gpui::test]
++async fn elicitation_skipped_absent_while_the_question_is_kept(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    type_into(&view, &q, "question_0_custom", "Green", &mut cx);
++    decline(&view, &q, &mut cx);
++    assert!(cx.has_pending_prompt());
++    let ix = entry_ix(&thread, &q.id, &cx);
++    assert!(
++        skipped_painted(ix, &mut cx).is_none(),
++        "no line while the confirmation is open"
++    );
++    cx.simulate_prompt_answer("Keep Answering");
++    settle(&mut cx);
++    assert!(
++        skipped_painted(ix, &mut cx).is_none(),
++        "no line after Keep Answering"
++    );
++}
++
++#[gpui::test]
++async fn elicitation_skipped_only_at_the_declined_question_and_the_next_takes_the_card(
++    cx: &mut TestAppContext,
++) {
++    // Third element for the derived selector: two queued questions, the first declined.
++    let (view, thread, mut cx) = setup(cx).await;
++    let first = ask(&thread, one_question(), "First question?", &mut cx);
++    let second = ask(&thread, one_question(), "Second question?", &mut cx);
++
++    decline(&view, &first, &mut cx);
++    settle(&mut cx);
++
++    let first_ix = entry_ix(&thread, &first.id, &cx);
++    let second_ix = entry_ix(&thread, &second.id, &cx);
++    assert_ne!(first_ix, second_ix);
++    assert!(
++        skipped_painted(first_ix, &mut cx).is_some(),
++        "R3.1: the declined one"
++    );
++    assert!(
++        skipped_painted(second_ix, &mut cx).is_none(),
++        "the queued one is not skipped"
++    );
++    // R3.2: the skipped question holds no fields, and the pinned slot moves to the next one.
++    assert!(!view.read_with(&cx, |v, _| v.has_elicitation_form_state(&first.id)));
++    assert_eq!(status(&thread, &second.id, &cx), "pending");
++    cx.update(|_, cx| {
++        let thread = thread.read(cx);
++        let (_, first) = thread.elicitation(&first.id).expect("first");
++        let (_, second) = thread.elicitation(&second.id).expect("second");
++        assert!(
++            !ThreadView::renders_elicitation_as_card(first, cx),
++            "R3.2: the skipped question no longer holds the pinned card"
++        );
++        assert!(
++            ThreadView::renders_elicitation_as_card(second, cx),
++            "R3.2: the next queued question takes it"
++        );
++    });
++}
++
++// ---- the line MUST be drawn ----
++
++#[gpui::test]
++async fn elicitation_skipped_after_an_untouched_decline_on_one_line(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(&thread, one_question(), LONG, &mut cx);
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++
++    let ix = entry_ix(&thread, &q.id, &cx);
++    let row = skipped_painted(ix, &mut cx).expect("R3.1: a Skipped line where the question was");
++    assert!(
++        row.size.height < px(48.),
++        "R3.1/A2: a long message is cut to one line (row height {:?})",
++        row.size.height
++    );
++    assert!(
++        !cx.has_pending_prompt(),
++        "R3.2: the line has no prompt behind it"
++    );
++}
++
++#[gpui::test]
++async fn elicitation_skipped_after_a_confirmed_decline(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    let q = ask(
++        &thread,
++        two_questions(),
++        "Pick a colour and a language.",
++        &mut cx,
++    );
++    select(&view, &q, "question_1", "Go", &mut cx);
++    decline(&view, &q, &mut cx);
++    cx.simulate_prompt_answer("Skip Question");
++    settle(&mut cx);
++
++    let ix = entry_ix(&thread, &q.id, &cx);
++    assert!(
++        skipped_painted(ix, &mut cx).is_some(),
++        "R3.1: confirmed decline is skipped too"
++    );
++}
++
++#[gpui::test]
++async fn elicitation_skipped_in_the_inline_placement(cx: &mut TestAppContext) {
++    let (view, thread, mut cx) = setup(cx).await;
++    set_placement(ElicitationPlacement::Inline, &mut cx);
++    let q = ask(&thread, one_question(), "Pick a colour.", &mut cx);
++    let ix = entry_ix(&thread, &q.id, &cx);
++    assert!(
++        skipped_painted(ix, &mut cx).is_none(),
++        "precondition: the inline card is pending"
++    );
++
++    decline(&view, &q, &mut cx);
++    settle(&mut cx);
++
++    assert!(
++        skipped_painted(ix, &mut cx).is_some(),
++        "R3.4: the same line replaces the inline card"
++    );
++}

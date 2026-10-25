@@ -1,0 +1,3838 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Tue, 20 Oct 2026 22:30:00 -0300
+Subject: [PATCH] sidebar: a Lists view of thread lists, and Move to List
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+0048's store has held thread lists since story 031 -- named categories,
+a thread in at most one list, deleting a list keeps its threads -- and
+nothing in Zeo showed or wrote one. This patch is that interface, the
+fourth consumer of the store after 0049, 0065 and 0068: story 038,
+2026-10-20. Lists are a separate view, like History, and never rearrange
+the thread list (operator decision 2026-10-09): tags are fine-grained,
+lists are categories.
+
+What it does. A "Thread Lists" button (IconName::ListTree, "Show/Hide
+Thread Lists") sits in the sidebar footer next to the History clock and
+toggles a third view, Lists, in place of the thread list; History and
+Lists switch to each other directly, and the action
+agents_sidebar::ToggleThreadLists does what the button does. Each list is a
+collapsible group, in the store's order, whose header carries the list's
+name and how many threads it shows, also while collapsed; its rows are
+its threads, most recent activity first, each with its project's name,
+and an archived thread or a draft is hidden but stays in the list. A
+click on a row opens the thread where it lives -- this window, another
+window holding its project, or this window with the project opened --
+and keeps the Lists view shown; a right-click shows the thread list's own
+context menu. That menu, everywhere a thread row has one, gains "Move to
+List" after "Tags…" (0068): every list with the current one marked,
+"Remove from List" while the thread is in one, and "New List…", which
+opens the Lists view with a name field that creates the list and files
+the thread. In the view, "New List" creates a list, and a header's
+context menu renames, deletes (no confirmation: its threads lose only the
+grouping), and moves it up or down. A name of 1-64 characters, unique
+ignoring case, is required: a refused name keeps the field open with "A
+list name must be 1 to 64 characters" or "A list with this name already
+exists". Escape closes the field and changes nothing. The view is saved
+with the window and restored after a restart; collapsed lists are
+remembered per window, in memory, as the Pinned section's fold is.
+
+How. crates/sidebar/src/lists_view.rs holds the row model, the view
+switch and the key guard; lists_view/lists_render.rs draws it,
+lists_view/move_to_list.rs is the submenu and lists_view/lists_manage.rs
+the name field and the header menu. Rows are built in rebuild_contents,
+while the view is shown, by one call of 0049's build_pinned_rows with
+every expanded list's thread ids, split back per list by thread id: one
+project label per project across lists and one live-state pass, so a row
+resolves its workspace, agent icon and label exactly as a Pinned row
+does, and is drawn and clicked through render_thread's own on_click
+(activate_thread, or open_workspace_and_activate_thread for a project
+open nowhere) -- not 0040's router, which is why this patch stays
+ungrouped. The view's rows and its ListState live in
+SidebarView::Lists(ListsViewState), so they are dropped with the view;
+the ListState is spliced over the changed middle range rather than reset,
+so a fold, a filing in another window or a reorder keeps the scroll. The
+store observers Sidebar::new already detaches keep rebuilding the
+entries in every view, which is what refreshes an open Lists view; the
+thread list's `contents` never change, so leaving the view shows its
+rows, order and folds as they were.
+
+Limits, by design. The thread list's selection-based keyboard actions
+(select next/previous/first/last, child/parent, confirm, fold, move,
+archive, pin, rename) read an index of `contents`, which no Lists row
+has: while the Lists view is shown and the sidebar root has focus they
+are stopped in the capture phase and the selection is cleared, so
+keyboard navigation between Lists rows is inert (out of scope), while a
+name field or a context menu keeps its own keys. Lists rows offer no
+drag: 0065's thread_row_drag returns the bare row while Lists is shown,
+since its index would reorder an unrelated group. Every name field --
+create, rename, create-and-file -- is drawn where the New List control
+is, not over the renamed header. ToggleThreadLists has no default key
+binding, so none is displaced; it is bindable and in the command palette.
+A saved Lists view read by a build without this patch fails that build's
+sidebar-state deserialization once and falls back to the defaults.
+
+Failure: a store refusal changes nothing and logs one warning naming ids
+only -- the thread by ThreadId::to_key_string(), the list by its ListId,
+and the store's error, whose Display names ids only -- never a title or a
+list name. Choosing a thread's current list changes and logs nothing.
+Without the store (try_global is None) there is no button, no "Move to
+List" and no Lists view: the action does nothing, and a window saved
+with the view shown restores the thread list.
+
+Upstream touch points. crates/sidebar/src/sidebar.rs only through 12
+hunks and 41 added lines, none removed: the module lines; the
+ToggleThreadLists action; SerializedSidebarView::Lists;
+SidebarView::Lists(ListsViewState); the Lists hook in rebuild_contents,
+before the unchanged notified_threads.retain, which builds the rows and
+adds their ids to current_thread_ids so a filed thread keeps its
+notification; move_to_list_submenu after 0068's tags_menu_entry; the
+footer's .children(render_lists_button) after the History button;
+toggle_archive's Lists arm (History from Lists); serialize's and
+restore's Lists arms; the Render root's toggle_lists listener and
+capture_lists_view_keys; and the Render arm drawing render_lists_view.
+crates/sidebar/src/organization.rs: 4 lines, 0065's drag guard above.
+No Cargo.toml, no Cargo.lock, no new crate.
+
+0063 is regenerated on top with one change besides context and offsets:
+it sets its new PinnedBuildContext::is_devtools in this patch's Lists
+hook too, so a devtools thread filed in a list carries the same globe
+badge as in its group. 0028-0030 are regenerated with no other change
+than offsets and index lines.
+
+Tests: 54, in seven files under crates/sidebar/src/sidebar_lists_tests/
+-- rows (9), view (9), render (8), open (4), keyboard (4), move_to_list
+(8), manage (12) -- with their shared fixtures in sidebar_lists_tests.rs
+and support.rs.
+
+UNGROUPED and unconditional, right after 0068: it consumes 0048's store
+and 0049's build_pinned_rows, extends 0065's drag guard and puts its
+menu entry after 0068's, and needs no adapter. The claude-agent-acp-plus
+patches that also edit sidebar.rs (0028-0030) and 0063 are generated on
+top of it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/sidebar/src/lists_view.rs b/crates/sidebar/src/lists_view.rs
+new file mode 100644
+index 0000000..1939a76
+--- /dev/null
++++ b/crates/sidebar/src/lists_view.rs
+@@ -0,0 +1,425 @@
++//! The Lists view of the agent sidebar: the user's thread lists, one group per list.
++
++use std::cmp::Reverse;
++use std::collections::{HashMap, HashSet};
++use std::sync::Arc;
++
++use agent_ui::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
++use agent_ui::thread_organization::{ListId, ThreadList, ThreadOrganizationStore};
++use agent_ui::{ArchiveSelectedThread, RenameSelectedThread, ThreadId};
++use editor::Editor;
++use editor::actions::ToggleFold;
++use gpui::{Action, Entity, Focusable, ListAlignment, ListState};
++use menu::{
++    Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
++};
++use ui::{Tooltip, prelude::*};
++use zed_actions::editor::{MoveDown, MoveUp};
++
++use crate::{Sidebar, SidebarView, ThreadEntry, TogglePinSelectedThread, ToggleThreadLists};
++
++mod lists_manage;
++mod lists_render;
++mod move_to_list;
++
++pub(crate) use move_to_list::move_to_list_submenu;
++
++/// One row of the Lists view. Thread rows carry ids only: the rebuild turns them into full
++/// thread rows, which need a window and an `App` this model deliberately does without.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) enum ListsRow {
++    Header {
++        list_id: ListId,
++        name: SharedString,
++        /// The rows the list shows when expanded, kept while collapsed so the count never
++        /// depends on the fold (R2.1).
++        shown: usize,
++        collapsed: bool,
++    },
++    Thread {
++        list_id: ListId,
++        thread_id: ThreadId,
++    },
++    /// The "No threads" row of an expanded list with nothing to show (R2.6).
++    Empty { list_id: ListId },
++}
++
++/// The Lists view's rows: a header per list in `lists`' order, then, unless the list is in
++/// `collapsed`, its shown threads most recently active first, or `Empty` when it shows none.
++/// Members are only read, so a hidden one stays filed (R2.10).
++pub(crate) fn build_list_rows<'a>(
++    lists: &[ThreadList],
++    members_of: impl Fn(ListId) -> Vec<ThreadId>,
++    metadata_of: impl Fn(ThreadId) -> Option<&'a ThreadMetadata>,
++    collapsed: &HashSet<ListId>,
++) -> Vec<ListsRow> {
++    let mut rows = Vec::new();
++    for list in lists {
++        // The Pinned section's rule (`build_pinned_rows`), so a thread hidden there is hidden
++        // here too (R2.4).
++        let mut shown: Vec<&ThreadMetadata> = members_of(list.id)
++            .into_iter()
++            .filter_map(&metadata_of)
++            .filter(|metadata| !metadata.archived && !metadata.is_draft())
++            .collect();
++        // Recent mode's time (R2.3); the id breaks ties because the store hands members over in
++        // no meaningful order, and a row must not jump between rebuilds.
++        shown.sort_by_cached_key(|metadata| {
++            (
++                Reverse(Sidebar::thread_display_time(metadata)),
++                metadata.thread_id.to_key_string(),
++            )
++        });
++
++        let is_collapsed = collapsed.contains(&list.id);
++        rows.push(ListsRow::Header {
++            list_id: list.id,
++            name: list.name.clone(),
++            shown: shown.len(),
++            collapsed: is_collapsed,
++        });
++        if is_collapsed {
++            continue;
++        }
++        if shown.is_empty() {
++            rows.push(ListsRow::Empty { list_id: list.id });
++        }
++        rows.extend(shown.into_iter().map(|metadata| ListsRow::Thread {
++            list_id: list.id,
++            thread_id: metadata.thread_id,
++        }));
++    }
++    rows
++}
++
++/// One row of the Lists view as drawn: `ListsRow` with each thread turned into a full row.
++#[derive(Clone)]
++pub(crate) enum ListsEntry {
++    Header {
++        list_id: ListId,
++        name: SharedString,
++        shown: usize,
++        collapsed: bool,
++    },
++    Thread(Arc<ThreadEntry>),
++    Empty {
++        list_id: ListId,
++    },
++}
++
++impl ListsEntry {
++    /// Whether two rows are the same row, drawn at the same height, so the list need not be
++    /// re-measured: neither a header's name and count nor a thread's live state changes it.
++    fn is_same_row(&self, other: &Self) -> bool {
++        match (self, other) {
++            (Self::Header { list_id: a, .. }, Self::Header { list_id: b, .. })
++            | (Self::Empty { list_id: a }, Self::Empty { list_id: b }) => a == b,
++            (Self::Thread(a), Self::Thread(b)) => a.metadata.thread_id == b.metadata.thread_id,
++            _ => false,
++        }
++    }
++}
++
++/// The Lists view's rows as drawn: `build_list_rows`' model, its threads turned into full rows by
++/// `thread_rows`. Empty without the store, since there are no lists.
++pub(crate) fn build_lists_contents(
++    collapsed: &HashSet<ListId>,
++    thread_rows: impl FnOnce(&[ThreadId]) -> Vec<Arc<ThreadEntry>>,
++    cx: &App,
++) -> Vec<ListsEntry> {
++    let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++        return Vec::new();
++    };
++    let store = store.read(cx);
++    let metadata = ThreadMetadataStore::global(cx).read(cx);
++    let rows = build_list_rows(
++        store.lists(),
++        |list| store.threads_in_list(list),
++        |thread_id| metadata.entry(thread_id),
++        collapsed,
++    );
++
++    // One call for every list, so a project is labelled alike in all of them and the live state
++    // is gathered once per rebuild. A thread is in one list at most, so its id finds its row.
++    let thread_ids: Vec<ThreadId> = rows
++        .iter()
++        .filter_map(|row| match row {
++            ListsRow::Thread { thread_id, .. } => Some(*thread_id),
++            ListsRow::Header { .. } | ListsRow::Empty { .. } => None,
++        })
++        .collect();
++    let mut rows_by_id: HashMap<ThreadId, Arc<ThreadEntry>> = thread_rows(&thread_ids)
++        .into_iter()
++        .map(|row| (row.metadata.thread_id, row))
++        .collect();
++    rows.into_iter()
++        .filter_map(|row| match row {
++            ListsRow::Header {
++                list_id,
++                name,
++                shown,
++                collapsed,
++            } => Some(ListsEntry::Header {
++                list_id,
++                name,
++                shown,
++                collapsed,
++            }),
++            ListsRow::Thread { thread_id, .. } => {
++                rows_by_id.remove(&thread_id).map(ListsEntry::Thread)
++            }
++            ListsRow::Empty { list_id } => Some(ListsEntry::Empty { list_id }),
++        })
++        .collect()
++}
++
++/// The threads the Lists view shows, so the rebuild keeps their notifications.
++pub(crate) fn lists_thread_ids(entries: &[ListsEntry]) -> impl Iterator<Item = ThreadId> + '_ {
++    entries.iter().filter_map(|entry| match entry {
++        ListsEntry::Thread(row) => Some(row.metadata.thread_id),
++        ListsEntry::Header { .. } | ListsEntry::Empty { .. } => None,
++    })
++}
++
++/// The Lists view's per-window state. It is dropped when the view is left, so a window's folds
++/// last only while the view is shown, and no hidden view keeps rows to rebuild.
++pub(crate) struct ListsViewState {
++    pub(crate) collapsed: HashSet<ListId>,
++    /// Built by `rebuild_contents` while the view is shown; the indexes `render_thread` gets.
++    pub(crate) lists_entries: Vec<ListsEntry>,
++    lists_list_state: ListState,
++    /// The view's one name field, while open. It lives here so leaving the view drops it.
++    pub(crate) name_field: Option<ListsNameField>,
++}
++
++/// What confirming the Lists view's name field is for.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum NameFieldMode {
++    /// The "New List" control: the list is created after the existing ones (R5.1).
++    Create,
++    /// A header menu's "Rename List…" (R5.4).
++    Rename(ListId),
++    /// Opened by a thread menu's "New List…": the new list is created and that thread filed in
++    /// it (R4.5, R4.6).
++    CreateAndFile(ThreadId),
++}
++
++/// The open name field: a single-line editor, the mode its confirm acts in, and the store's last
++/// refusal of a name, shown under it (R5.2, R5.3).
++pub(crate) struct ListsNameField {
++    pub(crate) mode: NameFieldMode,
++    pub(crate) editor: Entity<Editor>,
++    pub(crate) message: Option<SharedString>,
++}
++
++impl Default for ListsViewState {
++    fn default() -> Self {
++        Self {
++            collapsed: HashSet::default(),
++            lists_entries: Vec::new(),
++            // The thread list's own settings, so the two views scroll alike.
++            lists_list_state: ListState::new(0, ListAlignment::Top, px(1000.)),
++            name_field: None,
++        }
++    }
++}
++
++// `SidebarView` is `Debug`, but neither a `ListState` nor a thread row is.
++impl std::fmt::Debug for ListsViewState {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ListsViewState")
++            .field("collapsed", &self.collapsed)
++            .field("lists_entries", &self.lists_entries.len())
++            .field(
++                "name_field",
++                &self.name_field.as_ref().map(|field| field.mode),
++            )
++            .finish_non_exhaustive()
++    }
++}
++
++impl Sidebar {
++    /// The footer's "Thread Lists" button; none without the store, since there are no lists to
++    /// show (R1.8).
++    pub(crate) fn render_lists_button(&self, cx: &mut Context<Self>) -> Option<IconButton> {
++        ThreadOrganizationStore::try_global(cx)?;
++        let is_lists = matches!(self.view, SidebarView::Lists(_));
++        Some(
++            IconButton::new("thread-lists", IconName::ListTree)
++                .icon_size(IconSize::Small)
++                .toggle_state(is_lists)
++                .tooltip(move |_, cx| {
++                    let label = if is_lists {
++                        "Hide Thread Lists"
++                    } else {
++                        "Show Thread Lists"
++                    };
++                    Tooltip::for_action(label, &ToggleThreadLists, cx)
++                })
++                .on_click(cx.listener(|this, _, window, cx| {
++                    this.toggle_lists(&ToggleThreadLists, window, cx);
++                })),
++        )
++    }
++
++    /// The button's click and the action share this, so the two cannot drift apart (R1.9).
++    pub(crate) fn toggle_lists(
++        &mut self,
++        _: &ToggleThreadLists,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        match &self.view {
++            SidebarView::Lists(_) => self.leave_lists(window, cx),
++            SidebarView::ThreadList | SidebarView::Archive(_) => self.show_lists(window, cx),
++        }
++    }
++
++    pub(crate) fn show_lists(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        // The action has no button to hide behind: without the store there is nothing to show.
++        if ThreadOrganizationStore::try_global(cx).is_none() {
++            return;
++        }
++        // Only History's subscription lives here; the store observers from `Sidebar::new` are
++        // detached, so they keep rebuilding the entries in every view.
++        self._subscriptions.clear();
++        self.view = SidebarView::Lists(ListsViewState::default());
++        // The thread list's hovered index would name a different row of this view.
++        self.hovered_thread_index = None;
++        // History's filter editor, which may have held focus, has just been dropped.
++        self.focus_handle.focus(window, cx);
++        self.update_entries(cx);
++        self.serialize(cx);
++        cx.notify();
++    }
++
++    /// Back to the thread list, rebuilt as it was: its rows, order and folds never left
++    /// `contents` (R1.7). Only a selection and a hover are dropped (`drop_lists_indexes`).
++    pub(crate) fn leave_lists(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.drop_lists_indexes();
++        self.show_thread_list(window, cx);
++    }
++
++    /// History from the Lists view, leaving no Lists index behind for the thread list.
++    pub(crate) fn show_history_from_lists(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.drop_lists_indexes();
++        self.show_archive(window, cx);
++    }
++
++    /// A Lists row sets the selection (by renaming) and the hover with an index of the Lists
++    /// view's rows, which names another row of the thread list.
++    fn drop_lists_indexes(&mut self) {
++        self.selection = None;
++        self.hovered_thread_index = None;
++    }
++
++    /// The thread list's keyboard handlers read `selection` as an index of `contents`, which no
++    /// Lists row has: while this view is shown they would act on a row nobody can see. They are
++    /// stopped on the sidebar's root, in the capture phase, and only while the root itself has
++    /// focus, so a rename field or a context menu still gets its own keys.
++    pub(crate) fn capture_lists_view_keys<E: InteractiveElement>(root: E, cx: &Context<Self>) -> E {
++        root.capture_action(Self::lists_key_guard::<SelectNext>(cx))
++            .capture_action(Self::lists_key_guard::<SelectPrevious>(cx))
++            .capture_action(Self::lists_key_guard::<SelectFirst>(cx))
++            .capture_action(Self::lists_key_guard::<SelectLast>(cx))
++            .capture_action(Self::lists_key_guard::<SelectChild>(cx))
++            .capture_action(Self::lists_key_guard::<SelectParent>(cx))
++            .capture_action(Self::lists_key_guard::<MoveDown>(cx))
++            .capture_action(Self::lists_key_guard::<MoveUp>(cx))
++            .capture_action(Self::lists_key_guard::<Confirm>(cx))
++            .capture_action(Self::lists_key_guard::<ToggleFold>(cx))
++            .capture_action(Self::lists_key_guard::<ArchiveSelectedThread>(cx))
++            .capture_action(Self::lists_key_guard::<TogglePinSelectedThread>(cx))
++            .capture_action(Self::lists_key_guard::<RenameSelectedThread>(cx))
++    }
++
++    fn lists_key_guard<A: Action>(
++        cx: &Context<Self>,
++    ) -> impl Fn(&A, &mut Window, &mut App) + 'static {
++        cx.listener(|this, _: &A, window, cx| {
++            if !matches!(this.view, SidebarView::Lists(_)) {
++                return;
++            }
++            this.selection = None;
++            if this.focus_handle.is_focused(window) {
++                cx.stop_propagation();
++            }
++        })
++    }
++
++    /// A saved Lists view is reopened only where the store exists; elsewhere the sidebar stays on
++    /// the thread list (R1.10).
++    pub(crate) fn restore_lists_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if ThreadOrganizationStore::try_global(cx).is_some() {
++            cx.defer_in(window, |this, window, cx| this.show_lists(window, cx));
++        }
++    }
++
++    /// Keeps the rows `rebuild_contents` built, re-measuring only the changed middle range, as
++    /// `apply_list_state_diff` does for the thread list: the scroll position and the unchanged
++    /// rows' measurements survive a fold, a filing in another window and a reorder.
++    pub(crate) fn set_lists_entries(&mut self, entries: Vec<ListsEntry>) {
++        let SidebarView::Lists(state) = &mut self.view else {
++            return;
++        };
++        let old = &state.lists_entries;
++        let prefix_len = old
++            .iter()
++            .zip(&entries)
++            .take_while(|(old_row, new_row)| old_row.is_same_row(new_row))
++            .count();
++        let suffix_len = old[prefix_len..]
++            .iter()
++            .rev()
++            .zip(entries[prefix_len..].iter().rev())
++            .take_while(|(old_row, new_row)| old_row.is_same_row(new_row))
++            .count();
++        let old_changed = prefix_len..old.len() - suffix_len;
++        let new_changed_count = entries.len() - prefix_len - suffix_len;
++        state.lists_entries = entries;
++        if !old_changed.is_empty() || new_changed_count > 0 {
++            state
++                .lists_list_state
++                .splice(old_changed, new_changed_count);
++        }
++    }
++
++    /// Opens the view's name field in `mode`, replacing any field already open (one at a time),
++    /// and gives it focus, since it is typed into. Does nothing outside the Lists view.
++    pub(crate) fn open_lists_name_field(
++        &mut self,
++        mode: NameFieldMode,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !matches!(self.view, SidebarView::Lists(_)) {
++            return;
++        }
++        let editor = cx.new(|cx| {
++            let mut editor = Editor::single_line(window, cx);
++            editor.set_placeholder_text("List name", window, cx);
++            editor
++        });
++        editor.focus_handle(cx).focus(window, cx);
++        if let SidebarView::Lists(state) = &mut self.view {
++            state.name_field = Some(ListsNameField {
++                mode,
++                editor,
++                message: None,
++            });
++        }
++        cx.notify();
++    }
++
++    /// A header click folds the list in this window only (R2.5): the fold lives in the view's
++    /// own state, never in the store.
++    fn toggle_list_collapsed(&mut self, list_id: ListId, cx: &mut Context<Self>) {
++        let SidebarView::Lists(state) = &mut self.view else {
++            return;
++        };
++        if !state.collapsed.remove(&list_id) {
++            state.collapsed.insert(list_id);
++        }
++        self.update_entries(cx);
++    }
++}
+diff --git a/crates/sidebar/src/lists_view/lists_manage.rs b/crates/sidebar/src/lists_view/lists_manage.rs
+new file mode 100644
+index 0000000..dea0f3f
+--- /dev/null
++++ b/crates/sidebar/src/lists_view/lists_manage.rs
+@@ -0,0 +1,277 @@
++//! Managing lists from the Lists view: its name field (New List, New List…, Rename List…) and a
++//! header's menu (Rename List…, Delete List, Move Up, Move Down). Every rule a name must meet is
++//! the store's: the field only maps the store's refusals to text, so the two cannot disagree.
++
++use agent_ui::thread_organization::{ListId, OrganizeError, ThreadOrganizationStore};
++use menu::Confirm;
++use ui::{ContextMenu, prelude::*, right_click_menu};
++
++use super::{ListsNameField, NameFieldMode};
++use crate::{Sidebar, SidebarView};
++
++// R5.2 and R5.3's wording. They are shown under the field and never logged: a name is the
++// user's text, and a refusal of it is an answer to the user, not a fault.
++const LIST_NAME_LENGTH_MESSAGE: &str = "A list name must be 1 to 64 characters";
++const LIST_NAME_DUPLICATE_MESSAGE: &str = "A list with this name already exists";
++
++impl Sidebar {
++    /// The "New List" control's click: the name field, open to create a list (R2.7, R2.11).
++    pub(crate) fn start_new_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        self.open_lists_name_field(NameFieldMode::Create, window, cx);
++    }
++
++    /// "Rename List…": the name field, prefilled with the list's name and all of it selected, so
++    /// typing replaces it (R5.4).
++    fn start_rename_list(&mut self, list_id: ListId, window: &mut Window, cx: &mut Context<Self>) {
++        let Some(name) = ThreadOrganizationStore::try_global(cx).and_then(|store| {
++            store
++                .read(cx)
++                .lists()
++                .iter()
++                .find(|list| list.id == list_id)
++                .map(|list| list.name.clone())
++        }) else {
++            // Deleted in another window after this menu opened.
++            let error = OrganizeError::UnknownList { list_id };
++            log::warn!("sidebar: rename refused for list {list_id}: {error}");
++            return;
++        };
++        self.open_lists_name_field(NameFieldMode::Rename(list_id), window, cx);
++        if let Some(field) = self.lists_name_field() {
++            field.editor.update(cx, |editor, cx| {
++                editor.set_text(name, window, cx);
++                editor.select_all(&editor::actions::SelectAll, window, cx);
++            });
++        }
++    }
++
++    fn lists_name_field(&self) -> Option<&ListsNameField> {
++        match &self.view {
++            SidebarView::Lists(state) => state.name_field.as_ref(),
++            SidebarView::ThreadList | SidebarView::Archive(_) => None,
++        }
++    }
++
++    /// Closes the field with nothing applied, and gives focus back to the sidebar, which the
++    /// field took when it opened.
++    fn close_lists_name_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if let SidebarView::Lists(state) = &mut self.view
++            && state.name_field.take().is_some()
++        {
++            self.focus_handle.focus(window, cx);
++            cx.notify();
++        }
++    }
++
++    fn show_lists_name_message(&mut self, message: &'static str, cx: &mut Context<Self>) {
++        if let SidebarView::Lists(state) = &mut self.view
++            && let Some(field) = &mut state.name_field
++        {
++            field.message = Some(message.into());
++            cx.notify();
++        }
++    }
++
++    /// Enter in the field: the store creates or renames, and its answer decides whether the field
++    /// closes (R4.9, R5.1–R5.4, R5.9). Runs from the field's key handler, outside any store update.
++    fn confirm_lists_name_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        let Some(field) = self.lists_name_field() else {
++            return;
++        };
++        let mode = field.mode;
++        let name = field.editor.read(cx).text(cx);
++        let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++            return;
++        };
++        let result = match mode {
++            NameFieldMode::Create | NameFieldMode::CreateAndFile(_) => store
++                .update(cx, |store, cx| store.create_list(&name, cx))
++                .map(Some),
++            NameFieldMode::Rename(list_id) => store
++                .update(cx, |store, cx| store.rename_list(list_id, &name, cx))
++                .map(|()| None),
++        };
++        match result {
++            Ok(created) => {
++                self.close_lists_name_field(window, cx);
++                // A refused filing keeps the new list and warns, as the submenu's own does.
++                if let (NameFieldMode::CreateAndFile(thread_id), Some(list_id)) = (mode, created) {
++                    self.move_thread_to_list(thread_id, Some(list_id), cx);
++                }
++            }
++            Err(OrganizeError::InvalidListName) => {
++                self.show_lists_name_message(LIST_NAME_LENGTH_MESSAGE, cx);
++            }
++            Err(OrganizeError::DuplicateListName { .. }) => {
++                self.show_lists_name_message(LIST_NAME_DUPLICATE_MESSAGE, cx);
++            }
++            // The list is gone (deleted in another window): there is nothing left to rename, so
++            // the field closes. The error names ids only, never the typed name (R5.9).
++            Err(error) => {
++                match mode {
++                    NameFieldMode::Rename(list_id) => {
++                        log::warn!("sidebar: rename refused for list {list_id}: {error}")
++                    }
++                    NameFieldMode::Create | NameFieldMode::CreateAndFile(_) => {
++                        log::warn!("sidebar: new list refused: {error}")
++                    }
++                }
++                self.close_lists_name_field(window, cx);
++            }
++        }
++    }
++
++    /// "Delete List": no confirmation (story assumption). The store leaves each member in no list
++    /// with everything else it had (R5.5).
++    fn delete_list_from_header(
++        &mut self,
++        list_id: ListId,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++            return;
++        };
++        if let Err(error) = store.update(cx, |store, cx| store.delete_list(list_id, cx)) {
++            log::warn!("sidebar: delete refused for list {list_id}: {error}");
++            return;
++        }
++        // The fold is per window and names a list that no longer exists.
++        if let SidebarView::Lists(state) = &mut self.view {
++            state.collapsed.remove(&list_id);
++        }
++        // A rename of the deleted list could only be refused on Enter.
++        if self
++            .lists_name_field()
++            .is_some_and(|field| field.mode == NameFieldMode::Rename(list_id))
++        {
++            self.close_lists_name_field(window, cx);
++        }
++    }
++
++    /// "Move Up"/"Move Down": one place from where the list is when clicked, which another window
++    /// may have changed since the menu opened (R5.6).
++    fn move_list_one_place(&mut self, list_id: ListId, up: bool, cx: &mut Context<Self>) {
++        let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++            return;
++        };
++        let Some(index) = store
++            .read(cx)
++            .lists()
++            .iter()
++            .position(|list| list.id == list_id)
++        else {
++            let error = OrganizeError::UnknownList { list_id };
++            log::warn!("sidebar: move refused for list {list_id}: {error}");
++            return;
++        };
++        let to_index = if up {
++            index.saturating_sub(1)
++        } else {
++            index + 1
++        };
++        if let Err(error) = store.update(cx, |store, cx| store.move_list(list_id, to_index, cx)) {
++            log::warn!("sidebar: move refused for list {list_id}: {error}");
++        }
++    }
++
++    /// The open field, with its own Enter and Escape: it holds focus, so the Lists view's key
++    /// guards (which act only while the sidebar root has focus) never see these keys.
++    pub(super) fn render_lists_name_field(
++        &self,
++        field: &ListsNameField,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        v_flex()
++            .debug_selector(|| "LISTS_NAME_FIELD".into())
++            .w_full()
++            .px_1()
++            .gap_0p5()
++            // A single-line editor binds Enter to `Confirm`; `Newline` is captured too, as the
++            // thread rename field does, so no keymap turns Enter into a second line.
++            .capture_action(
++                cx.listener(|this, _: &editor::actions::Newline, window, cx| {
++                    this.confirm_lists_name_field(window, cx);
++                }),
++            )
++            .on_action(cx.listener(|this, _: &Confirm, window, cx| {
++                this.confirm_lists_name_field(window, cx);
++            }))
++            .on_action(
++                cx.listener(|this, _: &editor::actions::Cancel, window, cx| {
++                    this.close_lists_name_field(window, cx);
++                }),
++            )
++            .child(field.editor.clone())
++            .when_some(field.message.clone(), |this, message| {
++                let selector = message.clone();
++                this.child(
++                    div()
++                        .debug_selector(move || format!("LISTS_NAME_MESSAGE-{selector}"))
++                        .child(
++                            Label::new(message)
++                                .size(LabelSize::Small)
++                                .color(Color::Error),
++                        ),
++                )
++            })
++            .into_any_element()
++    }
++
++    /// A list header with its right-click menu. Which entries it offers is read when the menu
++    /// opens, so Move Up and Move Down match the order at that moment (R5.7).
++    pub(super) fn render_lists_header_menu(
++        &self,
++        list_id: ListId,
++        header: AnyElement,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let sidebar = cx.weak_entity();
++        right_click_menu(SharedString::from(format!("lists-header-menu-{list_id}")))
++            .trigger(move |_, _, _| header)
++            .menu(move |window, cx| {
++                let position = ThreadOrganizationStore::try_global(cx).and_then(|store| {
++                    let lists = store.read(cx).lists();
++                    lists
++                        .iter()
++                        .position(|list| list.id == list_id)
++                        .map(|index| (index, lists.len()))
++                });
++                let can_move_up = position.is_some_and(|(index, _)| index > 0);
++                let can_move_down = position.is_some_and(|(index, count)| index + 1 < count);
++                let sidebar = sidebar.clone();
++                ContextMenu::build(window, cx, move |menu, _window, _cx| {
++                    let act =
++                        |action: fn(&mut Sidebar, ListId, &mut Window, &mut Context<Sidebar>)| {
++                            let sidebar = sidebar.clone();
++                            move |window: &mut Window, cx: &mut App| {
++                                sidebar
++                                    .update(cx, |sidebar, cx| action(sidebar, list_id, window, cx))
++                                    .ok();
++                            }
++                        };
++                    menu.entry("Rename List…", None, act(Sidebar::start_rename_list))
++                        .entry("Delete List", None, act(Sidebar::delete_list_from_header))
++                        .when(can_move_up, |menu| {
++                            menu.entry(
++                                "Move Up",
++                                None,
++                                act(|sidebar, list_id, _, cx| {
++                                    sidebar.move_list_one_place(list_id, true, cx)
++                                }),
++                            )
++                        })
++                        .when(can_move_down, |menu| {
++                            menu.entry(
++                                "Move Down",
++                                None,
++                                act(|sidebar, list_id, _, cx| {
++                                    sidebar.move_list_one_place(list_id, false, cx)
++                                }),
++                            )
++                        })
++                })
++            })
++            .into_any_element()
++    }
++}
+diff --git a/crates/sidebar/src/lists_view/lists_render.rs b/crates/sidebar/src/lists_view/lists_render.rs
+new file mode 100644
+index 0000000..1a7519d
+--- /dev/null
++++ b/crates/sidebar/src/lists_view/lists_render.rs
+@@ -0,0 +1,215 @@
++//! Drawing the Lists view: its headers, thread rows, "No threads" rows and empty state. The rows
++//! themselves are built by `rebuild_contents` (see `build_lists_contents`); this only reads them.
++
++use std::sync::Arc;
++
++use agent_ui::thread_organization::ListId;
++use gpui::list;
++use ui::{ScrollAxes, Scrollbars, Tab, WithScrollbar, prelude::*};
++
++use super::ListsEntry;
++use crate::{ListEntry, Sidebar, SidebarView, ThreadEntry};
++
++impl Sidebar {
++    pub(crate) fn render_lists_view(
++        &mut self,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> impl IntoElement {
++        // The view selects no row, and a rename here sets `selection` to a Lists index that
++        // the thread list's handlers would read as one of theirs (see `capture_lists_view_keys`).
++        self.selection = None;
++        let SidebarView::Lists(state) = &self.view else {
++            return div().into_any_element();
++        };
++        // Every list has a header row, so no row means no list (R2.7).
++        if state.lists_entries.is_empty() {
++            return self.render_lists_empty_state(cx).into_any_element();
++        }
++        let list_state = state.lists_list_state.clone();
++        v_flex()
++            .flex_1()
++            .overflow_hidden()
++            // Above the lists, so a new list never needs a list to exist first (R2.11).
++            .child(
++                h_flex()
++                    .px_1()
++                    .py_1()
++                    .child(self.render_new_list_control(cx)),
++            )
++            .child(
++                v_flex()
++                    .relative()
++                    .flex_1()
++                    .overflow_hidden()
++                    .child(
++                        list(list_state.clone(), cx.processor(Self::render_lists_entry))
++                            .flex_1()
++                            .size_full(),
++                    )
++                    .custom_scrollbars(
++                        Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&list_state),
++                        window,
++                        cx,
++                    ),
++            )
++            .into_any_element()
++    }
++
++    fn render_lists_entry(
++        &mut self,
++        ix: usize,
++        _window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let SidebarView::Lists(state) = &self.view else {
++            return div().into_any_element();
++        };
++        let Some(entry) = state.lists_entries.get(ix).cloned() else {
++            return div().into_any_element();
++        };
++        match entry {
++            ListsEntry::Header {
++                list_id,
++                name,
++                shown,
++                collapsed,
++            } => self.render_lists_header(ix, list_id, name, shown, collapsed, cx),
++            ListsEntry::Thread(thread) => self.render_lists_thread(ix, &thread, cx),
++            ListsEntry::Empty { list_id } => {
++                let name = list_name_above(&state.lists_entries[..ix], list_id);
++                h_flex()
++                    .debug_selector(move || format!("LISTS_NO_THREADS-{name}"))
++                    .h(Tab::content_height(cx))
++                    .w_full()
++                    .pl_4()
++                    .child(
++                        Label::new("No threads")
++                            .size(LabelSize::Small)
++                            .color(Color::Muted),
++                    )
++                    .into_any_element()
++            }
++        }
++    }
++
++    fn render_lists_header(
++        &self,
++        ix: usize,
++        list_id: ListId,
++        name: SharedString,
++        shown: usize,
++        collapsed: bool,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let disclosure_icon = if collapsed {
++            IconName::ChevronRight
++        } else {
++            IconName::ChevronDown
++        };
++        let selector_name = name.clone();
++        let header = h_flex()
++            .id(("lists-header", ix))
++            .debug_selector(move || format!("LISTS_HEADER-{selector_name} ({shown})"))
++            .h(Tab::content_height(cx))
++            .w_full()
++            .pl_2()
++            .pr_1p5()
++            .gap_1()
++            .child(Label::new(name).color(Color::Muted).truncate())
++            // Shown while collapsed too, so a folded list still says how much it holds (R2.1).
++            .child(
++                Label::new(shown.to_string())
++                    .size(LabelSize::Small)
++                    .color(Color::Muted),
++            )
++            .child(
++                Icon::new(disclosure_icon)
++                    .size(IconSize::Small)
++                    .color(Color::Muted),
++            )
++            .cursor_pointer()
++            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _window, cx| {
++                this.toggle_list_collapsed(list_id, cx);
++            }))
++            // No `block_mouse_except_scroll`, unlike the Pinned header (whose sticky copy is drawn
++            // over the rows): it would hide the header from its own right-click menu's hitbox.
++            .into_any_element();
++        self.render_lists_header_menu(list_id, header, cx)
++    }
++
++    /// The thread list's own row, so its click, menu and buttons behave as they do there; `ix`
++    /// indexes the Lists view's rows, which the row's hover and menu ids are keyed by.
++    fn render_lists_thread(
++        &self,
++        ix: usize,
++        thread: &Arc<ThreadEntry>,
++        cx: &mut Context<Self>,
++    ) -> AnyElement {
++        let is_active = self
++            .active_entry
++            .as_ref()
++            .is_some_and(|active| active.matches_entry(&ListEntry::Thread(thread.clone())));
++        let title = thread.metadata.display_title();
++        let project = thread.pinned_project_label.clone().unwrap_or_default();
++        // Keyboard selection is not offered in this view, so no row draws the focus border.
++        let row = self.render_thread(ix, thread, is_active, false, cx);
++        div()
++            .debug_selector(move || format!("LISTS_ROW-{title} · {project}"))
++            .child(row)
++            .into_any_element()
++    }
++
++    /// R2.7's empty state: what lists are for, and the way to make one.
++    fn render_lists_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
++        v_flex()
++            .debug_selector(|| "LISTS_EMPTY_STATE".into())
++            .flex_1()
++            .p_4()
++            .gap_2()
++            .items_center()
++            .justify_center()
++            .child(Label::new("No lists yet").color(Color::Muted))
++            .child(
++                Label::new("Lists group threads by category.")
++                    .size(LabelSize::Small)
++                    .color(Color::Muted),
++            )
++            .child(self.render_new_list_control(cx))
++    }
++
++    /// The "New List" control, or in its place the name field while one is open, so the field
++    /// shows both in the empty state and above the lists.
++    fn render_new_list_control(&self, cx: &mut Context<Self>) -> AnyElement {
++        if let SidebarView::Lists(state) = &self.view
++            && let Some(field) = &state.name_field
++        {
++            return self.render_lists_name_field(field, cx);
++        }
++        div()
++            .debug_selector(|| "LISTS_NEW_LIST".into())
++            .child(
++                Button::new("lists-new-list", "New List")
++                    .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
++                    .label_size(LabelSize::Small)
++                    .on_click(cx.listener(|this, _, window, cx| this.start_new_list(window, cx))),
++            )
++            .into_any_element()
++    }
++}
++
++/// The name of the list whose header is the nearest one above a row.
++fn list_name_above(entries: &[ListsEntry], list_id: ListId) -> SharedString {
++    entries
++        .iter()
++        .rev()
++        .find_map(|entry| match entry {
++            ListsEntry::Header {
++                list_id: header_id,
++                name,
++                ..
++            } if *header_id == list_id => Some(name.clone()),
++            _ => None,
++        })
++        .unwrap_or_default()
++}
+diff --git a/crates/sidebar/src/lists_view/move_to_list.rs b/crates/sidebar/src/lists_view/move_to_list.rs
+new file mode 100644
+index 0000000..6cf6d09
+--- /dev/null
++++ b/crates/sidebar/src/lists_view/move_to_list.rs
+@@ -0,0 +1,112 @@
++//! The "Move to List" submenu of a thread's context menu, and the filing it does.
++
++use agent_ui::ThreadId;
++use agent_ui::thread_organization::{ListId, ThreadOrganizationStore};
++use gpui::WeakEntity;
++use ui::{ContextMenu, prelude::*};
++
++use super::NameFieldMode;
++use crate::{Sidebar, SidebarView};
++
++/// Adds the "Move to List" submenu to a thread's menu (R4.1); nothing without the store, which
++/// is where lists live. The sidebar is held weakly, as every entry of that menu holds it.
++pub(crate) fn move_to_list_submenu(
++    menu: ContextMenu,
++    sidebar: WeakEntity<Sidebar>,
++    thread_id: ThreadId,
++    cx: &App,
++) -> ContextMenu {
++    if ThreadOrganizationStore::try_global(cx).is_none() {
++        return menu;
++    }
++    // The builder runs each time the submenu opens, so it reads the lists as they are then, not
++    // as they were when the thread menu opened.
++    menu.submenu("Move to List", move |mut submenu, _window, cx| {
++        let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++            return submenu;
++        };
++        let store = store.read(cx);
++        let current = store
++            .organization(thread_id)
++            .and_then(|organization| organization.list_id);
++        let file_in = |list: Option<ListId>| {
++            let sidebar = sidebar.clone();
++            move |_window: &mut Window, cx: &mut App| {
++                sidebar
++                    .update(cx, |sidebar, cx| {
++                        sidebar.move_thread_to_list(thread_id, list, cx);
++                    })
++                    .ok();
++            }
++        };
++        let lists = store.lists();
++        for list in lists {
++            submenu = submenu.toggleable_entry(
++                list.name.clone(),
++                current == Some(list.id),
++                IconPosition::Start,
++                None,
++                file_in(Some(list.id)),
++            );
++        }
++        if current.is_some() {
++            submenu = submenu.entry("Remove from List", None, file_in(None));
++        }
++        if !lists.is_empty() {
++            submenu = submenu.separator();
++        }
++        let sidebar = sidebar.clone();
++        submenu.entry("New List…", None, move |window, cx| {
++            sidebar
++                .update(cx, |sidebar, cx| {
++                    sidebar.new_list_for_thread(thread_id, window, cx);
++                })
++                .ok();
++        })
++    })
++}
++
++impl Sidebar {
++    /// Files `thread_id` in `list`, or in no list for `None` (R4.2, R4.8). Called from UI
++    /// handlers only: a store write inside a `ThreadMetadataStore` update would re-enter it.
++    pub(crate) fn move_thread_to_list(
++        &mut self,
++        thread_id: ThreadId,
++        list: Option<ListId>,
++        cx: &mut Context<Self>,
++    ) {
++        let Some(store) = ThreadOrganizationStore::try_global(cx) else {
++            return;
++        };
++        let current = store
++            .read(cx)
++            .organization(thread_id)
++            .and_then(|organization| organization.list_id);
++        // The current list is the marked entry; choosing it must not act as a toggle (R4.3).
++        if current == list {
++            return;
++        }
++        let result = store.update(cx, |store, cx| store.set_list(thread_id, list, cx));
++        // The store's errors name ids only; a title or a list name never reaches a log (R4.7).
++        if let Err(error) = result {
++            log::warn!(
++                "sidebar: list change refused for thread {}: {error}",
++                thread_id.to_key_string()
++            );
++        }
++    }
++
++    /// "New List…": the Lists view, with its name field open to file this thread in the list it
++    /// creates (R4.5). A view already shown keeps its folds.
++    fn new_list_for_thread(
++        &mut self,
++        thread_id: ThreadId,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if !matches!(self.view, SidebarView::Lists(_)) {
++            self.show_lists(window, cx);
++        }
++        self.open_lists_name_field(NameFieldMode::CreateAndFile(thread_id), window, cx);
++    }
++}
+diff --git a/crates/sidebar/src/organization.rs b/crates/sidebar/src/organization.rs
+index 55c7c53..e7e0d95 100644
+--- a/crates/sidebar/src/organization.rs
++++ b/crates/sidebar/src/organization.rs
+@@ -410,6 +410,10 @@ impl Sidebar {
+         if ThreadOrganizationStore::try_global(cx).is_none() || self.has_filter_query(cx) {
+             return row;
+         }
++        // A Lists row's `ix` indexes that view's rows, not `contents`: no group order to drag in.
++        if matches!(self.view, crate::SidebarView::Lists(_)) {
++            return row;
++        }
+         let Some(origin) = row_origin(&self.contents.entries, ix) else {
+             return row;
+         };
+diff --git a/crates/sidebar/src/sidebar.rs b/crates/sidebar/src/sidebar.rs
+index c857e11..ba76c8b 100644
+--- a/crates/sidebar/src/sidebar.rs
++++ b/crates/sidebar/src/sidebar.rs
+@@ -105,6 +105,10 @@ mod sidebar_tags_notify_tests;
+ mod sidebar_tags_tests;
+ mod thread_tags;
+ 
++mod lists_view;
++#[cfg(test)]
++mod sidebar_lists_tests;
++
+ gpui::actions!(
+     agents_sidebar,
+     [
+@@ -114,6 +118,8 @@ gpui::actions!(
+         ToggleThreadHistory,
+         /// Pins the selected thread to the Pinned section, or unpins it.
+         TogglePinSelectedThread,
++        /// Toggles between the thread list and the thread lists.
++        ToggleThreadLists,
+     ]
+ );
+ 
+@@ -131,6 +137,7 @@ enum SerializedSidebarView {
+     ThreadList,
+     #[serde(alias = "Archive")]
+     History,
++    Lists,
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -159,6 +166,7 @@ enum SidebarView {
+     #[default]
+     ThreadList,
+     Archive(Entity<ThreadsArchiveView>),
++    Lists(lists_view::ListsViewState),
+ }
+ 
+ enum ArchiveWorktreeOutcome {
+@@ -2199,6 +2207,28 @@ impl Sidebar {
+             }
+         }
+ 
++        // Pinned's row builder, so a Lists row resolves its workspace, icon and label the same way.
++        if let SidebarView::Lists(lists) = &self.view {
++            let lists_entries = lists_view::build_lists_contents(
++                &lists.collapsed,
++                |thread_ids| {
++                    let context = PinnedBuildContext {
++                        workspaces: &workspaces,
++                        active_workspace: active_workspace.as_ref(),
++                        path_detail_map: &path_detail_map,
++                        branch_by_path: &branch_by_path,
++                        resolve_agent_icon: &resolve_agent_icon,
++                        new_live_statuses: &mut new_live_statuses,
++                        notified_threads: &mut notified_threads,
++                    };
++                    pinned_section::build_pinned_rows(self, thread_ids, context, cx)
++                },
++                cx,
++            );
++            current_thread_ids.extend(lists_view::lists_thread_ids(&lists_entries));
++            self.set_lists_entries(lists_entries);
++        }
++
+         notified_threads.retain(|id| current_thread_ids.contains(id));
+ 
+         self.thread_last_accessed
+@@ -7049,6 +7079,8 @@ impl Sidebar {
+                             });
+                         }
+                         menu = thread_tags::tags_menu_entry(menu, thread_id, sidebar.clone(), _cx);
++                        menu =
++                            lists_view::move_to_list_submenu(menu, sidebar.clone(), thread_id, _cx);
+ 
+                         menu.separator().entry("Archive Thread", None, {
+                             let session_id = session_id.clone();
+@@ -8046,6 +8078,7 @@ impl Sidebar {
+                         this.toggle_archive(&ToggleThreadHistory, window, cx);
+                     })),
+             )
++            .children(self.render_lists_button(cx))
+             .child(div().flex_1())
+             .child(self.render_recent_projects_button(cx))
+     }
+@@ -8206,6 +8239,7 @@ impl Sidebar {
+                 self.show_archive(window, cx);
+             }
+             SidebarView::Archive(_) => self.show_thread_list(window, cx),
++            SidebarView::Lists(_) => self.show_history_from_lists(window, cx),
+         }
+     }
+ 
+@@ -8408,6 +8442,7 @@ impl WorkspaceSidebar for Sidebar {
+             active_view: match self.view {
+                 SidebarView::ThreadList => SerializedSidebarView::ThreadList,
+                 SidebarView::Archive(_) => SerializedSidebarView::History,
++                SidebarView::Lists(_) => SerializedSidebarView::Lists,
+             },
+         };
+         serde_json::to_string(&serialized).ok()
+@@ -8433,6 +8468,9 @@ impl WorkspaceSidebar for Sidebar {
+                     this.show_archive(window, cx);
+                 });
+             }
++            if serialized.active_view == SerializedSidebarView::Lists {
++                self.restore_lists_view(window, cx);
++            }
+         }
+         cx.notify();
+     }
+@@ -8481,6 +8519,8 @@ impl Render for Sidebar {
+             .on_action(cx.listener(Self::new_thread_in_group))
+             .on_action(cx.listener(Self::new_terminal_thread))
+             .on_action(cx.listener(Self::toggle_archive))
++            .on_action(cx.listener(Self::toggle_lists))
++            .map(|this| Self::capture_lists_view_keys(this, cx))
+             .on_action(cx.listener(Self::focus_sidebar_filter))
+             .on_action(cx.listener(Self::on_toggle_thread_switcher))
+             .on_action(cx.listener(Self::on_next_project))
+@@ -8571,6 +8611,7 @@ impl Render for Sidebar {
+                         }
+                     }),
+                 SidebarView::Archive(archive_view) => this.child(archive_view.clone()),
++                SidebarView::Lists(_) => this.child(self.render_lists_view(window, cx)),
+             })
+             .map(|this| {
+                 let show_acp = self.should_render_acp_import_onboarding(cx);
+diff --git a/crates/sidebar/src/sidebar_lists_tests.rs b/crates/sidebar/src/sidebar_lists_tests.rs
+new file mode 100644
+index 0000000..142413d
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests.rs
+@@ -0,0 +1,291 @@
++// Story 038 — the Lists view of the agent sidebar (tasks 3.1, 4.1, 4.2, 5.1, 6.1). This file is
++// the parent module; its children live in `sidebar_lists_tests/`, one file per task (the 500-line
++// rule; Zed's `.rules` forbid `mod.rs` paths), as tasks.md names them:
++//   view          task 3.1  SidebarView::Lists, the footer button, ToggleThreadLists, the saved state
++//   render        task 4.1  headers, rows, collapse, "No threads", the empty state, other windows
++//   open          task 4.2  render_thread's own click opens a Lists row where it lives; the view
++//                           stays; a thread deleted elsewhere leaves the view
++//   move_to_list  task 5.1  the "Move to List" submenu and Sidebar::move_thread_to_list
++//   manage        task 6.1  the name field, the header menu, their refusals, the restart
++// Shared setup lives here, the store and view helpers in `support.rs`. Task 2.1's unit tests
++// (`mod rows`, ListsRow / build_list_rows) are the Executor's: they go in `rows.rs` at run time,
++// declared at the `mod rows;` line below, and are not authored here.
++//
++// Materialize as `crates/sidebar/src/sidebar_lists_tests.rs` (this file) plus the directory
++// `crates/sidebar/src/sidebar_lists_tests/` (`support.rs`, `view.rs`, `render.rs`, `open.rs`,
++// `move_to_list.rs`, `manage.rs`, and the Executor's `rows.rs`), wired in `sidebar.rs` beside
++// `mod sidebar_pinned_tests;`:
++//     #[cfg(test)]
++//     mod sidebar_lists_tests;
++// FILTER: the test paths are `sidebar_lists_tests::<module>::<test>`. Run
++// `cargo test -p sidebar sidebar_lists_tests::<module>` and check the count it reports is not 0
++// (a filter such as `lists::view` matches no test and passes vacuously).
++//
++// The store is installed with `agent_ui::thread_organization::init(cx)` BEFORE the sidebar is
++// created (the sidebar observes it from `Sidebar::new`); `init_test` gives every test its own
++// database, so lists never leak between tests.
++//
++// WHAT THE TESTS NEED FROM THE CODE. tasks.md names the API (SidebarView::Lists,
++// SerializedSidebarView::Lists, ToggleThreadLists, Sidebar::move_thread_to_list) but no way to READ the view, which GPUI tests can only do through
++// debug selectors (`cx.debug_bounds`). The view is therefore read through this selector contract;
++// each one sits on the element a user clicks or reads:
++//   ICON-ListTree                     the footer button. IconButton records `ICON-{IconName:?}`
++//                                     by itself; if another list icon is chosen, change
++//                                     LISTS_BUTTON below and nothing else
++//   LISTS_HEADER-{name} ({shown})     a list's group header (click: collapse/expand; right-click:
++//                                     the header menu). {shown} is the thread count R2.1 shows
++//   LISTS_ROW-{title} · {project}     the element wrapping a thread row of the view. The row is
++//                                     built by `build_pinned_rows` and drawn by `render_thread`,
++//                                     whose own click opens it and whose context menu it carries.
++//                                     {project} is the row's project label
++//   LISTS_NO_THREADS-{name}           the "No threads" row under an expanded list with none (R2.6)
++//   LISTS_EMPTY_STATE                 the empty state shown when no list exists (R2.7)
++//   LISTS_NEW_LIST                    the control that opens the "New List" field: R2.7's button
++//                                     in the empty state, and R2.11's control above the lists
++//   LISTS_NAME_FIELD                  the open name field (New List, New List…, Rename List…)
++//   LISTS_NAME_MESSAGE-{text}         a refusal shown under the field (R5.2, R5.3)
++// Menu entries are read through ContextMenu's own `MENU_ITEM-{label}` selectors.
++//
++// The name field must take focus when it opens (it is typed into). Keys are dispatched as the
++// default keymap maps them in a single-line editor: Enter = `menu::Confirm` (the root binding;
++// "Editor && mode == full" is the only Newline binding), Escape = `editor::actions::Cancel`.
++//
++// `Sidebar::move_thread_to_list`, defined in `lists_view.rs`'s `impl Sidebar` and called here
++// directly, must be `pub(crate)`: a private method of a child module is invisible to this sibling.
++// Rows are opened only by a real click on them (no method of their own). `capture_logs` and `warn_lines` are
++// imported from `sidebar_pinned_tests.rs` (already `pub(super)`): a second logger would panic.
++//
++// The "Move to List" submenu is opened from the keyboard: the submenu trigger has no selector, so
++// `open_move_to_list` walks the open menu (SelectNext, SelectChild) until the submenu's
++// "New List…" entry appears, and steps back out (SelectParent) of any other submenu it enters.
++//
++// Hostile halves come first in every identity rule:
++//   - a thread filed in another list is in exactly one list: shown under the new one AND gone
++//     from the former (not zero, not two);
++//   - choosing the CURRENT list keeps the thread there (a toggle-style entry must not un-file it);
++//   - two threads with the same title in different projects are two distinguishable rows;
++//   - an archived member is hidden AND keeps its membership; a list whose only member is
++//     archived counts 0 and shows "No threads", like a truly empty one;
++//   - names: "  OPS  " and "ops" are the SAME list name (refused), "Équipe"/"ÉQUIPE" too (a fold
++//     that is ASCII-only would accept it); "Ops2" is a DIFFERENT name (accepted); a list renamed to
++//     its own name in another case is not a duplicate of itself; 64 characters are accepted and 65
++//     refused, counted in characters (64 × "é" is 128 bytes and must be accepted);
++//   - deleting one list clears its members only, never another list's;
++//   - Move Up/Down moves ONE place, not to the end;
++//   - History from Lists goes to History (not back to the thread list), and a saved History —
++//     including the legacy "Archive" spelling — restores History, never Lists;
++//   - refusal warnings carry the id and never a title or a list name.
++//
++// Known gaps, reported rather than faked:
++//   - R1.2 "the button shown as toggled on" and R4.1 "the thread's current list marked" are render
++//     state with no observable trace outside the `ui` crate (no selector carries a toggle). The
++//     marked entry's BEHAVIOUR is asserted instead (choosing it changes nothing, R4.3).
++//   - (resolved in v2) R2.1's count on a COLLAPSED header is the expanded count: asserted in
++//     render::a_header_click_collapses_only_in_this_window.
++//   - R2.2 with two projects sharing a folder name ("/work/app", "/home/app"): the story does not
++//     say whether the row label is disambiguated, as the Pinned section's is. Not asserted.
++//   - R2.4 drafts and unknown ids cannot be produced as list members through the store (it refuses
++//     a draft, and deleting a thread forgets its organization): task 2.1's unit tests own them.
++//   - Q12 keyboard navigation between rows is Out of Scope; R4.3 "log nothing" is checked at WARN.
++
++use super::*;
++use crate::sidebar_pinned_tests::{capture_logs, warn_lines};
++use crate::sidebar_tests::{
++    focus_sidebar, init_test, init_test_project_with_agent_panel,
++    save_thread_metadata_with_main_paths, setup_sidebar, setup_sidebar_with_agent_panel,
++    visible_entries_as_strings,
++};
++use agent_ui::thread_organization::{ListId, ThreadOrganizationStore};
++use fs::FakeFs;
++use gpui::{Bounds, MouseButton, TestAppContext, VisualTestContext};
++
++const ALPHA: &str = "/alpha";
++const BETA: &str = "/beta";
++const GAMMA: &str = "/gamma";
++/// Opened in no window unless a test opens it on purpose.
++const DELTA: &str = "/delta";
++
++const LISTS_BUTTON: &str = "ICON-ListTree";
++const HISTORY_BUTTON: &str = "ICON-Clock";
++const EMPTY_STATE: &str = "LISTS_EMPTY_STATE";
++const NEW_LIST: &str = "LISTS_NEW_LIST";
++const NAME_FIELD: &str = "LISTS_NAME_FIELD";
++const LENGTH_MESSAGE: &str = "A list name must be 1 to 64 characters";
++const DUPLICATE_MESSAGE: &str = "A list with this name already exists";
++
++const NEW_LIST_ENTRY: &str = "MENU_ITEM-New List…";
++const REMOVE_ENTRY: &str = "MENU_ITEM-Remove from List";
++const RENAME_LIST_ENTRY: &str = "MENU_ITEM-Rename List…";
++const DELETE_LIST_ENTRY: &str = "MENU_ITEM-Delete List";
++const MOVE_UP_ENTRY: &str = "MENU_ITEM-Move Up";
++const MOVE_DOWN_ENTRY: &str = "MENU_ITEM-Move Down";
++
++// ── Setup ──────────────────────────────────────────────────────────────────
++
++/// Sidebar test globals, a FakeFs with every project folder and, when `with_store`, the
++/// organization store. Returns a project for `ALPHA`.
++async fn init_lists_test(with_store: bool, cx: &mut TestAppContext) -> Entity<project::Project> {
++    init_test(cx);
++    let fs = FakeFs::new(cx.executor());
++    for path in [ALPHA, BETA, GAMMA, DELTA] {
++        fs.insert_tree(path, serde_json::json!({ "src": {} })).await;
++    }
++    cx.update(|cx| {
++        <dyn fs::Fs>::set_global(fs.clone(), cx);
++        if with_store {
++            agent_ui::thread_organization::init(cx);
++        }
++    });
++    cx.run_until_parked();
++    project::Project::test(fs, [ALPHA.as_ref()], cx).await
++}
++
++/// A window on `ALPHA` with its sidebar open; the store installed when `with_store`.
++async fn alpha_window(
++    with_store: bool,
++    cx: &mut TestAppContext,
++) -> (
++    Entity<MultiWorkspace>,
++    Entity<Sidebar>,
++    &mut VisualTestContext,
++) {
++    let project = init_lists_test(with_store, cx).await;
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx);
++    (multi_workspace, sidebar, cx)
++}
++
++/// A window on `ALPHA` with an agent panel (History needs one) and the store.
++async fn alpha_window_with_panel(
++    cx: &mut TestAppContext,
++) -> (
++    Entity<MultiWorkspace>,
++    Entity<Sidebar>,
++    &mut VisualTestContext,
++) {
++    let project = init_test_project_with_agent_panel(ALPHA, cx).await;
++    cx.update(|cx| agent_ui::thread_organization::init(cx));
++    cx.run_until_parked();
++    let (multi_workspace, cx) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let (sidebar, _panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
++    cx.update(|_window, cx| AgentRegistryStore::init_test_global(cx, vec![]));
++    cx.run_until_parked();
++    (multi_workspace, sidebar, cx)
++}
++
++/// Window A on `ALPHA` and window B on `BETA`, each with its sidebar open, sharing the store.
++struct TwoWindows {
++    window_b: WindowHandle<MultiWorkspace>,
++    mw_a: Entity<MultiWorkspace>,
++    sidebar_a: Entity<Sidebar>,
++    sidebar_b: Entity<Sidebar>,
++    cx_a: VisualTestContext,
++    cx_b: VisualTestContext,
++}
++
++async fn two_windows(cx: &mut TestAppContext) -> TwoWindows {
++    let project_a = init_lists_test(true, cx).await;
++    let fs = cx.update(|cx| <dyn fs::Fs>::global(cx));
++    let project_b = project::Project::test(fs, [BETA.as_ref()], cx).await;
++    let window_a = cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
++    let window_b = cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
++    let mw_a = window_a.root(cx).expect("window A has a root");
++    let mw_b = window_b.root(cx).expect("window B has a root");
++    let mut cx_b = VisualTestContext::from_window(window_b.into(), cx);
++    let sidebar_b = setup_sidebar(&mw_b, &mut cx_b);
++    let mut cx_a = VisualTestContext::from_window(window_a.into(), cx);
++    let sidebar_a = setup_sidebar(&mw_a, &mut cx_a);
++    TwoWindows {
++        window_b,
++        mw_a,
++        sidebar_a,
++        sidebar_b,
++        cx_a,
++        cx_b,
++    }
++}
++
++/// Opens `path` as another project group of this window.
++async fn open_in_window(
++    path: &str,
++    multi_workspace: &Entity<MultiWorkspace>,
++    cx: &mut VisualTestContext,
++) -> Entity<Workspace> {
++    let fs = cx.update(|_, cx| <dyn fs::Fs>::global(cx));
++    let project = project::Project::test(fs, [path.as_ref()], cx).await;
++    let workspace = multi_workspace.update_in(cx, |mw, window, cx| {
++        mw.test_add_workspace(project, window, cx)
++    });
++    cx.run_until_parked();
++    workspace
++}
++
++/// Saves a thread with a sent message in the local project `folder`; a later `hour` is more recent.
++fn save_in(
++    session: &str,
++    title: &str,
++    folder: &str,
++    hour: u32,
++    cx: &mut VisualTestContext,
++) -> ThreadId {
++    save_thread_metadata_with_main_paths(
++        session,
++        title,
++        PathList::new(&[PathBuf::from(folder)]),
++        PathList::new(&[PathBuf::from(folder)]),
++        chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, hour, 0, 0)
++            .single()
++            .expect("fixture: a valid hour"),
++        cx,
++    );
++    let session_id = acp::SessionId::new(Arc::from(session));
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entries()
++            .find(|entry| entry.session_id.as_ref() == Some(&session_id))
++            .map(|entry| entry.thread_id)
++            .expect("fixture: the thread was saved")
++    })
++}
++
++fn archive(thread_id: ThreadId, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.archive(thread_id, None, cx))
++    });
++    cx.run_until_parked();
++}
++
++fn unarchive(thread_id: ThreadId, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.unarchive(thread_id, cx))
++    });
++    cx.run_until_parked();
++}
++
++// One block per task, as tasks.md stages them: each task declares its own module when it copies
++// the file in, so the parent compiles at every step.
++// Task 2.1 (Unit, the Executor's)
++mod rows;
++
++// Task 3.1
++mod support;
++use support::*;
++
++mod view;
++
++// Task 4.1
++mod render;
++// Task 4.1, tech-review fix round (the Executor's)
++mod keyboard;
++
++// Task 4.2
++mod open;
++
++// Task 5.1
++mod move_to_list;
++
++// Task 6.1
++mod manage;
+diff --git a/crates/sidebar/src/sidebar_lists_tests/keyboard.rs b/crates/sidebar/src/sidebar_lists_tests/keyboard.rs
+new file mode 100644
+index 0000000..985d33a
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/keyboard.rs
+@@ -0,0 +1,181 @@
++// Task 4.1, tech-review fix round — the thread list's keyboard handlers while the Lists view is
++// shown. A Lists row hands its own index to `render_thread`; renaming one used to leave that
++// index in `selection`, which Enter and shift-backspace then read against the HIDDEN thread list.
++use super::*;
++use pretty_assertions::assert_eq;
++
++fn is_archived(thread_id: ThreadId, cx: &mut VisualTestContext) -> bool {
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry(thread_id)
++            .is_some_and(|metadata| metadata.archived)
++    })
++}
++
++fn title_override(thread_id: ThreadId, cx: &mut VisualTestContext) -> Option<String> {
++    cx.update(|_, cx| {
++        ThreadMetadataStore::global(cx)
++            .read(cx)
++            .entry(thread_id)
++            .and_then(|metadata| {
++                metadata
++                    .title_override
++                    .as_ref()
++                    .map(|title| title.to_string())
++            })
++    })
++}
++
++// Three unfiled threads, more recent than the filed ones, sit at the top of the thread list, so
++// the Lists index of "Write docs" names one of THEM there: a handler that reads it acts on a
++// thread the user cannot see.
++#[gpui::test]
++async fn enter_and_archive_after_a_lists_rename_touch_no_hidden_row(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window_with_panel(cx).await;
++    let unfiled = [
++        save_in("u1", "Unfiled one", ALPHA, 5, cx),
++        save_in("u2", "Unfiled two", ALPHA, 6, cx),
++        save_in("u3", "Unfiled three", ALPHA, 7, cx),
++    ];
++    let fix = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let docs = save_in("a2", "Write docs", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    file_in(docs, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++    let active_before = active_thread(&sidebar, cx);
++
++    right_click(row("Write docs", "alpha"), cx);
++    click("MENU_ITEM-Rename Title", cx);
++    sidebar.read_with(cx, |sidebar, _| {
++        assert_eq!(sidebar.rename_target, Some(RenameTarget::Thread(docs)));
++    });
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.rename_editor.update(cx, |editor, cx| {
++            editor.set_text("Write the docs", window, cx);
++        });
++    });
++    cx.run_until_parked();
++    press_enter(cx);
++
++    assert_eq!(
++        title_override(docs, cx).as_deref(),
++        Some("Write the docs"),
++        "Rename Title renames the Lists row's own thread"
++    );
++    assert_eq!(title_override(fix, cx), None, "and no other");
++    assert!(is_lists(&sidebar, cx), "the view stays on Lists");
++
++    press_enter(cx);
++    cx.dispatch_action(ArchiveSelectedThread);
++    cx.run_until_parked();
++
++    for thread_id in unfiled.into_iter().chain([fix, docs]) {
++        assert!(
++            !is_archived(thread_id, cx),
++            "shift-backspace archived {thread_id:?}, a row the Lists view does not select"
++        );
++    }
++    assert_eq!(
++        active_thread(&sidebar, cx),
++        active_before,
++        "Enter opened a thread the Lists view does not select"
++    );
++    assert!(is_lists(&sidebar, cx), "the view is still Lists");
++}
++
++// Arrow keys select nothing in the Lists view (keyboard navigation of its rows is Out of
++// Scope), so a following Enter cannot open a hidden thread-list row either.
++#[gpui::test]
++async fn arrow_keys_then_enter_in_lists_open_nothing(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window_with_panel(cx).await;
++    let unfiled = save_in("u1", "Unfiled one", ALPHA, 5, cx);
++    let fix = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++    let active_before = active_thread(&sidebar, cx);
++
++    focus_sidebar(&sidebar, cx);
++    cx.dispatch_action(SelectNext);
++    cx.dispatch_action(SelectNext);
++    cx.run_until_parked();
++    sidebar.read_with(cx, |sidebar, _| {
++        assert_eq!(sidebar.selection, None, "no selection in the Lists view");
++    });
++    press_enter(cx);
++    cx.dispatch_action(ArchiveSelectedThread);
++    cx.run_until_parked();
++
++    assert_eq!(active_thread(&sidebar, cx), active_before);
++    assert!(!is_archived(unfiled, cx) && !is_archived(fix, cx));
++}
++
++// Leaving the Lists view through History (and back) leaves no Lists index behind: the thread
++// list returns with no selection.
++#[gpui::test]
++async fn leaving_lists_through_history_drops_the_lists_selection(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window_with_panel(cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++
++    right_click(row("Fix login", "alpha"), cx);
++    click("MENU_ITEM-Rename Title", cx);
++    press_escape(cx);
++
++    click(HISTORY_BUTTON, cx);
++    assert!(is_history(&sidebar, cx), "fixture: History is shown");
++    click(HISTORY_BUTTON, cx);
++    assert!(
++        is_thread_list(&sidebar, cx),
++        "fixture: back on the thread list"
++    );
++
++    sidebar.read_with(cx, |sidebar, _| {
++        assert_eq!(sidebar.selection, None);
++        assert_eq!(sidebar.hovered_thread_index, None);
++    });
++}
++
++// The keys are stopped, not merely left without a selection: a selection that is somehow set
++// while the view is shown (here directly, before any frame clears it) is still never acted on.
++#[gpui::test]
++async fn a_selection_set_in_lists_is_never_acted_on(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window_with_panel(cx).await;
++    let unfiled = save_in("u1", "Unfiled one", ALPHA, 5, cx);
++    let fix = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++    let active_before = active_thread(&sidebar, cx);
++    let unfiled_ix = sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .position(|entry| {
++                matches!(entry, ListEntry::Thread(thread) if thread.metadata.thread_id == unfiled)
++            })
++            .expect("fixture: the unfiled thread has a thread-list row")
++    });
++
++    focus_sidebar(&sidebar, cx);
++    sidebar.update(cx, |sidebar, _| sidebar.selection = Some(unfiled_ix));
++    cx.dispatch_action(ArchiveSelectedThread);
++    sidebar.update(cx, |sidebar, _| sidebar.selection = Some(unfiled_ix));
++    cx.dispatch_action(Confirm);
++    cx.run_until_parked();
++
++    assert!(
++        !is_archived(unfiled, cx),
++        "shift-backspace archived a hidden row"
++    );
++    assert_eq!(
++        active_thread(&sidebar, cx),
++        active_before,
++        "Enter opened a hidden row"
++    );
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/manage.rs b/crates/sidebar/src/sidebar_lists_tests/manage.rs
+new file mode 100644
+index 0000000..08ceef0
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/manage.rs
+@@ -0,0 +1,482 @@
++// ═══ Task 6.1 — managing lists ═════════════════════════════════════════════
++use super::*;
++use pretty_assertions::assert_eq;
++
++fn open_header_menu(name: &str, cx: &mut VisualTestContext) {
++    let count = header_count(name, cx).unwrap_or_else(|| panic!("`{name}` has a header"));
++    right_click(header(name, count), cx);
++}
++
++fn open_new_list_field(cx: &mut VisualTestContext) {
++    click(NEW_LIST, cx);
++    assert!(shown(NAME_FIELD, cx), "fixture: the name field is open");
++}
++
++fn rename_field_for(name: &str, cx: &mut VisualTestContext) {
++    open_header_menu(name, cx);
++    click(RENAME_LIST_ENTRY, cx);
++    assert!(shown(NAME_FIELD, cx), "fixture: the rename field is open");
++}
++
++// R5.1, R2.7 — the empty state's New List creates the first list; with lists present, New
++// List creates after the existing ones and closes the field.
++#[gpui::test]
++async fn new_list_creates_after_the_existing_ones(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    open_lists_view(&sidebar, cx);
++    assert!(shown(EMPTY_STATE, cx), "fixture: no list yet");
++    open_new_list_field(cx);
++    type_name("Ops", cx);
++    press_enter(cx);
++    assert_eq!(
++        list_names(cx),
++        vec!["Ops"],
++        "the empty state created the first list"
++    );
++
++    create_list("Docs", cx);
++    open_new_list_field(cx);
++    type_name("Backlog", cx);
++    press_enter(cx);
++
++    assert_eq!(list_names(cx), vec!["Ops", "Docs", "Backlog"]);
++    assert!(!shown(NAME_FIELD, cx), "the field closes on success");
++    assert_top_to_bottom(
++        &[header("Ops", 0), header("Docs", 0), header("Backlog", 0)],
++        cx,
++    );
++}
++
++// R5.2 — empty, whitespace-only and 65-character names keep the field open with the length
++// message and create nothing, unlogged. The converse first-class: 64 characters are accepted,
++// counted in characters (64 × "é" is 128 bytes).
++#[gpui::test]
++async fn names_outside_one_to_sixty_four_characters_are_refused(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    open_lists_view(&sidebar, cx);
++    capture_logs();
++
++    let too_long = "x".repeat(65);
++    for refused in ["", "   ", too_long.as_str()] {
++        open_new_list_field(cx);
++        type_name(refused, cx);
++        press_enter(cx);
++        assert!(shown(NAME_FIELD, cx), "{refused:?}: the field stays open");
++        assert!(
++            shown(message(LENGTH_MESSAGE), cx),
++            "{refused:?}: the length message is shown"
++        );
++        assert_eq!(
++            list_names(cx),
++            Vec::<String>::new(),
++            "{refused:?}: nothing created"
++        );
++        press_escape(cx);
++    }
++    assert_eq!(
++        warn_lines(),
++        Vec::<String>::new(),
++        "a name refusal is not logged"
++    );
++
++    let ascii = "x".repeat(64);
++    let accented = "é".repeat(64);
++    for accepted in [&ascii, &accented] {
++        open_new_list_field(cx);
++        type_name(accepted, cx);
++        press_enter(cx);
++        assert!(!shown(NAME_FIELD, cx), "64 characters are accepted");
++    }
++    assert_eq!(list_names(cx), vec![ascii, accented]);
++}
++
++// R5.3 — a name equal to another list's ignoring case (and surrounding spaces, and non-ASCII
++// case) is refused with the duplicate message; a near-identical but DIFFERENT name is not.
++#[gpui::test]
++async fn duplicate_names_are_refused_and_near_names_are_not(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    create_list("Ops", cx);
++    create_list("Équipe", cx);
++    open_lists_view(&sidebar, cx);
++    capture_logs();
++
++    for same in ["OPS", "  ops  ", "ÉQUIPE"] {
++        open_new_list_field(cx);
++        type_name(same, cx);
++        press_enter(cx);
++        assert!(shown(NAME_FIELD, cx), "{same:?}: the field stays open");
++        assert!(
++            shown(message(DUPLICATE_MESSAGE), cx),
++            "{same:?}: the duplicate message is shown"
++        );
++        press_escape(cx);
++    }
++    assert_eq!(list_names(cx), vec!["Ops", "Équipe"], "nothing was created");
++    assert_eq!(
++        warn_lines(),
++        Vec::<String>::new(),
++        "a name refusal is not logged"
++    );
++
++    open_new_list_field(cx);
++    type_name("Ops2", cx);
++    press_enter(cx);
++    assert_eq!(
++        list_names(cx),
++        vec!["Ops", "Équipe", "Ops2"],
++        "a different name is accepted"
++    );
++}
++
++// R5.3, R5.4 — renaming a list to ANOTHER list's name in a different case is refused and
++// renames nothing; renaming a list to its OWN name in a different case is not a duplicate of
++// itself and is accepted.
++#[gpui::test]
++async fn rename_refuses_another_lists_name_but_not_its_own(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    create_list("Ops", cx);
++    create_list("Docs", cx);
++    open_lists_view(&sidebar, cx);
++
++    rename_field_for("Docs", cx);
++    type_name("OPS", cx);
++    press_enter(cx);
++    assert!(
++        shown(message(DUPLICATE_MESSAGE), cx),
++        "another list's name is refused"
++    );
++    assert_eq!(list_names(cx), vec!["Ops", "Docs"], "nothing renamed");
++    press_escape(cx);
++
++    rename_field_for("Docs", cx);
++    type_name("DOCS", cx);
++    press_enter(cx);
++    assert!(
++        !shown(NAME_FIELD, cx),
++        "its own name in another case is accepted"
++    );
++    assert!(!shown(message(DUPLICATE_MESSAGE), cx));
++    assert_eq!(list_names(cx).len(), 2);
++}
++
++// R5.4 — a renamed list shows under its new name at the same position.
++#[gpui::test]
++async fn rename_keeps_the_position(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    create_list("Ops", cx);
++    let middle = create_list("Docs", cx);
++    create_list("Backlog", cx);
++    open_lists_view(&sidebar, cx);
++
++    rename_field_for("Docs", cx);
++    type_name("Manuals", cx);
++    press_enter(cx);
++
++    assert_eq!(list_names(cx), vec!["Ops", "Manuals", "Backlog"]);
++    assert_eq!(list_ids(cx)[1], middle, "the same list, renamed in place");
++    assert_top_to_bottom(
++        &[header("Ops", 0), header("Manuals", 0), header("Backlog", 0)],
++        cx,
++    );
++}
++
++// R5.5 — "Delete List" removes the list and leaves each of ITS threads in no list with its pin
++// and tags intact and its rows in the thread list unchanged; another list's members stay.
++#[gpui::test]
++async fn delete_clears_only_its_members_and_keeps_their_other_properties(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 3, cx);
++    let pinned = save_in("a2", "Tune cache", ALPHA, 2, cx);
++    let other = save_in("a3", "Write docs", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    let docs = create_list("Docs", cx);
++    file_in(fix, Some(ops), cx);
++    file_in(pinned, Some(ops), cx);
++    file_in(other, Some(docs), cx);
++    pin(pinned, cx);
++    tag(fix, "infra", cx);
++    let thread_list = visible_entries_as_strings(&sidebar, cx);
++    open_lists_view(&sidebar, cx);
++
++    open_header_menu("Ops", cx);
++    click(DELETE_LIST_ENTRY, cx);
++
++    assert_eq!(list_names(cx), vec!["Docs"], "the list is gone");
++    assert_eq!(list_of(fix, cx), None, "its members are in no list");
++    assert_eq!(list_of(pinned, cx), None);
++    assert_eq!(
++        list_of(other, cx),
++        Some(docs),
++        "another list's member stays"
++    );
++    assert!(is_pinned(pinned, cx), "the pin is kept");
++    assert_eq!(tag_keys(fix, cx), vec!["infra"], "the tags are kept");
++    click_lists_button(cx);
++    assert_eq!(
++        visible_entries_as_strings(&sidebar, cx),
++        thread_list,
++        "every row is where it was in the thread list"
++    );
++}
++
++// R5.6 — Move Down and Move Up move a list ONE place (not to the end), and a second window's
++// open Lists view shows the new order.
++#[gpui::test]
++async fn move_up_and_down_move_one_place_in_every_window(cx: &mut TestAppContext) {
++    let mut w = two_windows(cx).await;
++    create_list("Ops", &mut w.cx_a);
++    create_list("Docs", &mut w.cx_a);
++    create_list("Backlog", &mut w.cx_a);
++    create_list("Ideas", &mut w.cx_a);
++    open_lists_view(&w.sidebar_a, &mut w.cx_a);
++    open_lists_view(&w.sidebar_b, &mut w.cx_b);
++
++    open_header_menu("Ops", &mut w.cx_a);
++    click(MOVE_DOWN_ENTRY, &mut w.cx_a);
++    assert_eq!(
++        list_names(&mut w.cx_a),
++        vec!["Docs", "Ops", "Backlog", "Ideas"]
++    );
++
++    open_header_menu("Ideas", &mut w.cx_a);
++    click(MOVE_UP_ENTRY, &mut w.cx_a);
++    assert_eq!(
++        list_names(&mut w.cx_a),
++        vec!["Docs", "Ops", "Ideas", "Backlog"]
++    );
++
++    w.cx_b.run_until_parked();
++    assert_top_to_bottom(
++        &[
++            header("Docs", 0),
++            header("Ops", 0),
++            header("Ideas", 0),
++            header("Backlog", 0),
++        ],
++        &mut w.cx_b,
++    );
++}
++
++// R5.7 — no Move Up on the first list, no Move Down on the last; a middle list has both and a
++// single list (first AND last) has neither.
++#[gpui::test]
++async fn move_entries_are_absent_at_the_ends(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let only = create_list("Only", cx);
++    open_lists_view(&sidebar, cx);
++
++    open_header_menu("Only", cx);
++    assert!(
++        shown(DELETE_LIST_ENTRY, cx),
++        "fixture: the header menu is open"
++    );
++    assert!(
++        !shown(MOVE_UP_ENTRY, cx) && !shown(MOVE_DOWN_ENTRY, cx),
++        "single: neither"
++    );
++    cx.dispatch_action(Cancel);
++    cx.run_until_parked();
++    delete_list_in_store(only, cx);
++
++    create_list("First", cx);
++    create_list("Middle", cx);
++    create_list("Last", cx);
++    for (name, up, down) in [
++        ("First", false, true),
++        ("Middle", true, true),
++        ("Last", true, false),
++    ] {
++        open_header_menu(name, cx);
++        assert!(
++            shown(DELETE_LIST_ENTRY, cx),
++            "fixture: {name}'s menu is open"
++        );
++        assert_eq!(
++            shown(MOVE_UP_ENTRY, cx),
++            up,
++            "{name}: Move Up offered = {up}"
++        );
++        assert_eq!(
++            shown(MOVE_DOWN_ENTRY, cx),
++            down,
++            "{name}: Move Down offered = {down}"
++        );
++        cx.dispatch_action(Cancel);
++        cx.run_until_parked();
++    }
++}
++
++// R5.8, R4.6 — Escape closes a name field and changes nothing: a New List field creates
++// nothing, a Rename field renames nothing, and a "New List…" field opened from a thread
++// leaves that thread in its list.
++#[gpui::test]
++async fn escape_closes_the_field_and_changes_nothing(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++
++    open_new_list_field(cx);
++    type_name("Never", cx);
++    press_escape(cx);
++    assert!(!shown(NAME_FIELD, cx), "New List: closed");
++
++    rename_field_for("Ops", cx);
++    type_name("Renamed", cx);
++    press_escape(cx);
++    assert!(!shown(NAME_FIELD, cx), "Rename: closed");
++
++    click_lists_button(cx);
++    right_click_group_row(&sidebar, fix, cx);
++    assert!(open_move_to_list(cx));
++    click(NEW_LIST_ENTRY, cx);
++    type_name("Also never", cx);
++    press_escape(cx);
++    assert!(!shown(NAME_FIELD, cx), "New List…: closed");
++
++    assert_eq!(list_names(cx), vec!["Ops"], "no list created or renamed");
++    assert_eq!(list_of(fix, cx), Some(ops), "the thread keeps its list");
++}
++
++// R4.9 — a valid name confirmed in the field opened by "New List…" creates the list after the
++// existing ones and records the thread in it (leaving its former list). A duplicate name there
++// is refused like anywhere else and files nothing.
++#[gpui::test]
++async fn new_list_from_a_thread_creates_the_list_and_files_the_thread(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++
++    right_click_group_row(&sidebar, fix, cx);
++    assert!(open_move_to_list(cx));
++    click(NEW_LIST_ENTRY, cx);
++    type_name("ops", cx);
++    press_enter(cx);
++    assert!(
++        shown(message(DUPLICATE_MESSAGE), cx),
++        "a duplicate is refused here too"
++    );
++    assert_eq!(list_of(fix, cx), Some(ops), "and the thread is not moved");
++
++    type_name("Urgent", cx);
++    press_enter(cx);
++
++    assert_eq!(
++        list_names(cx),
++        vec!["Ops", "Urgent"],
++        "created after the existing ones"
++    );
++    let urgent = list_ids(cx)[1];
++    assert_eq!(list_of(fix, cx), Some(urgent), "the thread is filed in it");
++    assert_top_to_bottom(
++        &[
++            header("Ops", 0),
++            header("Urgent", 1),
++            row("Fix login", "alpha"),
++        ],
++        cx,
++    );
++}
++
++// R5.9, Q4 — a list deleted elsewhere before the rename is confirmed: the store refuses, every
++// list is unchanged, and ONE warning names the list id, never a list name. The deletion and the
++// Enter happen in one update, so the confirm reaches the field the user typed in.
++#[gpui::test]
++async fn a_rename_of_a_list_deleted_elsewhere_warns_with_the_list_id(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    create_list("Docs", cx);
++    create_list("Ideas", cx);
++    let ops = create_list("Ops", cx);
++    open_lists_view(&sidebar, cx);
++    rename_field_for("Ops", cx);
++    type_name("Operations", cx);
++    capture_logs();
++
++    cx.update(|window, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.delete_list(ops, cx))
++            .expect("fixture: the list is deleted in another window");
++        window.dispatch_action(Box::new(Confirm), cx);
++    });
++    cx.run_until_parked();
++
++    assert_eq!(
++        list_names(cx),
++        vec!["Docs", "Ideas"],
++        "nothing renamed or recreated"
++    );
++    let warnings = warn_lines();
++    let naming_it: Vec<&String> = warnings
++        .iter()
++        .filter(|line| line.contains(&format!("list {ops}")))
++        .collect();
++    assert_eq!(
++        naming_it.len(),
++        1,
++        "one warning names the list id: {warnings:?}"
++    );
++    assert!(
++        warnings
++            .iter()
++            .all(|line| !line.contains("Operations") && !line.contains("Ops")),
++        "no list name in a log line: {warnings:?}"
++    );
++}
++
++// R5.10, Q13 — lists, their names, their order and their members survive a restart: a fresh
++// store on the same database, read by a new window.
++#[gpui::test]
++async fn lists_survive_a_restart(cx: &mut TestAppContext) {
++    let project = init_lists_test(true, cx).await;
++    let (multi_workspace, cx_a) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx_a);
++    let fix = save_in("a1", "Fix login", ALPHA, 2, cx_a);
++    let docs_thread = save_in("a2", "Write docs", ALPHA, 1, cx_a);
++    // Creation order Ops, Docs, Backlog; store order after the move Ops, Backlog, Docs, then
++    // Docs renamed Manuals: neither the creation order nor the alphabet gives it back.
++    let ops = create_list("Ops", cx_a);
++    let manuals = create_list("Docs", cx_a);
++    let backlog = create_list("Backlog", cx_a);
++    move_list_in_store(backlog, 1, cx_a);
++    file_in(fix, Some(ops), cx_a);
++    file_in(docs_thread, Some(manuals), cx_a);
++    open_lists_view(&sidebar, cx_a);
++    rename_field_for("Docs", cx_a);
++    type_name("Manuals", cx_a);
++    press_enter(cx_a);
++    let before = list_names(cx_a);
++    assert_eq!(
++        before,
++        vec!["Ops", "Backlog", "Manuals"],
++        "fixture: renamed and reordered"
++    );
++
++    cx.run_until_parked();
++    cx.update(|cx| agent_ui::thread_organization::init(cx));
++    cx.run_until_parked();
++    // A restarted Zeo opens its own project: reusing window A's would register its client
++    // handlers twice.
++    let fs = cx.update(|cx| <dyn fs::Fs>::global(cx));
++    let reopened = project::Project::test(fs, [ALPHA.as_ref()], cx).await;
++    let (multi_workspace, cx_b) =
++        cx.add_window_view(|window, cx| MultiWorkspace::test_new(reopened, window, cx));
++    let sidebar = setup_sidebar(&multi_workspace, cx_b);
++
++    assert_eq!(list_names(cx_b), before, "names and order");
++    assert_eq!(list_of(fix, cx_b), Some(ops), "members");
++    assert_eq!(list_of(docs_thread, cx_b), Some(manuals));
++    open_lists_view(&sidebar, cx_b);
++    assert_top_to_bottom(
++        &[
++            header("Ops", 1),
++            row("Fix login", "alpha"),
++            header("Backlog", 0),
++            header("Manuals", 1),
++            row("Write docs", "alpha"),
++        ],
++        cx_b,
++    );
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/move_to_list.rs b/crates/sidebar/src/sidebar_lists_tests/move_to_list.rs
+new file mode 100644
+index 0000000..fb27678
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/move_to_list.rs
+@@ -0,0 +1,196 @@
++// ═══ Task 5.1 — Move to List ═══════════════════════════════════════════════
++use super::*;
++use pretty_assertions::assert_eq;
++
++// R4.1 — the submenu lists every list in the STORE's order (moved after creation) and ends
++// in "New List…"; an unfiled thread is offered no "Remove from List".
++#[gpui::test]
++async fn the_submenu_lists_every_list_in_store_order(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    create_list("Ops", cx);
++    create_list("Docs", cx);
++    let later = create_list("Backlog", cx);
++    move_list_in_store(later, 0, cx);
++
++    right_click_group_row(&sidebar, fix, cx);
++    assert!(
++        open_move_to_list(cx),
++        "the thread menu has a Move to List submenu"
++    );
++
++    assert_top_to_bottom(
++        &[
++            menu_item("Backlog"),
++            menu_item("Ops"),
++            menu_item("Docs"),
++            NEW_LIST_ENTRY,
++        ],
++        cx,
++    );
++    assert!(
++        !shown(REMOVE_ENTRY, cx),
++        "a thread in no list is offered no Remove from List"
++    );
++}
++
++// R4.1 — every thread row with a context menu has the submenu: a Pinned section row too.
++#[gpui::test]
++async fn a_pinned_row_has_the_submenu_too(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let pinned = save_in("a1", "Tune cache", ALPHA, 1, cx);
++    pin(pinned, cx);
++    create_list("Ops", cx);
++
++    right_click_pinned_row(&sidebar, pinned, cx);
++
++    assert!(
++        open_move_to_list(cx),
++        "the pinned row's menu has the submenu"
++    );
++    assert!(shown(menu_item("Ops"), cx));
++}
++
++// R4.2 — choosing another list records the thread there: it shows under the new list AND no
++// longer under the former one (exactly one list, never zero, never two).
++#[gpui::test]
++async fn choosing_another_list_moves_the_thread(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    let docs = create_list("Docs", cx);
++    file_in(fix, Some(ops), cx);
++
++    right_click_group_row(&sidebar, fix, cx);
++    assert!(open_move_to_list(cx));
++    click(menu_item("Docs"), cx);
++
++    assert_eq!(
++        list_of(fix, cx),
++        Some(docs),
++        "the store records the new list"
++    );
++    open_lists_view(&sidebar, cx);
++    assert_top_to_bottom(
++        &[
++            header("Ops", 0),
++            header("Docs", 1),
++            row("Fix login", "alpha"),
++        ],
++        cx,
++    );
++    assert!(
++        shown(no_threads("Ops"), cx),
++        "the former list no longer shows the thread"
++    );
++}
++
++// R4.3 — choosing the thread's CURRENT list (the marked entry) changes nothing and logs
++// nothing: it must not act as a toggle that un-files the thread.
++#[gpui::test]
++async fn choosing_the_current_list_changes_nothing(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    create_list("Docs", cx);
++    file_in(fix, Some(ops), cx);
++    capture_logs();
++
++    right_click_group_row(&sidebar, fix, cx);
++    assert!(open_move_to_list(cx));
++    click(menu_item("Ops"), cx);
++
++    assert_eq!(list_of(fix, cx), Some(ops), "the thread stays in its list");
++    assert_eq!(list_names(cx), vec!["Ops", "Docs"]);
++    assert_eq!(warn_lines(), Vec::<String>::new(), "nothing is logged");
++}
++
++// R4.4, R4.8 — "Remove from List" is offered only while the thread is in a list, and it
++// records the thread in no list; the list itself stays.
++#[gpui::test]
++async fn remove_from_list_is_offered_when_filed_and_clears_it(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let filed = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let unfiled = save_in("a2", "Write docs", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(filed, Some(ops), cx);
++
++    right_click_group_row(&sidebar, unfiled, cx);
++    assert!(open_move_to_list(cx));
++    assert!(
++        !shown(REMOVE_ENTRY, cx),
++        "not offered for a thread in no list"
++    );
++    cx.dispatch_action(Cancel);
++    cx.run_until_parked();
++
++    right_click_group_row(&sidebar, filed, cx);
++    assert!(open_move_to_list(cx));
++    click(REMOVE_ENTRY, cx);
++
++    assert_eq!(list_of(filed, cx), None, "the thread is in no list");
++    assert_eq!(list_names(cx), vec!["Ops"], "the list stays");
++}
++
++// R4.5 — "New List…" shows the Lists view with the name field open.
++#[gpui::test]
++async fn new_list_entry_opens_the_lists_view_with_the_field(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    create_list("Ops", cx);
++
++    right_click_group_row(&sidebar, fix, cx);
++    assert!(open_move_to_list(cx));
++    click(NEW_LIST_ENTRY, cx);
++
++    assert!(is_lists(&sidebar, cx), "the Lists view is shown");
++    assert!(shown(NAME_FIELD, cx), "with its name field open");
++}
++
++// R4.7, Q4 — a refused change (the list was deleted between the menu and the click) changes
++// nothing and logs ONE warning naming the thread id, with no title and no list name.
++#[gpui::test]
++async fn a_refused_change_warns_with_the_thread_id_only(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    let gone = create_list("Gone soon", cx);
++    file_in(fix, Some(ops), cx);
++    delete_list_in_store(gone, cx);
++    capture_logs();
++
++    sidebar.update(cx, |sidebar, cx| {
++        sidebar.move_thread_to_list(fix, Some(gone), cx);
++    });
++    cx.run_until_parked();
++
++    assert_eq!(list_of(fix, cx), Some(ops), "the thread keeps its list");
++    assert_eq!(list_names(cx), vec!["Ops"], "every list is unchanged");
++    let warnings = warn_lines();
++    let naming_it: Vec<&String> = warnings
++        .iter()
++        .filter(|line| line.contains(&fix.to_key_string()))
++        .collect();
++    assert_eq!(
++        naming_it.len(),
++        1,
++        "one warning names the thread: {warnings:?}"
++    );
++    assert!(
++        warnings
++            .iter()
++            .all(|line| !line.contains("Fix login") && !line.contains("Gone soon")),
++        "no title and no list name in a log line: {warnings:?}"
++    );
++}
++
++// R4.1 — without the store the thread menu has no Move to List submenu.
++#[gpui::test]
++async fn no_submenu_without_the_store(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(false, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, cx);
++
++    right_click_group_row(&sidebar, fix, cx);
++
++    assert!(!open_move_to_list(cx), "no Move to List without the store");
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/open.rs b/crates/sidebar/src/sidebar_lists_tests/open.rs
+new file mode 100644
+index 0000000..7ae73dc
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/open.rs
+@@ -0,0 +1,170 @@
++// ═══ Task 4.2 — opening a thread from a row ════════════════════════════════
++use super::*;
++use pretty_assertions::assert_eq;
++
++// R3.1, R3.4 — a row whose project is open in this window activates the thread in that
++// project's workspace (here not the active one), and the Lists view stays shown.
++#[gpui::test]
++async fn a_row_of_a_project_open_here_activates_its_workspace(cx: &mut TestAppContext) {
++    let (multi_workspace, sidebar, cx) = alpha_window(true, cx).await;
++    let alpha = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
++    let beta = open_in_window(BETA, &multi_workspace, cx).await;
++    multi_workspace.update_in(cx, |mw, window, cx| {
++        mw.activate(alpha.clone(), None, window, cx)
++    });
++    cx.run_until_parked();
++    let in_beta = save_in("b1", "Ship release", BETA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(in_beta, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++
++    click(row("Ship release", "beta"), cx);
++
++    assert_eq!(
++        multi_workspace.read_with(cx, |mw, _| mw.workspace().clone()),
++        beta,
++        "the thread's own workspace is activated"
++    );
++    assert_eq!(
++        active_thread(&sidebar, cx),
++        Some(in_beta),
++        "and the thread in it"
++    );
++    assert_eq!(
++        multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()),
++        2,
++        "nothing is opened"
++    );
++    assert!(is_lists(&sidebar, cx), "R3.4: the Lists view stays shown");
++}
++
++// R3.2, R3.4 — a row whose project is open only in window B activates the thread there;
++// window A gains no workspace, keeps its active thread, and keeps the Lists view.
++#[gpui::test]
++async fn a_row_of_a_project_open_in_another_window_activates_that_window(cx: &mut TestAppContext) {
++    let mut w = two_windows(cx).await;
++    let in_alpha = save_in("a1", "Fix login", ALPHA, 2, &mut w.cx_a);
++    let in_beta = save_in("b1", "Ship release", BETA, 1, &mut w.cx_a);
++    let ops = create_list("Ops", &mut w.cx_a);
++    file_in(in_alpha, Some(ops), &mut w.cx_a);
++    file_in(in_beta, Some(ops), &mut w.cx_a);
++    open_lists_view(&w.sidebar_a, &mut w.cx_a);
++    click(row("Fix login", "alpha"), &mut w.cx_a);
++    assert_eq!(
++        active_thread(&w.sidebar_a, &mut w.cx_a),
++        Some(in_alpha),
++        "fixture: A's active thread"
++    );
++
++    click(row("Ship release", "beta"), &mut w.cx_a);
++    w.cx_b.run_until_parked();
++
++    assert!(
++        w.cx_a.read(|cx| cx.active_window()) == Some(*w.window_b),
++        "the window holding the project is activated"
++    );
++    assert_eq!(
++        active_thread(&w.sidebar_b, &mut w.cx_b),
++        Some(in_beta),
++        "the thread is activated in window B"
++    );
++    assert_eq!(
++        w.mw_a
++            .read_with(&mut w.cx_a, |mw, _| mw.workspaces().count()),
++        1,
++        "nothing is added to window A"
++    );
++    assert_eq!(
++        active_thread(&w.sidebar_a, &mut w.cx_a),
++        Some(in_alpha),
++        "window A keeps its active thread"
++    );
++    assert!(
++        is_lists(&w.sidebar_a, &mut w.cx_a),
++        "R3.4: A keeps the Lists view"
++    );
++}
++
++// R3.3, R3.4 — a row whose project is open in no window opens the project in this window and
++// activates the thread there.
++#[gpui::test]
++async fn a_row_of_a_project_open_nowhere_opens_it_here(cx: &mut TestAppContext) {
++    let (multi_workspace, sidebar, cx) = alpha_window(true, cx).await;
++    let elsewhere = save_in("d1", "Tune cache", DELTA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(elsewhere, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++    assert_eq!(
++        multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()),
++        1,
++        "fixture: only alpha is open"
++    );
++
++    click(row("Tune cache", "delta"), cx);
++
++    assert_eq!(
++        multi_workspace.read_with(cx, |mw, _| mw.workspaces().count()),
++        2,
++        "the project is opened in this window"
++    );
++    let active_paths = multi_workspace.read_with(cx, |mw, cx| {
++        workspace_path_list(mw.workspace(), cx).paths().to_vec()
++    });
++    assert_eq!(active_paths, vec![PathBuf::from(DELTA)], "and made active");
++    assert_eq!(
++        active_thread(&sidebar, cx),
++        Some(elsewhere),
++        "with the thread active"
++    );
++    assert!(is_lists(&sidebar, cx), "R3.4: the Lists view stays shown");
++}
++
++// Task 4.2 — a thread deleted in another window disappears from this window's open Lists view,
++// and nothing is opened, activated or logged: there is no row left to click.
++#[gpui::test]
++async fn a_thread_deleted_in_another_window_leaves_the_view(cx: &mut TestAppContext) {
++    let mut w = two_windows(cx).await;
++    let gone = save_in("d1", "Tune cache", DELTA, 1, &mut w.cx_a);
++    let kept = save_in("a1", "Fix login", ALPHA, 2, &mut w.cx_a);
++    let ops = create_list("Ops", &mut w.cx_a);
++    file_in(gone, Some(ops), &mut w.cx_a);
++    file_in(kept, Some(ops), &mut w.cx_a);
++    open_lists_view(&w.sidebar_a, &mut w.cx_a);
++    assert!(
++        shown(row("Tune cache", "delta"), &mut w.cx_a),
++        "fixture: the row is shown in window A"
++    );
++    let active_before = w
++        .mw_a
++        .read_with(&mut w.cx_a, |mw, _| mw.workspace().clone());
++    capture_logs();
++
++    w.cx_b.update(|_, cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.delete(gone, cx))
++    });
++    w.cx_b.run_until_parked();
++    w.cx_a.run_until_parked();
++
++    assert!(
++        !shown(row("Tune cache", "delta"), &mut w.cx_a),
++        "the deleted thread's row is gone without reopening the view"
++    );
++    assert_top_to_bottom(&[header("Ops", 1), row("Fix login", "alpha")], &mut w.cx_a);
++    assert_eq!(
++        w.mw_a
++            .read_with(&mut w.cx_a, |mw, _| mw.workspaces().count()),
++        1,
++        "the deleted thread's project is not opened"
++    );
++    assert_eq!(
++        w.mw_a
++            .read_with(&mut w.cx_a, |mw, _| mw.workspace().clone()),
++        active_before,
++        "nothing is activated"
++    );
++    assert!(
++        is_lists(&w.sidebar_a, &mut w.cx_a),
++        "the view does not change"
++    );
++    assert_eq!(warn_lines(), Vec::<String>::new(), "and nothing is logged");
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/render.rs b/crates/sidebar/src/sidebar_lists_tests/render.rs
+new file mode 100644
+index 0000000..b23f597
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/render.rs
+@@ -0,0 +1,233 @@
++// ═══ Task 4.1 — rows on screen ═════════════════════════════════════════════
++use super::*;
++use pretty_assertions::assert_eq;
++
++// R2.1, R2.2, R2.10 — one header per list in the STORE's order (moved after creation, so
++// neither creation order nor the alphabet gives it), each with its name and the count of the
++// threads shown; an archived member is not counted and not shown, but stays a member.
++#[gpui::test]
++async fn headers_follow_the_store_order_with_their_shown_counts(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 3, cx);
++    let docs = save_in("a2", "Write docs", ALPHA, 2, cx);
++    let old = save_in("a3", "Old spike", ALPHA, 1, cx);
++    // Creation order Ops, Zeta, Backlog; alphabetical Backlog, Ops, Zeta; store Zeta, Ops,
++    // Backlog — three different orders, so only the store's passes.
++    let ops = create_list("Ops", cx);
++    let zeta = create_list("Zeta", cx);
++    create_list("Backlog", cx);
++    move_list_in_store(zeta, 0, cx);
++    file_in(fix, Some(ops), cx);
++    file_in(old, Some(ops), cx);
++    file_in(docs, Some(zeta), cx);
++    archive(old, cx);
++    open_lists_view(&sidebar, cx);
++
++    assert!(
++        !shown(header("Ops", 2), cx),
++        "the archived member is not counted (Ops shows 1)"
++    );
++    assert_top_to_bottom(
++        &[
++            header("Zeta", 1),
++            row("Write docs", "alpha"),
++            header("Ops", 1),
++            row("Fix login", "alpha"),
++            header("Backlog", 0),
++        ],
++        cx,
++    );
++    assert!(!shown(row("Old spike", "alpha"), cx));
++    assert_eq!(
++        list_of(old, cx),
++        Some(ops),
++        "R2.10: hidden, the archived thread keeps its list"
++    );
++
++    unarchive(old, cx);
++    assert!(
++        shown(header("Ops", 2), cx) && shown(row("Old spike", "alpha"), cx),
++        "unarchived, it is back under its list"
++    );
++}
++
++// R2.2 — two threads with the SAME title in different projects are two rows, told apart by
++// their project names (a row keyed by title would collapse them into one).
++#[gpui::test]
++async fn same_titled_threads_of_two_projects_are_two_rows(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let in_alpha = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let in_beta = save_in("b1", "Fix login", BETA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(in_alpha, Some(ops), cx);
++    file_in(in_beta, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++
++    assert_top_to_bottom(
++        &[
++            header("Ops", 2),
++            row("Fix login", "alpha"),
++            row("Fix login", "beta"),
++        ],
++        cx,
++    );
++}
++
++// R2.5, R2.1 — a header click collapses its group in this window only (the header keeps its
++// count while collapsed), and a second click expands it. The other window, also in the Lists
++// view, keeps it expanded.
++#[gpui::test]
++async fn a_header_click_collapses_only_in_this_window(cx: &mut TestAppContext) {
++    let mut w = two_windows(cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 1, &mut w.cx_a);
++    let ops = create_list("Ops", &mut w.cx_a);
++    file_in(fix, Some(ops), &mut w.cx_a);
++    open_lists_view(&w.sidebar_a, &mut w.cx_a);
++    open_lists_view(&w.sidebar_b, &mut w.cx_b);
++    assert!(
++        shown(row("Fix login", "alpha"), &mut w.cx_a),
++        "fixture: A expanded"
++    );
++    assert!(
++        shown(row("Fix login", "alpha"), &mut w.cx_b),
++        "fixture: B expanded"
++    );
++
++    click(header("Ops", 1), &mut w.cx_a);
++    w.cx_b.run_until_parked();
++
++    assert!(
++        !shown(row("Fix login", "alpha"), &mut w.cx_a),
++        "A's group is collapsed"
++    );
++    assert!(
++        shown(header("Ops", 1), &mut w.cx_a),
++        "a collapsed list keeps its header and its count"
++    );
++    assert!(
++        shown(row("Fix login", "alpha"), &mut w.cx_b),
++        "B's group stays expanded"
++    );
++
++    click(header("Ops", 1), &mut w.cx_a);
++    assert!(
++        shown(row("Fix login", "alpha"), &mut w.cx_a),
++        "a second click expands it"
++    );
++}
++
++// R2.6 — "No threads" under an expanded list with nothing to show: a list with no member, AND
++// a list whose only member is archived (hidden) — the second must not be told apart from the
++// first by a stale member count.
++#[gpui::test]
++async fn no_threads_row_under_a_list_with_nothing_to_show(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let archived = save_in("a1", "Old spike", ALPHA, 1, cx);
++    let shown_one = save_in("a2", "Fix login", ALPHA, 2, cx);
++    let empty = create_list("Empty", cx);
++    let hidden_only = create_list("Hidden", cx);
++    let full = create_list("Full", cx);
++    file_in(archived, Some(hidden_only), cx);
++    file_in(shown_one, Some(full), cx);
++    archive(archived, cx);
++    let _ = empty;
++    open_lists_view(&sidebar, cx);
++
++    assert_top_to_bottom(&[header("Empty", 0), no_threads("Empty")], cx);
++    assert_top_to_bottom(&[header("Hidden", 0), no_threads("Hidden")], cx);
++    assert!(
++        !shown(no_threads("Full"), cx),
++        "a list with a thread to show has no \"No threads\" row"
++    );
++    assert_eq!(list_of(archived, cx), Some(hidden_only));
++}
++
++// R2.7, R2.11 — with no list, the empty state and its "New List" button; with one list, no empty
++// state, and the "New List" control still shown, above the lists.
++#[gpui::test]
++async fn the_empty_state_shows_only_when_no_list_exists(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    open_lists_view(&sidebar, cx);
++    assert!(shown(EMPTY_STATE, cx), "no list: the empty state");
++    assert!(shown(NEW_LIST, cx), "no list: a New List button");
++
++    create_list("Ops", cx);
++
++    assert!(!shown(EMPTY_STATE, cx), "one list: no empty state");
++    assert_top_to_bottom(&[NEW_LIST, header("Ops", 0)], cx);
++}
++
++// R2.8 — a list created and a thread filed in window B appear in window A's open Lists view
++// without it being reopened; a deletion in B disappears from A the same way.
++#[gpui::test]
++async fn changes_in_another_window_show_in_an_open_view(cx: &mut TestAppContext) {
++    let mut w = two_windows(cx).await;
++    let in_beta = save_in("b1", "Ship release", BETA, 1, &mut w.cx_b);
++    open_lists_view(&w.sidebar_a, &mut w.cx_a);
++    assert!(shown(EMPTY_STATE, &mut w.cx_a), "fixture: A shows no list");
++
++    let release = create_list("Release", &mut w.cx_b);
++    file_in(in_beta, Some(release), &mut w.cx_b);
++    w.cx_a.run_until_parked();
++
++    assert_top_to_bottom(
++        &[header("Release", 1), row("Ship release", "beta")],
++        &mut w.cx_a,
++    );
++    assert!(is_lists(&w.sidebar_a, &mut w.cx_a), "A was never reopened");
++
++    delete_list_in_store(release, &mut w.cx_b);
++    w.cx_a.run_until_parked();
++    assert!(header_count("Release", &mut w.cx_a).is_none());
++    assert!(shown(EMPTY_STATE, &mut w.cx_a));
++}
++
++// R2.9 — filing a thread keeps its row in its project group, and a pinned thread's row in the
++// Pinned section: the thread list does not change at all.
++#[gpui::test]
++async fn filing_a_thread_leaves_the_thread_list_unchanged(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let pinned = save_in("a2", "Tune cache", ALPHA, 1, cx);
++    pin(pinned, cx);
++    let before = visible_entries_as_strings(&sidebar, cx);
++
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    file_in(pinned, Some(ops), cx);
++
++    assert_eq!(visible_entries_as_strings(&sidebar, cx), before);
++}
++
++// R3.5 — a right-clicked row of the view offers the thread list's menu for THAT thread: its
++// entries, the Move to List submenu, and an entry acting on the right-clicked thread (the
++// second row, so a menu bound to the first row or to an index would pin the wrong one).
++#[gpui::test]
++async fn a_right_clicked_row_offers_the_thread_menu(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    let first = save_in("a1", "Fix login", ALPHA, 2, cx);
++    let second = save_in("a2", "Write docs", ALPHA, 1, cx);
++    let ops = create_list("Ops", cx);
++    file_in(first, Some(ops), cx);
++    file_in(second, Some(ops), cx);
++    open_lists_view(&sidebar, cx);
++    assert_top_to_bottom(&[row("Fix login", "alpha"), row("Write docs", "alpha")], cx);
++
++    right_click(row("Write docs", "alpha"), cx);
++    for entry in [
++        "MENU_ITEM-Rename Title",
++        "MENU_ITEM-Pin Thread",
++        "MENU_ITEM-Archive Thread",
++    ] {
++        assert!(shown(entry, cx), "the thread menu offers `{entry}`");
++    }
++    click("MENU_ITEM-Pin Thread", cx);
++    assert!(is_pinned(second, cx), "the right-clicked thread is pinned");
++    assert!(!is_pinned(first, cx), "and no other");
++
++    right_click(row("Write docs", "alpha"), cx);
++    assert!(
++        open_move_to_list(cx),
++        "the thread menu offers the Move to List submenu"
++    );
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/rows.rs b/crates/sidebar/src/sidebar_lists_tests/rows.rs
+new file mode 100644
+index 0000000..b840458
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/rows.rs
+@@ -0,0 +1,359 @@
++// Task 2.1 — `build_list_rows`, the cx-free row model of the Lists view (R2.1–R2.4, R2.6, R2.10).
++// The function reads lists, members and metadata through its parameters only, so these tests
++// feed it plain maps. The lists themselves come from the real store: a `ListId` has no public
++// constructor, and the store's own list order is what R2.1 asks to be kept.
++
++use std::collections::{HashMap, HashSet};
++
++use agent_ui::ThreadId;
++use agent_ui::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore, WorktreePaths};
++use agent_ui::thread_organization::{ListId, ThreadList, ThreadOrganizationStore};
++use chrono::{DateTime, TimeZone as _, Utc};
++use gpui::TestAppContext;
++use pretty_assertions::assert_eq;
++
++use super::init_lists_test;
++use crate::acp;
++use crate::lists_view::{ListsRow, build_list_rows};
++
++/// Creates `names` in this order in a fresh store and returns the store's lists.
++async fn lists_named(names: &[&str], cx: &mut TestAppContext) -> Vec<ThreadList> {
++    let _project = init_lists_test(true, cx).await;
++    let lists = cx.update(|cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| {
++            for name in names {
++                store
++                    .create_list(name, cx)
++                    .expect("fixture: a fresh, valid list name");
++            }
++            store.lists().to_vec()
++        })
++    });
++    cx.run_until_parked();
++    lists
++}
++
++fn at(hour: u32) -> DateTime<Utc> {
++    Utc.with_ymd_and_hms(2024, 1, 1, hour, 0, 0)
++        .single()
++        .expect("fixture: a valid hour")
++}
++
++/// A thread whose first message was sent; `interacted` is when the user last sent one.
++fn sent(updated: u32, interacted: Option<u32>) -> ThreadMetadata {
++    let thread_id = ThreadId::new();
++    ThreadMetadata {
++        thread_id,
++        session_id: Some(acp::SessionId::new(thread_id.to_key_string())),
++        agent_id: agent::ZED_AGENT_ID.clone(),
++        title: None,
++        title_override: None,
++        updated_at: at(updated),
++        created_at: None,
++        interacted_at: interacted.map(at),
++        worktree_paths: WorktreePaths::default(),
++        remote_connection: None,
++        archived: false,
++    }
++}
++
++fn archived() -> ThreadMetadata {
++    ThreadMetadata {
++        archived: true,
++        ..sent(20, None)
++    }
++}
++
++/// A draft has no session yet; given the latest time so a sort that kept it would show it first.
++fn draft() -> ThreadMetadata {
++    ThreadMetadata {
++        session_id: None,
++        ..sent(23, Some(23))
++    }
++}
++
++/// What the stores would answer: each list's members, and the metadata of the known threads.
++#[derive(Default)]
++struct Members {
++    by_list: HashMap<ListId, Vec<ThreadId>>,
++    metadata: HashMap<ThreadId, ThreadMetadata>,
++}
++
++impl Members {
++    fn file(&mut self, list: &ThreadList, metadata: ThreadMetadata) -> ThreadId {
++        let thread_id = metadata.thread_id;
++        self.by_list.entry(list.id).or_default().push(thread_id);
++        self.metadata.insert(thread_id, metadata);
++        thread_id
++    }
++
++    /// A member the metadata store does not know.
++    fn file_unknown(&mut self, list: &ThreadList) -> ThreadId {
++        let thread_id = ThreadId::new();
++        self.by_list.entry(list.id).or_default().push(thread_id);
++        thread_id
++    }
++
++    fn rows(&self, lists: &[ThreadList], collapsed: &HashSet<ListId>) -> Vec<ListsRow> {
++        build_list_rows(
++            lists,
++            |list| self.by_list.get(&list).cloned().unwrap_or_default(),
++            |thread_id| self.metadata.get(&thread_id),
++            collapsed,
++        )
++    }
++}
++
++fn header(list: &ThreadList, shown: usize, collapsed: bool) -> ListsRow {
++    ListsRow::Header {
++        list_id: list.id,
++        name: list.name.clone(),
++        shown,
++        collapsed,
++    }
++}
++
++fn thread(list: &ThreadList, thread_id: ThreadId) -> ListsRow {
++    ListsRow::Thread {
++        list_id: list.id,
++        thread_id,
++    }
++}
++
++fn empty(list: &ThreadList) -> ListsRow {
++    ListsRow::Empty { list_id: list.id }
++}
++
++fn collapsed(lists: &[&ThreadList]) -> HashSet<ListId> {
++    lists.iter().map(|list| list.id).collect()
++}
++
++#[gpui::test]
++async fn lists_come_in_store_order(cx: &mut TestAppContext) {
++    let created = lists_named(&["Ops", "Docs", "Zed"], cx).await;
++    // Moved first, so the store order differs from creation (and id) order.
++    let lists = cx.update(|cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| {
++            store
++                .move_list(created[2].id, 0, cx)
++                .expect("fixture: the list exists");
++            store.lists().to_vec()
++        })
++    });
++    cx.run_until_parked();
++    let [zed, ops, docs] = &lists[..] else {
++        panic!("fixture: three lists, got {lists:?}");
++    };
++    assert_eq!(zed.name.as_ref(), "Zed");
++
++    let rows = Members::default().rows(&lists, &HashSet::default());
++
++    assert_eq!(
++        rows,
++        vec![
++            header(zed, 0, false),
++            empty(zed),
++            header(ops, 0, false),
++            empty(ops),
++            header(docs, 0, false),
++            empty(docs),
++        ]
++    );
++}
++
++#[gpui::test]
++async fn shown_counts_visible_members_collapsed_or_expanded(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Ops"], cx).await;
++    let ops = &lists[0];
++    let mut members = Members::default();
++    let newer = members.file(ops, sent(10, None));
++    let older = members.file(ops, sent(9, None));
++    members.file(ops, archived());
++    members.file(ops, draft());
++    members.file_unknown(ops);
++
++    assert_eq!(
++        members.rows(&lists, &HashSet::default()),
++        vec![
++            header(ops, 2, false),
++            thread(ops, newer),
++            thread(ops, older),
++        ]
++    );
++    assert_eq!(
++        members.rows(&lists, &collapsed(&[ops])),
++        vec![header(ops, 2, true)]
++    );
++}
++
++#[gpui::test]
++async fn archived_draft_and_unknown_members_are_hidden(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Ops"], cx).await;
++    let ops = &lists[0];
++    let mut members = Members::default();
++    members.file_unknown(ops);
++    members.file(ops, draft());
++    let visible = members.file(ops, sent(8, None));
++    members.file(ops, archived());
++
++    assert_eq!(
++        members.rows(&lists, &HashSet::default()),
++        vec![header(ops, 1, false), thread(ops, visible)]
++    );
++}
++
++/// Read through the real stores, as the sidebar will: hiding an archived member is a read.
++#[gpui::test]
++async fn a_hidden_member_keeps_its_membership(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Ops"], cx).await;
++    let ops = lists[0].clone();
++    let metadata = sent(10, None);
++    let thread_id = metadata.thread_id;
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.save(metadata, cx));
++    });
++    cx.run_until_parked();
++    cx.update(|cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| {
++            store
++                .set_list(thread_id, Some(ops.id), cx)
++                .expect("fixture: a sent thread is admitted")
++        })
++    });
++    cx.run_until_parked();
++    cx.update(|cx| {
++        ThreadMetadataStore::global(cx).update(cx, |store, cx| store.archive(thread_id, None, cx))
++    });
++    cx.run_until_parked();
++
++    let (rows, still_filed) = cx.update(|cx| {
++        let organization = ThreadOrganizationStore::global(cx).read(cx);
++        let metadata = ThreadMetadataStore::global(cx).read(cx);
++        let rows = build_list_rows(
++            organization.lists(),
++            |list| organization.threads_in_list(list),
++            |thread_id| metadata.entry(thread_id),
++            &HashSet::default(),
++        );
++        (rows, organization.threads_in_list(ops.id))
++    });
++
++    assert_eq!(rows, vec![header(&ops, 0, false), empty(&ops)]);
++    assert_eq!(still_filed, vec![thread_id]);
++}
++
++#[gpui::test]
++async fn most_recent_activity_first_with_a_stable_tie(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Ops"], cx).await;
++    let ops = &lists[0];
++    let mut members = Members::default();
++    // Recent mode sorts by the last message the user sent, else by the last update: a thread
++    // updated last but written to long ago sorts by the older time.
++    let updated_last = members.file(ops, sent(13, Some(8)));
++    let tie_one = members.file(ops, sent(9, None));
++    let interacted_last = members.file(ops, sent(10, Some(12)));
++    let tie_two = members.file(ops, sent(9, None));
++    let updated_second = members.file(ops, sent(11, None));
++    let mut ties = [tie_one, tie_two];
++    ties.sort_by_key(|thread_id| thread_id.to_key_string());
++    let expected = vec![
++        header(ops, 5, false),
++        thread(ops, interacted_last),
++        thread(ops, updated_second),
++        thread(ops, ties[0]),
++        thread(ops, ties[1]),
++        thread(ops, updated_last),
++    ];
++
++    assert_eq!(members.rows(&lists, &HashSet::default()), expected);
++    // The same members handed over in the opposite order: the tie must not follow the input.
++    for member_ids in members.by_list.values_mut() {
++        member_ids.reverse();
++    }
++    assert_eq!(members.rows(&lists, &HashSet::default()), expected);
++}
++
++#[gpui::test]
++async fn a_collapsed_list_yields_its_header_only(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Ops", "Void", "Docs"], cx).await;
++    let [ops, void, docs] = &lists[..] else {
++        panic!("fixture: three lists, got {lists:?}");
++    };
++    let mut members = Members::default();
++    members.file(ops, sent(10, None));
++    members.file(ops, sent(11, None));
++    let doc = members.file(docs, sent(12, None));
++
++    assert_eq!(
++        members.rows(&lists, &collapsed(&[ops, void])),
++        vec![
++            header(ops, 2, true),
++            header(void, 0, true),
++            header(docs, 1, false),
++            thread(docs, doc),
++        ]
++    );
++}
++
++#[gpui::test]
++async fn an_expanded_list_with_nothing_to_show_yields_empty(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Void", "Shelf"], cx).await;
++    let [void, shelf] = &lists[..] else {
++        panic!("fixture: two lists, got {lists:?}");
++    };
++    let mut members = Members::default();
++    // Only hidden members: the same "No threads" as a list with none at all.
++    members.file(shelf, archived());
++    members.file(shelf, draft());
++
++    assert_eq!(
++        members.rows(&lists, &HashSet::default()),
++        vec![
++            header(void, 0, false),
++            empty(void),
++            header(shelf, 0, false),
++            empty(shelf),
++        ]
++    );
++}
++
++#[gpui::test]
++async fn lists_with_the_same_count_stay_distinct_by_id(cx: &mut TestAppContext) {
++    let lists = lists_named(&["Ops", "Docs"], cx).await;
++    let [ops, docs] = &lists[..] else {
++        panic!("fixture: two lists, got {lists:?}");
++    };
++    let mut members = Members::default();
++    let in_ops = members.file(ops, sent(10, None));
++    let in_docs = members.file(docs, sent(10, None));
++
++    assert_eq!(
++        members.rows(&lists, &HashSet::default()),
++        vec![
++            header(ops, 1, false),
++            thread(ops, in_ops),
++            header(docs, 1, false),
++            thread(docs, in_docs),
++        ]
++    );
++    // Collapsing one list by id leaves the other, of equal count, expanded.
++    assert_eq!(
++        members.rows(&lists, &collapsed(&[docs])),
++        vec![
++            header(ops, 1, false),
++            thread(ops, in_ops),
++            header(docs, 1, true),
++        ]
++    );
++}
++
++#[test]
++fn no_lists_yields_no_rows() {
++    let rows = build_list_rows(
++        &[],
++        |_| vec![ThreadId::new()],
++        |_| None::<&ThreadMetadata>,
++        &HashSet::default(),
++    );
++    assert_eq!(rows, Vec::<ListsRow>::new());
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/support.rs b/crates/sidebar/src/sidebar_lists_tests/support.rs
+new file mode 100644
+index 0000000..28ecc6e
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/support.rs
+@@ -0,0 +1,341 @@
++// Store and view helpers shared by the modules of `sidebar_lists_tests` (see `mod.rs` for the
++// selector contract they read).
++
++use super::*;
++
++// ── The store, driven directly (fixtures and read-back) ───────────────────
++
++pub(super) fn create_list(name: &str, cx: &mut VisualTestContext) -> ListId {
++    let id = cx
++        .update(|_, cx| {
++            ThreadOrganizationStore::global(cx).update(cx, |store, cx| store.create_list(name, cx))
++        })
++        .expect("fixture: the store accepts a new valid list name");
++    cx.run_until_parked();
++    id
++}
++
++pub(super) fn file_in(thread_id: ThreadId, list: Option<ListId>, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.set_list(thread_id, list, cx))
++    })
++    .expect("fixture: the store files a known thread in a known list");
++    cx.run_until_parked();
++}
++
++pub(super) fn delete_list_in_store(list: ListId, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| store.delete_list(list, cx))
++    })
++    .expect("fixture: the store deletes a known list");
++    cx.run_until_parked();
++}
++
++pub(super) fn move_list_in_store(list: ListId, to_index: usize, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.move_list(list, to_index, cx))
++    })
++    .expect("fixture: the store moves a known list");
++    cx.run_until_parked();
++}
++
++pub(super) fn pin(thread_id: ThreadId, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx).update(cx, |store, cx| store.pin(thread_id, cx))
++    })
++    .expect("fixture: the store pins a known thread");
++    cx.run_until_parked();
++}
++
++pub(super) fn tag(thread_id: ThreadId, tag: &str, cx: &mut VisualTestContext) {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .update(cx, |store, cx| store.add_tag(thread_id, tag, cx))
++    })
++    .expect("fixture: the store tags a known thread");
++    cx.run_until_parked();
++}
++
++/// The store's list names, in its order.
++pub(super) fn list_names(cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .lists()
++            .iter()
++            .map(|list| list.name.to_string())
++            .collect()
++    })
++}
++
++pub(super) fn list_ids(cx: &mut VisualTestContext) -> Vec<ListId> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .lists()
++            .iter()
++            .map(|list| list.id)
++            .collect()
++    })
++}
++
++pub(super) fn list_of(thread_id: ThreadId, cx: &mut VisualTestContext) -> Option<ListId> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .organization(thread_id)
++            .and_then(|organization| organization.list_id)
++    })
++}
++
++pub(super) fn is_pinned(thread_id: ThreadId, cx: &mut VisualTestContext) -> bool {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .pinned()
++            .any(|pinned| pinned == thread_id)
++    })
++}
++
++pub(super) fn tag_keys(thread_id: ThreadId, cx: &mut VisualTestContext) -> Vec<String> {
++    cx.update(|_, cx| {
++        ThreadOrganizationStore::global(cx)
++            .read(cx)
++            .tags(thread_id)
++            .into_iter()
++            .map(|tag| tag.key.to_string())
++            .collect()
++    })
++}
++
++// ── Reading the view ───────────────────────────────────────────────────────
++
++pub(super) fn is_lists(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> bool {
++    sidebar.read_with(cx, |sidebar, _| {
++        matches!(sidebar.view, SidebarView::Lists { .. })
++    })
++}
++
++pub(super) fn is_history(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> bool {
++    sidebar.read_with(cx, |sidebar, _| {
++        matches!(sidebar.view, SidebarView::Archive(_))
++    })
++}
++
++pub(super) fn is_thread_list(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) -> bool {
++    sidebar.read_with(cx, |sidebar, _| {
++        matches!(sidebar.view, SidebarView::ThreadList)
++    })
++}
++
++/// `cx.debug_bounds` takes a `&'static str`; selectors built from names are leaked, in tests only.
++pub(super) fn selector(text: String) -> &'static str {
++    Box::leak(text.into_boxed_str())
++}
++
++pub(super) fn header(name: &str, shown: usize) -> &'static str {
++    selector(format!("LISTS_HEADER-{name} ({shown})"))
++}
++
++pub(super) fn row(title: &str, project: &str) -> &'static str {
++    selector(format!("LISTS_ROW-{title} · {project}"))
++}
++
++pub(super) fn no_threads(name: &str) -> &'static str {
++    selector(format!("LISTS_NO_THREADS-{name}"))
++}
++
++pub(super) fn message(text: &str) -> &'static str {
++    selector(format!("LISTS_NAME_MESSAGE-{text}"))
++}
++
++pub(super) fn menu_item(label: &str) -> &'static str {
++    selector(format!("MENU_ITEM-{label}"))
++}
++
++/// Draws a frame of the window, so the selectors read the current state.
++pub(super) fn draw(cx: &mut VisualTestContext) {
++    cx.update(|window, _| window.refresh());
++    cx.run_until_parked();
++}
++
++pub(super) fn shown(selector: &'static str, cx: &mut VisualTestContext) -> bool {
++    draw(cx);
++    cx.debug_bounds(selector).is_some()
++}
++
++pub(super) fn bounds(selector: &'static str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
++    draw(cx);
++    cx.debug_bounds(selector)
++        .unwrap_or_else(|| panic!("`{selector}` is not rendered"))
++}
++
++/// The count a list's header shows, whatever it is; `None` when no header names the list.
++pub(super) fn header_count(name: &str, cx: &mut VisualTestContext) -> Option<usize> {
++    draw(cx);
++    (0..=20).find(|count| cx.debug_bounds(header(name, *count)).is_some())
++}
++
++/// Asserts every selector is rendered, each strictly below the one before it.
++#[track_caller]
++pub(super) fn assert_top_to_bottom(selectors: &[&'static str], cx: &mut VisualTestContext) {
++    draw(cx);
++    let mut previous: Option<(&str, Pixels)> = None;
++    for selector in selectors {
++        let top = cx
++            .debug_bounds(selector)
++            .unwrap_or_else(|| panic!("`{selector}` is not rendered"))
++            .origin
++            .y;
++        if let Some((above, above_top)) = previous {
++            assert!(
++                above_top < top,
++                "`{above}` (y {above_top:?}) must be above `{selector}` (y {top:?})"
++            );
++        }
++        previous = Some((selector, top));
++    }
++}
++
++pub(super) fn click(selector: &'static str, cx: &mut VisualTestContext) {
++    let target = bounds(selector, cx);
++    cx.simulate_click(target.center(), Modifiers::none());
++    cx.run_until_parked();
++}
++
++pub(super) fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
++    let target = bounds(selector, cx).center();
++    cx.simulate_mouse_down(target, MouseButton::Right, Modifiers::none());
++    cx.simulate_mouse_up(target, MouseButton::Right, Modifiers::none());
++    cx.run_until_parked();
++}
++
++/// Right-clicks the thread list's row of `thread_id` (not a pinned row).
++pub(super) fn right_click_group_row(
++    sidebar: &Entity<Sidebar>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) {
++    let ix = sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .position(|entry| {
++                matches!(entry, ListEntry::Thread(thread)
++                    if thread.metadata.thread_id == thread_id
++                        && thread.pinned_project_label.is_none())
++            })
++            .expect("fixture: the thread has a row in its group")
++    });
++    right_click_entry(sidebar, ix, cx);
++}
++
++/// Right-clicks the Pinned section's row of `thread_id`.
++pub(super) fn right_click_pinned_row(
++    sidebar: &Entity<Sidebar>,
++    thread_id: ThreadId,
++    cx: &mut VisualTestContext,
++) {
++    let ix = sidebar.read_with(cx, |sidebar, _| {
++        sidebar
++            .contents
++            .entries
++            .iter()
++            .position(|entry| {
++                matches!(entry, ListEntry::Thread(thread)
++                    if thread.metadata.thread_id == thread_id
++                        && thread.pinned_project_label.is_some())
++            })
++            .expect("fixture: the thread has a pinned row")
++    });
++    right_click_entry(sidebar, ix, cx);
++}
++
++pub(super) fn right_click_entry(sidebar: &Entity<Sidebar>, ix: usize, cx: &mut VisualTestContext) {
++    draw(cx);
++    let target = sidebar
++        .read_with(cx, |sidebar, _| sidebar.list_state.bounds_for_item(ix))
++        .expect("fixture: the entry is rendered")
++        .center();
++    cx.simulate_mouse_down(target, MouseButton::Right, Modifiers::none());
++    cx.simulate_mouse_up(target, MouseButton::Right, Modifiers::none());
++    cx.run_until_parked();
++    assert!(
++        shown("MENU_ITEM-Archive Thread", cx),
++        "fixture: the thread's context menu is open"
++    );
++}
++
++/// Opens the "Move to List" submenu of the menu open now (see the file header). False when no
++/// entry of that menu opens it.
++pub(super) fn open_move_to_list(cx: &mut VisualTestContext) -> bool {
++    // A right-clicked menu takes focus on a later platform frame, which a test window never
++    // runs; hovering one of its entries focuses it as a pointer does, so the keys reach it.
++    if let Some(entry) = cx.debug_bounds("MENU_ITEM-Archive Thread") {
++        cx.simulate_mouse_move(entry.center(), None, Modifiers::none());
++        cx.run_until_parked();
++    }
++    for _ in 0..16 {
++        cx.dispatch_action(SelectNext);
++        cx.dispatch_action(SelectChild);
++        if shown(NEW_LIST_ENTRY, cx) {
++            return true;
++        }
++        cx.dispatch_action(SelectParent);
++        cx.run_until_parked();
++    }
++    false
++}
++
++/// Clicks the footer button, as a user opens or leaves the Lists view.
++pub(super) fn click_lists_button(cx: &mut VisualTestContext) {
++    click(LISTS_BUTTON, cx);
++}
++
++pub(super) fn open_lists_view(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) {
++    click_lists_button(cx);
++    assert!(is_lists(sidebar, cx), "fixture: the Lists view is shown");
++}
++
++pub(super) fn dispatch_toggle_lists(sidebar: &Entity<Sidebar>, cx: &mut VisualTestContext) {
++    focus_sidebar(sidebar, cx);
++    cx.dispatch_action(ToggleThreadLists);
++    cx.run_until_parked();
++}
++
++/// Replaces the open name field's text with `text`, as a user selects all and types.
++pub(super) fn type_name(text: &str, cx: &mut VisualTestContext) {
++    assert!(shown(NAME_FIELD, cx), "fixture: the name field is open");
++    cx.dispatch_action(editor::actions::SelectAll);
++    cx.simulate_input(text);
++    cx.run_until_parked();
++}
++
++/// Enter in a single-line editor.
++pub(super) fn press_enter(cx: &mut VisualTestContext) {
++    cx.dispatch_action(Confirm);
++    cx.run_until_parked();
++}
++
++/// Escape in an editor.
++pub(super) fn press_escape(cx: &mut VisualTestContext) {
++    cx.dispatch_action(editor::actions::Cancel);
++    cx.run_until_parked();
++}
++
++pub(super) fn active_thread(
++    sidebar: &Entity<Sidebar>,
++    cx: &mut VisualTestContext,
++) -> Option<ThreadId> {
++    sidebar.read_with(cx, |sidebar, _| match &sidebar.active_entry {
++        Some(ActiveEntry::Thread { thread_id, .. }) => Some(*thread_id),
++        _ => None,
++    })
++}
++
++pub(super) fn local_key(path: &str) -> ProjectGroupKey {
++    ProjectGroupKey::new(None, PathList::new(&[PathBuf::from(path)]))
++}
+diff --git a/crates/sidebar/src/sidebar_lists_tests/view.rs b/crates/sidebar/src/sidebar_lists_tests/view.rs
+new file mode 100644
+index 0000000..d0a7209
+--- /dev/null
++++ b/crates/sidebar/src/sidebar_lists_tests/view.rs
+@@ -0,0 +1,216 @@
++// ═══ Task 3.1 — the third sidebar view ═════════════════════════════════════
++use super::*;
++// Explicit, because the parent's glob-imported `assert_eq` is ambiguous with the std prelude's.
++use pretty_assertions::assert_eq;
++
++// R1.1, R1.8 — the footer offers "Thread Lists" beside History only when the store is
++// installed. The History button is the control: the footer is rendered in both cases.
++#[gpui::test]
++async fn the_lists_button_exists_only_with_the_store(cx: &mut TestAppContext) {
++    let (_mw, _sidebar, cx) = alpha_window(false, cx).await;
++    assert!(shown(HISTORY_BUTTON, cx), "fixture: the footer is rendered");
++    assert!(
++        !shown(LISTS_BUTTON, cx),
++        "no Thread Lists button without the organization store"
++    );
++}
++
++#[gpui::test]
++async fn the_lists_button_sits_beside_history_with_the_store(cx: &mut TestAppContext) {
++    let (_mw, _sidebar, cx) = alpha_window(true, cx).await;
++    let history = bounds(HISTORY_BUTTON, cx);
++    let lists = bounds(LISTS_BUTTON, cx);
++    assert!(
++        (lists.center().y - history.center().y).abs() < px(4.0),
++        "the button is in the footer row, beside History ({lists:?} vs {history:?})"
++    );
++}
++
++// R1.2, R1.3 — a click from the thread list shows Lists; a second click shows the thread list.
++#[gpui::test]
++async fn the_button_toggles_between_the_thread_list_and_lists(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(true, cx).await;
++    assert!(
++        is_thread_list(&sidebar, cx),
++        "fixture: starts on the thread list"
++    );
++
++    click_lists_button(cx);
++    assert!(
++        is_lists(&sidebar, cx),
++        "the first click shows the Lists view"
++    );
++
++    click_lists_button(cx);
++    assert!(
++        is_thread_list(&sidebar, cx),
++        "the second click shows the thread list again"
++    );
++}
++
++// R1.4, R1.5 — History from Lists shows History (NOT the thread list: a toggle that treats
++// every non-thread-list view as History would wrongly go back), and Lists from History shows
++// Lists (NOT the thread list).
++#[gpui::test]
++async fn history_and_lists_switch_directly(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window_with_panel(cx).await;
++    open_lists_view(&sidebar, cx);
++
++    click(HISTORY_BUTTON, cx);
++    assert!(
++        is_history(&sidebar, cx),
++        "History from the Lists view shows History"
++    );
++
++    click_lists_button(cx);
++    assert!(
++        is_lists(&sidebar, cx),
++        "Thread Lists from History shows the Lists view"
++    );
++}
++
++// R1.9 — the action behaves as the click, from each of the three views.
++#[gpui::test]
++async fn the_action_behaves_as_the_click(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window_with_panel(cx).await;
++
++    dispatch_toggle_lists(&sidebar, cx);
++    assert!(is_lists(&sidebar, cx), "from the thread list: Lists");
++
++    dispatch_toggle_lists(&sidebar, cx);
++    assert!(is_thread_list(&sidebar, cx), "from Lists: the thread list");
++
++    click(HISTORY_BUTTON, cx);
++    assert!(is_history(&sidebar, cx), "fixture: History is shown");
++    dispatch_toggle_lists(&sidebar, cx);
++    assert!(is_lists(&sidebar, cx), "from History: Lists");
++}
++
++// R1.6 — the saved state carries the Lists view and a restored sidebar shows it.
++#[gpui::test]
++async fn the_saved_state_restores_the_lists_view(cx: &mut TestAppContext) {
++    let (multi_workspace, sidebar, cx) = alpha_window(true, cx).await;
++    open_lists_view(&sidebar, cx);
++    let saved = sidebar
++        .read_with(cx, |sidebar, cx| sidebar.serialized_state(cx))
++        .expect("the sidebar serializes its state");
++
++    let restored =
++        cx.update(|window, cx| cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx)));
++    cx.run_until_parked();
++    assert!(
++        is_thread_list(&restored, cx),
++        "fixture: a new sidebar starts on the list"
++    );
++    restored.update_in(cx, |sidebar, window, cx| {
++        sidebar.restore_serialized_state(&saved, window, cx);
++    });
++    cx.run_until_parked();
++
++    assert!(
++        is_lists(&restored, cx),
++        "the restored sidebar shows the Lists view"
++    );
++}
++
++// R1.6 converse — a saved thread list restores the thread list, and a saved History (in its
++// current spelling and in the legacy "Archive" one) restores History: neither becomes Lists.
++#[gpui::test]
++async fn other_saved_views_never_restore_as_lists(cx: &mut TestAppContext) {
++    let (multi_workspace, _sidebar, cx) = alpha_window_with_panel(cx).await;
++    let thread_list = serde_json::to_string(&SerializedSidebar {
++        active_view: SerializedSidebarView::ThreadList,
++        ..Default::default()
++    })
++    .expect("serializable");
++    let history = serde_json::to_string(&SerializedSidebar {
++        active_view: SerializedSidebarView::History,
++        ..Default::default()
++    })
++    .expect("serializable");
++    let legacy_archive = r#"{"active_view":"Archive"}"#.to_string();
++
++    for (saved, expect_history) in [
++        (thread_list, false),
++        (history, true),
++        (legacy_archive, true),
++    ] {
++        let restored =
++            cx.update(|window, cx| cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx)));
++        restored.update_in(cx, |sidebar, window, cx| {
++            sidebar.restore_serialized_state(&saved, window, cx);
++        });
++        cx.run_until_parked();
++        assert!(
++            !is_lists(&restored, cx),
++            "{saved} must not restore the Lists view"
++        );
++        assert_eq!(
++            is_history(&restored, cx),
++            expect_history,
++            "{saved} restores History: {expect_history}"
++        );
++    }
++}
++
++// R1.10 — a window saved with the Lists view, restored where the store is not installed,
++// shows the thread list (and does not panic).
++#[gpui::test]
++async fn a_saved_lists_view_without_the_store_restores_the_thread_list(cx: &mut TestAppContext) {
++    let (_mw, sidebar, cx) = alpha_window(false, cx).await;
++    let saved = serde_json::to_string(&SerializedSidebar {
++        active_view: SerializedSidebarView::Lists,
++        ..Default::default()
++    })
++    .expect("serializable");
++
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.restore_serialized_state(&saved, window, cx);
++    });
++    cx.run_until_parked();
++
++    assert!(
++        is_thread_list(&sidebar, cx),
++        "without the store the thread list is shown"
++    );
++    assert!(
++        !shown(LISTS_BUTTON, cx),
++        "and no Thread Lists button appears"
++    );
++}
++
++// R1.7, R2.9 — leaving the Lists view shows the thread list exactly as before it opened:
++// same rows, same order, the same collapsed group and Pinned section, even though a thread
++// was filed into a list while the view was shown.
++#[gpui::test]
++async fn the_thread_list_after_leaving_equals_the_one_before(cx: &mut TestAppContext) {
++    let (multi_workspace, sidebar, cx) = alpha_window(true, cx).await;
++    open_in_window(BETA, &multi_workspace, cx).await;
++    let fix = save_in("a1", "Fix login", ALPHA, 3, cx);
++    save_in("a2", "Write docs", ALPHA, 2, cx);
++    let pinned = save_in("a3", "Tune cache", ALPHA, 1, cx);
++    save_in("b1", "Ship release", BETA, 4, cx);
++    pin(pinned, cx);
++    sidebar.update_in(cx, |sidebar, window, cx| {
++        sidebar.toggle_collapse(&local_key(BETA), window, cx);
++    });
++    cx.run_until_parked();
++    let before = visible_entries_as_strings(&sidebar, cx);
++    assert!(
++        before.iter().any(|line| line.trim() == "v Pinned")
++            && before.iter().any(|line| line.starts_with("> [beta]")),
++        "fixture: a Pinned section and a collapsed group: {before:?}"
++    );
++
++    open_lists_view(&sidebar, cx);
++    let ops = create_list("Ops", cx);
++    file_in(fix, Some(ops), cx);
++    file_in(pinned, Some(ops), cx);
++    click_lists_button(cx);
++
++    assert!(
++        is_thread_list(&sidebar, cx),
++        "fixture: back on the thread list"
++    );
++    assert_eq!(visible_entries_as_strings(&sidebar, cx), before);
++}

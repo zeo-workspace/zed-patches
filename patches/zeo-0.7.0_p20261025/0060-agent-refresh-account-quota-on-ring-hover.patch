@@ -1,0 +1,659 @@
+From 4624502010a6e289031aa650426240ec74d7bad0 Mon Sep 17 00:00:00 2001
+From: lucascouts <lucascs@protonmail.com>
+Date: Wed, 14 Oct 2026 03:49:07 -0300
+Subject: [PATCH] feat(agent): refresh the account quota when the context ring
+ is hovered
+
+The 5-hour, weekly and model-scoped (Fable) rows 0011 and 0013 draw in the
+context ring's tooltip only moved when the adapter decided to push them: at
+session start, at the end of a turn, and on its idle poll. Hovering the ring
+to read them showed whatever arrived last, and the tooltip itself was a
+copy taken when it opened, so a number that arrived while it was open was
+not shown until the next hover.
+
+Two halves:
+
+  * Active, on hover. Entering the ring calls
+    `AcpThread::refresh_account_usage`, which sends `_claude/usage/refresh`
+    (`{sessionId}` -> `{refreshed: bool}`) to an agent that advertises
+    `agentCapabilities._meta["_claude/usage"].version >= 1`. The windows come
+    back on the usual `usage_update` frames, so nothing on the receiving side
+    changes. It is bounded twice: a request still in flight absorbs the next
+    one, and a new one waits `ACCOUNT_USAGE_REFRESH_MIN_INTERVAL` (5 s) after
+    the last was sent. An agent without the capability gets no request; the
+    error is logged at debug level and the ring keeps what it has.
+
+  * Live tooltip. `TokenUsageTooltip` observes the thread and rebuilds its
+    quota rows when the thread changes, so the answer to the hover lands in
+    front of the reader. The row building moved into `account_usage_rows`,
+    shared by the ring and the tooltip.
+
+The passive half -- every 30 s instead of 60 s -- lives in the adapter
+(claude-agent-acp-plus, `QUOTA_POLL_DEFAULT_MS`), which already polls while
+the session is idle and shares one sample across processes. The adapter
+answers `refreshed: false` without asking the CLI while a turn runs: control
+requests are served one at a time and a cancel waits behind them, and the
+turn's own end refreshes the windows anyway.
+
+Gating is on the capability, never on the entry id or the agent's name, as
+for `_claude/tasks`; the peer harness of `acp_task_actions_tests.rs` gained
+`connect_peer_with_meta` so a test can advertise any capability.
+
+Tests: `refresh_account_usage_is_bounded_in_flight_and_in_time` (red with
+either bound removed: 2 requests instead of 1, 4 instead of 2), and three in
+`acp_usage_refresh_tests.rs` -- the request carries the session and
+`refreshed` is read; `false` is an answer and a missing field an error; no
+request without the capability, including for an agent that advertises
+`_claude/tasks` only. acp_thread 341 passed, agent_servers 150 passed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+
+diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs
+index db1aeba..d5faf87 100644
+--- a/crates/acp_thread/src/acp_thread.rs
++++ b/crates/acp_thread/src/acp_thread.rs
+@@ -3609,6 +3609,11 @@ pub struct AccountUsageWindow {
+     pub resets_at: Option<i64>,
+ }
+ 
++/// The shortest gap between two on-demand quota refreshes of one thread. Hovering in
++/// and out of the ring must not turn into a request per pointer movement; the agent
++/// also keeps a shared sample, so a tighter loop would read the same numbers.
++pub const ACCOUNT_USAGE_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(5);
++
+ /// Account-level quota state, accumulated across `rate_limit_event`s.
+ #[derive(Debug, Clone, Default, PartialEq)]
+ pub struct AccountUsage {
+@@ -3993,6 +3998,10 @@ pub struct AcpThread {
+     reported_usage: Option<ReportedTokenUsage>,
+     token_usage: Option<TokenUsage>,
+     account_usage: AccountUsage,
++    // When the last on-demand quota refresh was asked for, and whether it is still
++    // being answered. See `refresh_account_usage`.
++    account_usage_refreshed_at: Option<Instant>,
++    account_usage_refreshing: bool,
+     background_task_count: usize,
+     tasks: Vec<AgentTask>,
+     // Ids whose ending has been announced with `TaskEnded`, so a repeated snapshot does
+@@ -4389,6 +4398,8 @@ impl AcpThread {
+             connection,
+             token_usage: None,
+             account_usage: AccountUsage::default(),
++            account_usage_refreshed_at: None,
++            account_usage_refreshing: false,
+             background_task_count: 0,
+             tasks: Vec::new(),
+             announced_task_endings: HashSet::default(),
+@@ -5139,6 +5150,43 @@ impl AcpThread {
+         (!self.account_usage.is_empty()).then_some(&self.account_usage)
+     }
+ 
++    /// Ask the agent for the account quota now, rather than at its next poll.
++    ///
++    /// Called when the pointer enters the context ring, so it is bounded twice: a
++    /// request still in flight absorbs the next one, and a new request waits
++    /// [`ACCOUNT_USAGE_REFRESH_MIN_INTERVAL`] after the previous one was sent. An agent
++    /// without the capability answers with an error, which is logged at debug level
++    /// and otherwise ignored -- the ring keeps showing what the agent last pushed.
++    pub fn refresh_account_usage(&mut self, cx: &mut Context<Self>) {
++        let now = cx.background_executor().now();
++        if self.account_usage_refreshing
++            || self.account_usage_refreshed_at.is_some_and(|at| {
++                now.saturating_duration_since(at) < ACCOUNT_USAGE_REFRESH_MIN_INTERVAL
++            })
++        {
++            return;
++        }
++        self.account_usage_refreshing = true;
++        self.account_usage_refreshed_at = Some(now);
++        let session_id = self.session_id().clone();
++        let request = self
++            .connection
++            .clone()
++            .refresh_account_usage(&session_id, cx);
++        cx.spawn(async move |this, cx| {
++            let result = request.await;
++            if let Err(error) = &result {
++                log::debug!(
++                    "account usage refresh for session {}: {error:#}",
++                    session_id.0
++                );
++            }
++            this.update(cx, |this, _| this.account_usage_refreshing = false)
++                .ok();
++        })
++        .detach();
++    }
++
+     /// How many tasks the agent reports running in the background — work that outlives
+     /// the turn that launched it, so [`Self::status`] reads `Idle` while it runs.
+     pub fn background_task_count(&self) -> usize {
+@@ -9190,6 +9238,66 @@ mod tests {
+         assert_eq!(utilization(150.0), Some(1.0), "clamped to the track");
+     }
+ 
++    /// 0060: hovering the ring asks the agent for the quota, at most once in flight and
++    /// once per `ACCOUNT_USAGE_REFRESH_MIN_INTERVAL`, however often the pointer enters.
++    #[gpui::test]
++    async fn refresh_account_usage_is_bounded_in_flight_and_in_time(cx: &mut TestAppContext) {
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, [], cx).await;
++        let connection = Rc::new(FakeAgentConnection::new());
++        let thread = cx
++            .update(|cx| {
++                connection.clone().new_session(
++                    project,
++                    PathList::new(&[Path::new(path!("/test"))]),
++                    cx,
++                )
++            })
++            .await
++            .unwrap();
++        let refresh = |cx: &mut TestAppContext| {
++            thread.update(cx, |thread, cx| thread.refresh_account_usage(cx));
++            cx.run_until_parked();
++        };
++
++        // Hostile half: a slow agent and a pointer that keeps entering.
++        // Hostile half: a slow agent, still answering after the interval has passed.
++        connection.hold_usage_refreshes.set(true);
++        refresh(cx);
++        cx.executor()
++            .advance_clock(ACCOUNT_USAGE_REFRESH_MIN_INTERVAL);
++        refresh(cx);
++        assert_eq!(connection.usage_refreshes.get(), 1, "one request in flight");
++
++        for tx in connection.held_usage_refreshes.borrow_mut().drain(..) {
++            tx.send(()).ok();
++        }
++        cx.run_until_parked();
++        connection.hold_usage_refreshes.set(false);
++        refresh(cx);
++        assert_eq!(
++            connection.usage_refreshes.get(),
++            2,
++            "answered, so the next one goes"
++        );
++
++        // A pointer that keeps entering inside the interval does not ask again.
++        refresh(cx);
++        refresh(cx);
++        assert_eq!(
++            connection.usage_refreshes.get(),
++            2,
++            "inside the minimum interval"
++        );
++
++        // Benign half: once the interval has passed, the next hover asks again.
++        cx.executor()
++            .advance_clock(ACCOUNT_USAGE_REFRESH_MIN_INTERVAL);
++        refresh(cx);
++        assert_eq!(connection.usage_refreshes.get(), 3);
++    }
++
+     /// 0011 end to end on the thread: the payload rides `_meta["_claude/rateLimit"]` of a
+     /// UsageUpdate, lands in `account_usage()`, and fires AccountUsageUpdated once -- and
+     /// not again for the same payload.
+@@ -22446,6 +22554,11 @@ mod tests {
+         supports_truncate: bool,
+         sessions: Arc<parking_lot::Mutex<HashMap<acp_v2::SessionId, WeakEntity<AcpThread>>>>,
+         set_title_calls: Rc<RefCell<Vec<SharedString>>>,
++        // `_claude/usage/refresh` requests received, and the answers held back while
++        // `hold_usage_refreshes` is set (released by sending on them).
++        usage_refreshes: Rc<std::cell::Cell<usize>>,
++        hold_usage_refreshes: Rc<std::cell::Cell<bool>>,
++        held_usage_refreshes: Rc<RefCell<Vec<oneshot::Sender<()>>>>,
+         on_user_message: Option<
+             Rc<
+                 dyn Fn(
+@@ -22467,6 +22580,9 @@ mod tests {
+                 on_user_message: None,
+                 sessions: Arc::default(),
+                 set_title_calls: Default::default(),
++                usage_refreshes: Default::default(),
++                hold_usage_refreshes: Default::default(),
++                held_usage_refreshes: Default::default(),
+             }
+         }
+ 
+@@ -22500,6 +22616,23 @@ mod tests {
+             AgentId::new("fake")
+         }
+ 
++        fn refresh_account_usage(
++            self: Rc<Self>,
++            _session_id: &acp_v2::SessionId,
++            cx: &mut App,
++        ) -> Task<Result<bool>> {
++            self.usage_refreshes.set(self.usage_refreshes.get() + 1);
++            if !self.hold_usage_refreshes.get() {
++                return Task::ready(Ok(true));
++            }
++            let (tx, rx) = oneshot::channel();
++            self.held_usage_refreshes.borrow_mut().push(tx);
++            cx.background_spawn(async move {
++                rx.await.ok();
++                Ok(true)
++            })
++        }
++
+         fn telemetry_id(&self) -> SharedString {
+             "fake".into()
+         }
+diff --git a/crates/acp_thread/src/connection.rs b/crates/acp_thread/src/connection.rs
+index 8f2ab7b..5834473 100644
+--- a/crates/acp_thread/src/connection.rs
++++ b/crates/acp_thread/src/connection.rs
+@@ -171,6 +171,20 @@ pub trait AgentConnection {
+         )))
+     }
+ 
++    /// Ask the agent to re-read the account quota now and publish it to the session
++    /// (`_claude/usage/refresh`). The windows arrive as the usual `usage_update`
++    /// notifications; `Ok(false)` means the agent answered but had nothing to publish.
++    /// Unsupported unless the connection overrides it.
++    fn refresh_account_usage(
++        self: Rc<Self>,
++        _session_id: &acp_v2::SessionId,
++        _cx: &mut App,
++    ) -> Task<Result<bool>> {
++        Task::ready(Err(anyhow::Error::msg(
++            "Refreshing the account usage is not supported",
++        )))
++    }
++
+     /// Ask the agent to stop one of the session's tasks (`AcpThread::tasks`).
+     fn stop_task(
+         self: Rc<Self>,
+diff --git a/crates/agent_servers/src/acp/v1.rs b/crates/agent_servers/src/acp/v1.rs
+index a689988..2f2fb13 100644
+--- a/crates/agent_servers/src/acp/v1.rs
++++ b/crates/agent_servers/src/acp/v1.rs
+@@ -57,6 +57,10 @@ const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
+ const CLAUDE_TASKS_CAPABILITY: &str = "_claude/tasks";
+ const CLAUDE_TASKS_STOP_METHOD: &str = "_claude/tasks/stop";
+ const CLAUDE_TASKS_BACKGROUND_METHOD: &str = "_claude/tasks/background";
++/// Advertised by an agent that can re-read the account quota on request.
++const CLAUDE_USAGE_CAPABILITY: &str = "_claude/usage";
++/// Asks the agent to publish the account quota now; see `refresh_account_usage`.
++const CLAUDE_USAGE_REFRESH_METHOD: &str = "_claude/usage/refresh";
+ const CLAUDE_TASKS_OUTPUT_METHOD: &str = "_claude/tasks/output";
+ /// The most `_claude/tasks/output` serves; the adapter clamps to the same value.
+ const CLAUDE_TASKS_OUTPUT_MAX_BYTES: u64 = 1_048_576;
+@@ -78,8 +82,9 @@ async fn close_session_and_drain(
+     drain_foreground_queue(dispatch_tx).await
+ }
+ 
+-/// Sends one of the `_claude/tasks/*` extension requests. `id` names the task or tool
+-/// call the request is about, so the caller's error says which one failed.
++/// Sends one of the `_claude/tasks/*` or `_claude/usage/*` extension requests. `id`
++/// names the task, tool call or session the request is about, so the caller's error
++/// says which one failed.
+ async fn send_task_request(
+     connection: ConnectionTo<Agent>,
+     method: &'static str,
+@@ -1008,6 +1013,18 @@ impl AcpConnection {
+         self.agent_tasks_version() >= 1
+     }
+ 
++    /// Keyed on the capability alone, like `agent_tasks_version`. Version 1 carries
++    /// `_claude/usage/refresh`; 0 when nothing is advertised.
++    fn agent_usage_version(&self) -> u64 {
++        self.agent_capabilities
++            .meta
++            .as_ref()
++            .and_then(|meta| meta.get(CLAUDE_USAGE_CAPABILITY))
++            .and_then(|capability| capability.get("version"))
++            .and_then(serde_json::Value::as_u64)
++            .unwrap_or(0)
++    }
++
+     /// `rpc_call` gets a receiver that resolves once its response has been applied, and
+     /// holds the agent's later messages until then (see `ordered_response`). With
+     /// `replays_history`, the response ends a history replay.
+@@ -2212,6 +2229,39 @@ impl AgentConnection for AcpConnection {
+         })
+     }
+ 
++    fn refresh_account_usage(
++        self: Rc<Self>,
++        session_id: &acp_v2::SessionId,
++        cx: &mut App,
++    ) -> Task<Result<bool>> {
++        let version = self.agent_usage_version();
++        if version < 1 {
++            return Task::ready(Err(anyhow!(
++                "Refreshing the account usage is not supported: the agent advertises \
++                 {CLAUDE_USAGE_CAPABILITY} version {version}"
++            )));
++        }
++        let params = serde_json::json!({ "sessionId": session_id });
++        let request = send_task_request(
++            self.connection.clone(),
++            CLAUDE_USAGE_REFRESH_METHOD,
++            params,
++            session_id.0.to_string(),
++        );
++        cx.foreground_executor().spawn(async move {
++            let response = request.await?;
++            response
++                .get("refreshed")
++                .and_then(serde_json::Value::as_bool)
++                .with_context(|| {
++                    format!(
++                        "{CLAUDE_USAGE_REFRESH_METHOD}: response has no boolean \
++                         `refreshed`: {response}"
++                    )
++                })
++        })
++    }
++
+     fn background_task(
+         self: Rc<Self>,
+         session_id: &acp_v2::SessionId,
+@@ -10415,6 +10465,7 @@ exit 7
+ 
+     include!("../acp_task_actions_tests.rs");
+     include!("../acp_task_output_tests.rs");
++    include!("../acp_usage_refresh_tests.rs");
+ }
+ 
+ fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
+diff --git a/crates/agent_servers/src/acp_task_actions_tests.rs b/crates/agent_servers/src/acp_task_actions_tests.rs
+index 47d30c8..6f19c15 100644
+--- a/crates/agent_servers/src/acp_task_actions_tests.rs
++++ b/crates/agent_servers/src/acp_task_actions_tests.rs
+@@ -33,6 +33,20 @@ async fn connect_task_actions_peer(
+     tasks_capability: Option<serde_json::Value>,
+     reply: TaskActionsReply,
+     cx: &mut gpui::TestAppContext,
++) -> TaskActionsPeer {
++    let meta = tasks_capability
++        .map(|value| serde_json::Map::from_iter([("_claude/tasks".to_string(), value)]));
++    connect_peer_with_meta(agent_id, agent_name, meta, reply, cx).await
++}
++
++/// `connect_task_actions_peer` with the whole `agentCapabilities._meta` given, for
++/// capabilities other than `_claude/tasks` (patch 0060's `_claude/usage`).
++async fn connect_peer_with_meta(
++    agent_id: &str,
++    agent_name: &str,
++    capability_meta: Option<serde_json::Map<String, serde_json::Value>>,
++    reply: TaskActionsReply,
++    cx: &mut gpui::TestAppContext,
+ ) -> TaskActionsPeer {
+     cx.update(|cx| {
+         let store = settings::SettingsStore::test(cx);
+@@ -53,9 +67,7 @@ async fn connect_task_actions_peer(
+     let mut capabilities = acp::AgentCapabilities::default().session_capabilities(
+         acp::SessionCapabilities::default().close(acp::SessionCloseCapabilities::new()),
+     );
+-    if let Some(value) = tasks_capability {
+-        let mut meta = serde_json::Map::new();
+-        meta.insert("_claude/tasks".to_string(), value);
++    if let Some(meta) = capability_meta {
+         capabilities = capabilities.meta(meta);
+     }
+     let agent_info = acp::Implementation::new(agent_name.to_string(), "1.0.0".to_string());
+diff --git a/crates/agent_servers/src/acp_usage_refresh_tests.rs b/crates/agent_servers/src/acp_usage_refresh_tests.rs
+new file mode 100644
+index 0000000..ce3a950
+--- /dev/null
++++ b/crates/agent_servers/src/acp_usage_refresh_tests.rs
+@@ -0,0 +1,107 @@
++// Patch 0060 — `AcpConnection::refresh_account_usage` against a fake ACP peer.
++//
++// The gate is the `_claude/usage` capability the agent advertises in `initialize`
++// (`agentCapabilities._meta["_claude/usage"].version >= 1`), never the entry id or the
++// agent's self-reported name, as for `_claude/tasks`.
++//
++// Included at the end of `mod tests` in `acp.rs`, after `acp_task_actions_tests.rs`,
++// whose peer it reuses. Filter: `cargo test -p agent_servers usage_refresh`.
++
++fn usage_capability_v(version: u64) -> Option<serde_json::Map<String, serde_json::Value>> {
++    Some(serde_json::Map::from_iter([(
++        "_claude/usage".to_string(),
++        serde_json::json!({ "version": version }),
++    )]))
++}
++
++#[gpui::test]
++async fn test_usage_refresh_sends_the_session_and_reads_refreshed(cx: &mut gpui::TestAppContext) {
++    let peer = connect_peer_with_meta(
++        PLUS_ENTRY,
++        PLUS_NAME,
++        usage_capability_v(1),
++        Arc::new(|_method, _params| Ok(serde_json::json!({ "refreshed": true }))),
++        cx,
++    )
++    .await;
++    let (_thread, session_id) = task_actions_session(&peer, cx).await;
++
++    let refreshed = cx
++        .update(|cx| peer.connection.clone().refresh_account_usage(&session_id, cx))
++        .await
++        .expect("refresh succeeds");
++
++    assert!(refreshed);
++    assert_eq!(
++        task_actions_requests(&peer),
++        vec![(
++            "_claude/usage/refresh".to_string(),
++            serde_json::json!({ "sessionId": session_id.to_string() }),
++        )]
++    );
++}
++
++#[gpui::test]
++async fn test_usage_refresh_false_is_an_answer_and_a_missing_field_is_an_error(
++    cx: &mut gpui::TestAppContext,
++) {
++    let answers = Arc::new(std::sync::Mutex::new(vec![
++        serde_json::json!({}),
++        serde_json::json!({ "refreshed": false }),
++    ]));
++    let peer = connect_peer_with_meta(
++        PLUS_ENTRY,
++        PLUS_NAME,
++        usage_capability_v(1),
++        Arc::new(move |_method, _params| {
++            Ok(answers.lock().expect("answers mutex").pop().expect("an answer"))
++        }),
++        cx,
++    )
++    .await;
++    let (_thread, session_id) = task_actions_session(&peer, cx).await;
++
++    let nothing_published = cx
++        .update(|cx| peer.connection.clone().refresh_account_usage(&session_id, cx))
++        .await
++        .expect("false is an answer, not an error");
++    let malformed = cx
++        .update(|cx| peer.connection.clone().refresh_account_usage(&session_id, cx))
++        .await;
++
++    assert!(!nothing_published);
++    assert!(
++        malformed.is_err(),
++        "a response without `refreshed` must not read as false"
++    );
++}
++
++// Hostile half first: an agent that advertises `_claude/tasks` but not `_claude/usage`
++// -- every Plus release before the method existed -- is not sent the request.
++#[gpui::test]
++async fn test_usage_refresh_unsupported_without_the_capability(cx: &mut gpui::TestAppContext) {
++    for meta in [
++        None,
++        Some(serde_json::Map::from_iter([(
++            "_claude/tasks".to_string(),
++            serde_json::json!({ "version": 2 }),
++        )])),
++        usage_capability_v(0),
++    ] {
++        let peer = connect_peer_with_meta(
++            crate::CLAUDE_AGENT_ID,
++            PLUS_NAME,
++            meta,
++            task_actions_ok(),
++            cx,
++        )
++        .await;
++        let (_thread, session_id) = task_actions_session(&peer, cx).await;
++        let result = cx
++            .update(|cx| peer.connection.clone().refresh_account_usage(&session_id, cx))
++            .await;
++        let error = result.expect_err("no capability, no request");
++        assert!(error.to_string().contains("not supported"), "{error}");
++        assert!(task_actions_requests(&peer).is_empty(), "nothing reached the agent");
++    }
++}
+diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
+index a7ddc0a..a142352 100644
+--- a/crates/agent_ui/src/conversation_view/thread_view.rs
++++ b/crates/agent_ui/src/conversation_view/thread_view.rs
+@@ -6225,34 +6225,12 @@ impl ThreadView {
+         let input_max_label = crate::humanize_token_count(max_input_tokens);
+         let output_max_label = crate::humanize_token_count(max_output_tokens);
+ 
+-        // Account quota, when the agent reports it. Only the Claude adapter does today: it
+-        // forwards the SDK's `rate_limit_event` in `_meta`, which ACP itself has no field
+-        // for. Every other agent yields an empty vec and the section does not render.
+-        let (account_rows, account_credits_required) = match thread.account_usage() {
+-            Some(account) => (
+-                account
+-                    .windows()
+-                    .map(|window| {
+-                        let ratio = window.utilization.unwrap_or(0.0);
+-                        AccountUsageRow {
+-                            label: window.kind.label(),
+-                            percentage: window
+-                                .utilization
+-                                .map(|u| format!("{}%", (u * 100.0).round() as u32))
+-                                .unwrap_or_else(|| "—".to_string())
+-                                .into(),
+-                            ratio,
+-                            elevated: !matches!(window.status, AccountUsageStatus::Allowed),
+-                        }
+-                    })
+-                    .collect::<Vec<_>>(),
+-                account.credits_required,
+-            ),
+-            None => (Vec::new(), false),
+-        };
++        let (account_rows, account_credits_required) = account_usage_rows(thread);
++        let thread_entity = self.thread.clone();
+ 
+         let build_tooltip = {
+             move |_window: &mut Window, cx: &mut App| {
++                let thread_entity = thread_entity.clone();
+                 let percentage = percentage.clone();
+                 let used = used.clone();
+                 let max = max.clone();
+@@ -6264,7 +6242,19 @@ impl ThreadView {
+                 let workspace = workspace.clone();
+                 let cost_label = cost_label.clone();
+                 let account_rows = account_rows.clone();
+-                cx.new(move |_cx| TokenUsageTooltip {
++                cx.new(move |cx| TokenUsageTooltip {
++                    // The quota rows follow the thread while the tooltip is open, so a
++                    // refresh the hover asked for lands in front of the reader instead
++                    // of at the next hover.
++                    _account_usage_subscription: cx.observe(
++                        &thread_entity,
++                        |tooltip: &mut TokenUsageTooltip, thread, cx| {
++                            let (rows, credits_required) = account_usage_rows(thread.read(cx));
++                            tooltip.account_rows = rows;
++                            tooltip.account_credits_required = credits_required;
++                            cx.notify();
++                        },
++                    ),
+                     percentage,
+                     account_rows,
+                     account_credits_required,
+@@ -6304,6 +6294,7 @@ impl ThreadView {
+             Some(
+                 h_flex()
+                     .id("split_token_usage")
++                    .on_hover(cx.listener(Self::refresh_account_usage_on_hover))
+                     .flex_shrink_0()
+                     .gap_1p5()
+                     .mr_1()
+@@ -6352,6 +6343,7 @@ impl ThreadView {
+             Some(
+                 h_flex()
+                     .id("circular_progress_tokens")
++                    .on_hover(cx.listener(Self::refresh_account_usage_on_hover))
+                     .mt_px()
+                     .mr_1()
+                     .child(
+@@ -6370,6 +6362,21 @@ impl ThreadView {
+         }
+     }
+ 
++    /// Entering the context ring asks the agent for the account quota now, so the
++    /// tooltip's 5-hour, weekly and model-scoped rows are current while it is read.
++    /// `AcpThread::refresh_account_usage` bounds how often that reaches the agent.
++    fn refresh_account_usage_on_hover(
++        &mut self,
++        hovered: &bool,
++        _window: &mut Window,
++        cx: &mut Context<Self>,
++    ) {
++        if *hovered {
++            self.thread
++                .update(cx, |thread, cx| thread.refresh_account_usage(cx));
++        }
++    }
++
+     fn fast_mode_available(&self, cx: &Context<Self>) -> bool {
+         self.as_native_thread(cx)
+             .and_then(|thread| thread.read(cx).model())
+@@ -7281,11 +7288,35 @@ impl ThreadView {
+     }
+ }
+ 
++/// The account quota rows of the context tooltip, and whether the agent asked for
++/// credits. Only the Claude adapter reports quota today: it forwards the SDK's
++/// `rate_limit_event` in `_meta`, which ACP itself has no field for. Every other agent
++/// yields no rows and the section does not render.
++fn account_usage_rows(thread: &AcpThread) -> (Vec<AccountUsageRow>, bool) {
++    let Some(account) = thread.account_usage() else {
++        return (Vec::new(), false);
++    };
++    let rows = account
++        .windows()
++        .map(|window| AccountUsageRow {
++            label: window.kind.label(),
++            percentage: window
++                .utilization
++                .map(|u| format!("{}%", (u * 100.0).round() as u32))
++                .unwrap_or_else(|| "—".to_string())
++                .into(),
++            ratio: window.utilization.unwrap_or(0.0),
++            elevated: !matches!(window.status, AccountUsageStatus::Allowed),
++        })
++        .collect();
++    (rows, account.credits_required)
++}
++
+ /// One account quota row in the context tooltip: the label, how full it is, and whether
+ /// the agent flagged it as warning/rejected.
+ ///
+-/// Built in `render_token_usage` and passed by value, because the tooltip is constructed in
+-/// a closure that outlives the borrow of the thread.
++/// Built by `account_usage_rows` and held by value, so the tooltip renders without
++/// reading the thread; it rebuilds them when the thread changes.
+ #[derive(Clone)]
+ struct AccountUsageRow {
+     label: SharedString,
+@@ -7295,6 +7326,7 @@ struct AccountUsageRow {
+ }
+ 
+ struct TokenUsageTooltip {
++    _account_usage_subscription: Subscription,
+     percentage: String,
+     account_rows: Vec<AccountUsageRow>,
+     account_credits_required: bool,
