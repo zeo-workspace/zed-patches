@@ -24,7 +24,10 @@ while a delivery is still reaching the parent, while a turn runs or a summary
 waits, and (Summarize only) while a reported-activity session has not reported
 since it loaded. The summary is bound to its own SUMMARY_REQUEST entry, not to
 the activity generation alone: on the reported-activity transport the agent can
-start a turn of its own that takes the generation the summary expected.
+start a turn of its own that takes the generation the summary expected. A
+request the agent rejects on that transport settles its submission Failed
+with no turn and no Error event; that clears the summary too, the error shown
+under the control.
 
 Sub-thread items. A reporter in agent_ui turns 039's links and the sub-thread
 threads' run state into SubThreadActivity (Linked, Running, Idle, Retitled),
@@ -54,13 +57,13 @@ its index (3), since step 5 follows it; the length is still never pinned.
 Touch points in upstream and earlier-patch files: ThreadView gains the state
 field, its focus handle and one footer call, and get_agent_message_content
 becomes pub(crate); ConversationView::handle_thread_event forwards Stopped,
-Error, Refusal and EntriesRemoved to the sub-thread view; tasks_card.rs and
+Error, Refusal, EntriesRemoved and SubmissionUpdated to the sub-thread view; tasks_card.rs and
 agent_tasks_panel's panel.rs dispatch on the origin; agent_ui.rs re-exports
 the reporter's types. Logs carry session ids, statuses and counts only, never a
 title or a reply (zeo_sub_thread event=...).
 
 Last of the claude-agent-acp-plus group, after 0070 whose sub-threads it
-consumes. 112 tests added (unit, GPUI integration and history migrations).
+consumes. 115 tests added (unit, GPUI integration and history migrations).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -3392,10 +3395,10 @@ index ac7eefe..e97a26b 100644
      TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
  };
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 31b488a..8a98866 100644
+index 31b488a..7e9147d 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
-@@ -2008,6 +2008,19 @@ impl ConversationView {
+@@ -2008,6 +2008,20 @@ impl ConversationView {
          if !is_current_owner {
              return;
          };
@@ -3406,6 +3409,7 @@ index 31b488a..8a98866 100644
 +                | AcpThreadEvent::Error
 +                | AcpThreadEvent::Refusal
 +                | AcpThreadEvent::EntriesRemoved(_)
++                | AcpThreadEvent::SubmissionUpdated(_)
 +        ) && let Some(view) = self.thread_view(&session_id)
 +        {
 +            view.update(cx, |view, cx| {
@@ -4286,10 +4290,10 @@ index 0000000..0c8b1cd
 +}
 diff --git a/crates/agent_ui/src/sub_thread_send.rs b/crates/agent_ui/src/sub_thread_send.rs
 new file mode 100644
-index 0000000..05d5583
+index 0000000..edad6c5
 --- /dev/null
 +++ b/crates/agent_ui/src/sub_thread_send.rs
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,247 @@
 +//! Story 040 — Send to Parent (design.md, SendToParentControl): a sub-thread's last reply, or a
 +//! summary it is asked for, appended to its parent's composer and never sent.
 +
@@ -4443,7 +4447,7 @@ index 0000000..05d5583
 +    }
 +}
 +
-+mod control;
++pub(crate) mod control;
 +mod delivery;
 +mod summary;
 +pub(crate) use delivery::deliver_to_parent;
@@ -4529,27 +4533,131 @@ index 0000000..05d5583
 +#[cfg(test)]
 +#[path = "sub_thread_send/summary_removed_entries_tests.rs"]
 +mod summary_removed_entries_tests;
++
++#[cfg(test)]
++#[path = "sub_thread_send/summary_rejected_submit_tests.rs"]
++mod summary_rejected_submit_tests;
++
++#[cfg(test)]
++#[path = "sub_thread_send/choice_label_tests.rs"]
++mod choice_label_tests;
+diff --git a/crates/agent_ui/src/sub_thread_send/choice_label_tests.rs b/crates/agent_ui/src/sub_thread_send/choice_label_tests.rs
+new file mode 100644
+index 0000000..0dc50f2
+--- /dev/null
++++ b/crates/agent_ui/src/sub_thread_send/choice_label_tests.rs
+@@ -0,0 +1,68 @@
++// Story 040, task 12.3 (validation fix round 1, audit claim Q12): the two Send to Parent choices
++// carry a screen-reader label each, enabled or not, and a disabled one names why (R1.6). GPUI's
++// test windows never activate their accessibility tree, so the labels of the last render are read
++// from `control::RENDERED_CHOICE_LABELS`, the card's pattern (`tasks_card::RENDERED_ARIA_LABELS`).
++
++use gpui::{Modifiers, TestAppContext, VisualTestContext};
++
++use super::control::RENDERED_CHOICE_LABELS;
++use crate::sub_thread_test_support::*;
++
++const LAST_REPLY_LABEL: &str =
++    "Send Last Reply: put this sub-thread's last reply in the parent thread's composer";
++const SUMMARIZE_LABEL: &str = "Summarize and Send: ask this sub-thread for a summary, then put it in the parent thread's composer";
++
++fn open_menu(cx: &mut VisualTestContext) -> Vec<String> {
++    RENDERED_CHOICE_LABELS.with_borrow_mut(Vec::clear);
++    let bounds = cx
++        .debug_bounds("send-to-parent")
++        .unwrap_or_else(|| panic!("the control is painted"));
++    cx.simulate_click(bounds.center(), Modifiers::none());
++    cx.run_until_parked();
++    draw(cx);
++    RENDERED_CHOICE_LABELS.with_borrow(|labels| labels.iter().map(ToString::to_string).collect())
++}
++
++#[gpui::test]
++async fn send_to_parent_control_choices_carry_accessible_labels(cx: &mut TestAppContext) {
++    init(cx);
++    let mut rig = rig(cx).await;
++    let parent = open_conversation(&mut rig, "Parent", "parent answer");
++    let child = open_conversation(&mut rig, "Child", "child answer");
++    link(child.thread_id, parent.thread_id, &mut rig.cx);
++    draw(&mut rig.cx);
++
++    let labels = open_menu(&mut rig.cx);
++
++    assert!(
++        labels.iter().any(|label| label == LAST_REPLY_LABEL),
++        "Send Last Reply is named: {labels:?}"
++    );
++    assert!(
++        labels.iter().any(|label| label == SUMMARIZE_LABEL),
++        "Summarize and Send is named: {labels:?}"
++    );
++}
++
++#[gpui::test]
++async fn send_to_parent_control_disabled_choices_name_why(cx: &mut TestAppContext) {
++    init(cx);
++    let mut rig = rig(cx).await;
++    let parent = open_conversation(&mut rig, "Parent", "parent answer");
++    let child = open_conversation(&mut rig, "Child", "child answer");
++    link(child.thread_id, parent.thread_id, &mut rig.cx);
++    let _finish = rig.connection.defer_next_prompt_response();
++    set_composer(&child.view, "still thinking", &mut rig.cx);
++    child
++        .view
++        .update_in(&mut rig.cx, |view, window, cx| view.send(window, cx));
++    rig.cx.run_until_parked();
++    draw(&mut rig.cx);
++
++    let labels = open_menu(&mut rig.cx);
++
++    for name in ["Send Last Reply", "Summarize and Send"] {
++        let expected = format!("{name}, unavailable: Wait for the turn to end");
++        assert!(labels.contains(&expected), "{expected:?} among {labels:?}");
++    }
++}
 diff --git a/crates/agent_ui/src/sub_thread_send/control.rs b/crates/agent_ui/src/sub_thread_send/control.rs
 new file mode 100644
-index 0000000..a76736e
+index 0000000..1918051
 --- /dev/null
 +++ b/crates/agent_ui/src/sub_thread_send/control.rs
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,147 @@
 +//! Story 040, the footer control: a "Send to Parent" menu button on a sub-thread's composer, with
 +//! "Send Last Reply" and "Summarize and Send" (R1).
 +
-+use gpui::{AnyElement, Context, Entity, SharedString, Window};
++use gpui::{AnyElement, Context, Entity, Role, SharedString, Window};
 +use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 +
 +use super::{ParentLink, availability, parent_link};
 +use crate::conversation_view::ThreadView;
 +
++// GPUI's test windows never activate their accessibility tree, so tests read the choices'
++// screen-reader labels of the last render from here (the card's `RENDERED_ARIA_LABELS`).
++#[cfg(test)]
++thread_local! {
++    pub(crate) static RENDERED_CHOICE_LABELS: std::cell::RefCell<Vec<SharedString>> =
++        std::cell::RefCell::default();
++}
++
++/// A choice's screen-reader label, recorded in test builds (see `RENDERED_CHOICE_LABELS`).
++fn choice_aria_label(label: &str, state: &Result<(), SharedString>, purpose: &str) -> SharedString {
++    let aria_label = SharedString::from(match state {
++        Ok(()) => format!("{label}: {purpose}"),
++        Err(reason) => format!("{label}, unavailable: {reason}"),
++    });
++    #[cfg(test)]
++    RENDERED_CHOICE_LABELS.with_borrow_mut(|labels| labels.push(aria_label.clone()));
++    aria_label
++}
++
 +/// One choice of the menu: a selectable entry when enabled, otherwise an inert row whose tooltip
-+/// says why (R1.4, R1.5).
++/// says why (R1.4, R1.5). Both carry an accessible label (R1.6): a div with no role never reaches
++/// the accessibility tree, and `ContextMenu` labels only its own string entries, so the content
++/// is given the `Label` role.
 +fn choice(
 +    menu: ContextMenu,
 +    selector: &'static str,
 +    label: &'static str,
++    purpose: &'static str,
 +    state: Result<(), SharedString>,
 +    view: Entity<ThreadView>,
 +    run: fn(&mut ThreadView, &mut Window, &mut Context<ThreadView>),
@@ -4558,15 +4666,22 @@ index 0000000..a76736e
 +        Ok(()) => menu.custom_entry(
 +            move |_, _| {
 +                div()
++                    .id(selector)
++                    .role(Role::Label)
++                    .aria_label(choice_aria_label(label, &Ok(()), purpose))
 +                    .debug_selector(move || selector.into())
++                    .tooltip(Tooltip::text(purpose))
 +                    .child(Label::new(label))
 +                    .into_any_element()
 +            },
 +            move |window, cx| view.update(cx, |view, cx| run(view, window, cx)),
 +        ),
 +        Err(reason) => menu.custom_row(move |_, _| {
++            let state = Err(reason.clone());
 +            div()
 +                .id(selector)
++                .role(Role::Label)
++                .aria_label(choice_aria_label(label, &state, purpose))
 +                .debug_selector(move || selector.into())
 +                .tooltip(Tooltip::text(reason.clone()))
 +                .child(Label::new(label).color(Color::Disabled))
@@ -4606,6 +4721,7 @@ index 0000000..a76736e
 +                        menu,
 +                        "send-to-parent-last-reply",
 +                        "Send Last Reply",
++                        "put this sub-thread's last reply in the parent thread's composer",
 +                        last_reply,
 +                        view.clone(),
 +                        ThreadView::send_last_reply,
@@ -4614,6 +4730,7 @@ index 0000000..a76736e
 +                        menu,
 +                        "send-to-parent-summarize",
 +                        "Summarize and Send",
++                        "ask this sub-thread for a summary, then put it in the parent thread's composer",
 +                        summarize,
 +                        view,
 +                        ThreadView::summarize_and_send,
@@ -6920,15 +7037,16 @@ index 0000000..56ee1ce
 +}
 diff --git a/crates/agent_ui/src/sub_thread_send/summary.rs b/crates/agent_ui/src/sub_thread_send/summary.rs
 new file mode 100644
-index 0000000..2685a4d
+index 0000000..a22b453
 --- /dev/null
 +++ b/crates/agent_ui/src/sub_thread_send/summary.rs
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,195 @@
 +//! Story 040, Summarize and Send: the sub-thread is asked for a summary in a visible turn, and
 +//! only that turn's clean end delivers it (design.md, SendToParentControl; R3).
 +
-+use acp_thread::{AcpThread, AcpThreadEvent, AgentThreadEntry};
++use acp_thread::{AcpThread, AcpThreadEvent, AgentThreadEntry, SubmissionId, SubmissionState};
 +use agent_client_protocol::schema::v2 as acp_v2;
++use gpui::SharedString;
 +use gpui::{Context, Task, Window};
 +
 +use super::{
@@ -6951,6 +7069,28 @@ index 0000000..2685a4d
 +    Passed,
 +}
 +
++fn is_summary_request(content: &[acp_v2::ContentBlock]) -> bool {
++    content.iter().any(
++        |block| matches!(block, acp_v2::ContentBlock::Text(text) if text.text == SUMMARY_REQUEST),
++    )
++}
++
++/// The agent's refusal of the summary request itself. On the reported-activity transport it is
++/// only a settled submission: no `Error` and no turn follow, so nothing else would clear the
++/// summary (R3.3). The legacy transport also ends that turn with `Error`, which stays its path.
++fn rejected_summary_request(thread: &AcpThread, id: SubmissionId) -> Option<SharedString> {
++    if !thread.uses_reported_activity() {
++        return None;
++    }
++    let record = thread.submission(id)?;
++    match &record.state {
++        SubmissionState::Failed(error) if is_summary_request(&record.content) => {
++            Some(error.clone())
++        }
++        _ => None,
++    }
++}
++
 +fn summary_turn(thread: &AcpThread, pending: &PendingSummary) -> SummaryTurn {
 +    let user_messages = thread
 +        .entries()
@@ -6964,9 +7104,7 @@ index 0000000..2685a4d
 +    let mut request = None;
 +    let mut latest = None;
 +    for (index, message) in user_messages {
-+        let is_request = message.content.source_blocks().iter().any(|block| {
-+            matches!(block, acp_v2::ContentBlock::Text(text) if text.text == SUMMARY_REQUEST)
-+        });
++        let is_request = is_summary_request(message.content.source_blocks());
 +        if is_request && request.is_none() {
 +            request = Some(index);
 +        }
@@ -7010,7 +7148,8 @@ index 0000000..2685a4d
 +        log::info!("zeo_sub_thread event=summary_requested sub_session={session}");
 +        let request = acp_v2::ContentBlock::Text(acp_v2::TextContent::new(SUMMARY_REQUEST));
 +        // Upstream's own send of a ready message: it never reads nor clears the composer. A
-+        // turn that fails ends with `AcpThreadEvent::Error`, which clears the summary (R3.3).
++        // turn that fails ends with `AcpThreadEvent::Error`, and a request the agent rejects
++        // settles its submission `Failed`; either clears the summary (R3.3).
 +        self.send_content(
 +            Task::ready(Ok(Some((vec![request], Vec::new())))),
 +            false,
@@ -7031,6 +7170,18 @@ index 0000000..2685a4d
 +        let Some(pending) = self.send_to_parent.pending_summary.as_ref() else {
 +            return;
 +        };
++        if let AcpThreadEvent::SubmissionUpdated(id) = event {
++            if let Some(error) = rejected_summary_request(self.thread.read(cx), *id) {
++                self.send_to_parent.pending_summary = None;
++                log::warn!(
++                    "zeo_sub_thread event=summary_failed sub_session={} reason=submit_rejected",
++                    self.session_id
++                );
++                self.send_to_parent.notice = Some(format!("Summary not sent: {error}").into());
++                cx.notify();
++            }
++            return;
++        }
 +        let turn = summary_turn(self.thread.read(cx), pending);
 +        let finished_cleanly = match (event, turn) {
 +            // Not bound to the request's entry: a refused turn is truncated from its user
@@ -7410,6 +7561,84 @@ index 0000000..21b9563
 +        block("Child", "the summary")
 +    );
 +    assert!(!pending(&child, &rig.cx));
++}
+diff --git a/crates/agent_ui/src/sub_thread_send/summary_rejected_submit_tests.rs b/crates/agent_ui/src/sub_thread_send/summary_rejected_submit_tests.rs
+new file mode 100644
+index 0000000..2999cdb
+--- /dev/null
++++ b/crates/agent_ui/src/sub_thread_send/summary_rejected_submit_tests.rs
+@@ -0,0 +1,72 @@
++// Story 040, task 12.2 (validation fix round 1, audit finding "Happy/error path symmetry"):
++// on the reported-activity transport a Summarize submit the agent rejects settles `Failed` and
++// emits only `SubmissionUpdated` — no `Error`, no turn — so the summary must be cleared there,
++// with the failure as the notice, instead of leaving both choices on "Wait for the turn to end"
++// with nothing running (R3.3, R3.5; tasks.md 7.2 ToDo 1).
++
++use agent_client_protocol::schema::v2 as acp_v2;
++use futures::channel::oneshot;
++use gpui::{SharedString, TestAppContext};
++
++use super::receipt_test_support::*;
++use super::{Availability, SUMMARY_REQUEST, availability, parent_link};
++use crate::sub_thread_test_support::*;
++
++#[gpui::test]
++async fn summarize_and_send_rejected_submit_on_the_receipt_transport_clears_the_summary(
++    cx: &mut TestAppContext,
++) {
++    init(cx);
++    let mut rig = rig(cx).await;
++    let parent = open_conversation(&mut rig, "Parent", "parent answer");
++    let (child, connection) = open_receipt_conversation(&mut rig, "Child", "child answer");
++    link(child.thread_id, parent.thread_id, &mut rig.cx);
++
++    let receipt: oneshot::Sender<anyhow::Result<acp_v2::PromptResponse>> =
++        connection.defer_next_receipt_response();
++    child.view.update_in(&mut rig.cx, |view, window, cx| {
++        view.summarize_and_send(window, cx)
++    });
++    rig.cx.run_until_parked();
++    assert_eq!(
++        connection.take_receipt_prompt(),
++        Some(vec![SUMMARY_REQUEST.into()]),
++        "precondition: the summary request went to the agent"
++    );
++    let pending = |rig: &Rig| {
++        child.view.read_with(&rig.cx, |view, _| {
++            view.send_to_parent.pending_summary.is_some()
++        })
++    };
++    assert!(pending(&rig), "precondition: the summary is pending");
++
++    receipt
++        .send(Err(anyhow::anyhow!("the agent refused the message")))
++        .expect("the summary request waits for its receipt");
++    rig.cx.run_until_parked();
++
++    assert!(!pending(&rig), "a rejected submit no longer waits");
++    let notice = notice_of(&child.view, &rig.cx);
++    assert_eq!(
++        notice.as_deref(),
++        Some("Summary not sent: the agent refused the message"),
++        "the failure is shown under the control"
++    );
++    let choices = child.view.read_with(&rig.cx, |view, cx| {
++        let link = parent_link(view.root_thread_id, cx);
++        let Availability {
++            last_reply,
++            summarize,
++        } = availability(&link, view.thread.read(cx), &view.send_to_parent);
++        (
++            last_reply.map_err(|tooltip: SharedString| tooltip.to_string()),
++            summarize.map_err(|tooltip: SharedString| tooltip.to_string()),
++        )
++    });
++    assert_eq!(choices, (Ok(()), Ok(())), "both choices are offered again");
++    assert_eq!(
++        composer_text(&parent.view, &rig.cx),
++        "",
++        "nothing delivered"
++    );
 +}
 diff --git a/crates/agent_ui/src/sub_thread_send/summary_removed_entries_tests.rs b/crates/agent_ui/src/sub_thread_send/summary_removed_entries_tests.rs
 new file mode 100644
