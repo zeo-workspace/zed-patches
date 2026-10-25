@@ -2135,6 +2135,11 @@ src_prepare() {
 			# thread and extends 0036's config recorder; 0052, 0057, 0058, 0063
 			# and 0067 are generated on top of it.
 			"${FILESDIR}/0070-agent-ui-sub-thread-from-selection.patch"
+			# 0071: Send to Parent in a sub-thread's footer, and sub-threads as
+			# items of 0035's panel and 0037's card (task history steps 5 and
+			# 6). After 0070, whose parent links it reads; 0052, 0057, 0058,
+			# 0063 and 0067 are regenerated on top of it.
+			"${FILESDIR}/0071-agent-send-to-parent-and-sub-thread-items.patch"
 		)
 	fi
 
