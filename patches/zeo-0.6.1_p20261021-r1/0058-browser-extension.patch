@@ -605,7 +605,7 @@ index b3c9b39..66b9f67 100644
  
  [dev-dependencies]
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 1c9430e..38b702c 100644
+index b6952e9..0c8a1c4 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -7,6 +7,8 @@ mod agent_panel;
@@ -617,7 +617,7 @@ index 1c9430e..38b702c 100644
  mod buffer_codegen;
  mod completion_provider;
  mod config_options;
-@@ -95,7 +97,10 @@ pub use crate::agent_session_router::{
+@@ -99,7 +101,10 @@ pub use crate::agent_session_router::{
      OpenAgentSessionOptions, OpenedAgentSession, open_agent_session,
  };
  pub use crate::inline_assistant::InlineAssistant;
@@ -629,7 +629,7 @@ index 1c9430e..38b702c 100644
  pub use crate::message_editor::MessageEditorEvent;
  pub use crate::task_label::{
      TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
-@@ -1113,6 +1118,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1118,6 +1123,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
  #[cfg(test)]
  mod slash_command_in_code_block_tests;
  
@@ -6705,7 +6705,7 @@ index 0000000..82bee58
 +    }
 +}
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 31b488a..69a4722 100644
+index 8a98866..8cca973 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
 @@ -740,7 +740,7 @@ pub struct StateChange;
@@ -6718,10 +6718,10 @@ index 31b488a..69a4722 100644
      selection: Option<&thread_view::PermissionSelection>,
      is_allow: bool,
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 15ed1e9..9436307 100644
+index 6a3f3e7..25fc9ed 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -1399,7 +1399,7 @@ impl ThreadView {
+@@ -1404,7 +1404,7 @@ impl ThreadView {
      /// Resolves the message editor's contents into content blocks. For profiles
      /// that do not enable any tools, directory mentions are expanded to inline
      /// file contents since the agent can't read files on its own.
@@ -6730,7 +6730,7 @@ index 15ed1e9..9436307 100644
          &self,
          message_editor: &Entity<MessageEditor>,
          cx: &mut App,
-@@ -2201,6 +2201,89 @@ impl ThreadView {
+@@ -2206,6 +2206,89 @@ impl ThreadView {
          self.send_content(contents_task, false, window, cx);
      }
  
@@ -6820,7 +6820,7 @@ index 15ed1e9..9436307 100644
      pub fn send_content(
          &mut self,
          contents_task: Task<
-@@ -2210,6 +2293,23 @@ impl ThreadView {
+@@ -2215,6 +2298,23 @@ impl ThreadView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) {
@@ -6844,7 +6844,7 @@ index 15ed1e9..9436307 100644
          let session_id = self.thread.read(cx).session_id().clone();
          let parent_session_id = self.thread.read(cx).parent_session_id().cloned();
          let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
-@@ -2242,9 +2342,11 @@ impl ThreadView {
+@@ -2247,9 +2347,11 @@ impl ThreadView {
                  (!uses_reported_activity).then(|| this.start_turn(cx))
              })?;
  
@@ -6859,7 +6859,7 @@ index 15ed1e9..9436307 100644
  
              let _ = this.update(cx, |this, cx| {
                  this.list_state.scroll_to_end();
-@@ -2311,6 +2413,9 @@ impl ThreadView {
+@@ -2316,6 +2418,9 @@ impl ThreadView {
                  }
              })?;
              let submission_id = send.id;
@@ -6869,7 +6869,7 @@ index 15ed1e9..9436307 100644
  
              let _ = this.update(cx, |this, cx| {
                  this.current_submission = Some(submission_id);
-@@ -2434,94 +2539,14 @@ impl ThreadView {
+@@ -2439,94 +2544,14 @@ impl ThreadView {
          cx.notify();
      }
  
@@ -6971,7 +6971,7 @@ index 15ed1e9..9436307 100644
  
          let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
          let session_id = self.thread.read(cx).session_id().clone();
-@@ -2542,6 +2567,99 @@ impl ThreadView {
+@@ -2547,6 +2572,99 @@ impl ThreadView {
          );
      }
  
@@ -7071,7 +7071,7 @@ index 15ed1e9..9436307 100644
      pub fn cancel_generation(&mut self, cx: &mut Context<Self>) {
          self.thread_retry_status.take();
          self.thread_error.take();
-@@ -15002,6 +15120,7 @@ pub(crate) fn open_link(
+@@ -15009,6 +15127,7 @@ pub(crate) fn open_link(
              MentionUri::TerminalSelection { .. } => {}
              MentionUri::GitDiff { .. } => {}
              MentionUri::MergeConflict { .. } => {}
