@@ -282,7 +282,7 @@ index 78bd403..2fe7b22 100644
      }
  
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 38b702c..f53dfb0 100644
+index 0c8a1c4..6c1d9c6 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -15,7 +15,11 @@ mod config_options;
@@ -297,7 +297,7 @@ index 38b702c..f53dfb0 100644
  mod diagnostics;
  pub mod draft_prompt_store;
  mod entry_view_state;
-@@ -307,6 +311,8 @@ pub enum AgentThreadSource {
+@@ -312,6 +316,8 @@ pub enum AgentThreadSource {
      AgentPanel,
      GitPanel,
      Sidebar,
@@ -306,7 +306,7 @@ index 38b702c..f53dfb0 100644
  }
  
  impl AgentThreadSource {
-@@ -315,6 +321,7 @@ impl AgentThreadSource {
+@@ -320,6 +326,7 @@ impl AgentThreadSource {
              Self::AgentPanel => "agent_panel",
              Self::GitPanel => "git_panel",
              Self::Sidebar => "sidebar",
@@ -314,7 +314,7 @@ index 38b702c..f53dfb0 100644
          }
      }
  }
-@@ -770,8 +777,13 @@ pub fn init(
+@@ -775,8 +782,13 @@ pub fn init(
      context_server_configuration::init(language_registry, fs.clone(), cx);
      thread_metadata_store::init(cx);
      thread_organization::init(cx);

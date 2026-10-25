@@ -495,10 +495,10 @@ index 66b9f67..a19c044 100644
  editor = { workspace = true, features = ["test-support"] }
  eval_utils.workspace = true
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index f53dfb0..5ce4532 100644
+index 6c1d9c6..73d805d 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -54,6 +54,8 @@ pub mod thread_worktree_archive;
+@@ -58,6 +58,8 @@ pub mod thread_worktree_archive;
  pub mod threads_archive_view;
  mod ui;
  mod unicode_confusables;
@@ -507,7 +507,7 @@ index f53dfb0..5ce4532 100644
  
  use std::rc::Rc;
  use std::sync::Arc;
-@@ -774,6 +776,7 @@ pub fn init(
+@@ -779,6 +781,7 @@ pub fn init(
          init_language_model_settings(cx);
      }
      agent_panel::init(cx);
@@ -515,7 +515,7 @@ index f53dfb0..5ce4532 100644
      context_server_configuration::init(language_registry, fs.clone(), cx);
      thread_metadata_store::init(cx);
      thread_organization::init(cx);
-@@ -1127,6 +1130,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1132,6 +1135,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
      Some(command)
  }
  
@@ -560,7 +560,7 @@ index f53dfb0..5ce4532 100644
  mod slash_command_in_code_block_tests;
  
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
-index 69a4722..8091e3d 100644
+index 8cca973..5f2374c 100644
 --- a/crates/agent_ui/src/conversation_view.rs
 +++ b/crates/agent_ui/src/conversation_view.rs
 @@ -115,7 +115,7 @@ mod sent_history;
@@ -573,7 +573,7 @@ index 69a4722..8091e3d 100644
  pub use thread_view::*;
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 9436307..746acad 100644
+index 25fc9ed..b7e4332 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -27,12 +27,22 @@ use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
@@ -599,7 +599,7 @@ index 9436307..746acad 100644
  
  use db::kvp::KeyValueStore;
  use gpui::List;
-@@ -727,7 +737,27 @@ pub struct ThreadView {
+@@ -730,7 +740,27 @@ pub struct ThreadView {
      dismissed_skill_loading_issues: HashSet<SkillLoadingIssue>,
      pub(crate) thread_search_bar: Option<Entity<super::thread_search_bar::ThreadSearchBar>>,
      pub(crate) thread_search_visible: bool,
@@ -627,7 +627,7 @@ index 9436307..746acad 100644
  impl Focusable for ThreadView {
      fn focus_handle(&self, _cx: &App) -> FocusHandle {
          self.focus_handle.clone()
-@@ -1235,12 +1265,14 @@ impl ThreadView {
+@@ -1240,12 +1270,14 @@ impl ThreadView {
              dismissed_skill_loading_issues: HashSet::default(),
              thread_search_bar: None,
              thread_search_visible: false,
@@ -642,7 +642,7 @@ index 9436307..746acad 100644
          let list_state_for_scroll = this.list_state.clone();
          let thread_view = cx.entity().downgrade();
  
-@@ -5631,6 +5663,25 @@ impl ThreadView {
+@@ -5636,6 +5668,25 @@ impl ThreadView {
          let has_messages = self.has_visible_conversation(cx);
          let fills_container = !has_messages || editor_expanded;
          let composer_is_read_only = self.message_editor.read(cx).editor().read(cx).read_only(cx);
@@ -665,10 +665,10 @@ index 9436307..746acad 100644
 +        let voice_strip = voice
 +            .as_ref()
 +            .and_then(|(state, _)| render_voice_strip(state, cx));
+         let send_to_parent = self.render_send_to_parent(window, cx);
          let discard_draft_button = composer_is_read_only.then(|| {
              div()
-                 .debug_selector(|| "discard-protected-draft".into())
-@@ -5643,6 +5694,7 @@ impl ThreadView {
+@@ -5649,6 +5700,7 @@ impl ThreadView {
                                  editor.set_read_only(false, cx);
                                  editor.set_message(Vec::new(), window, cx);
                              });
@@ -676,15 +676,15 @@ index 9436307..746acad 100644
                              this.clear_thread_error(cx);
                          })),
                  )
-@@ -5676,6 +5728,7 @@ impl ThreadView {
+@@ -5682,6 +5734,7 @@ impl ThreadView {
                      .flex_grow_0()
                      .justify_between()
                      .gap_2()
 +                    .children(voice_strip)
+                     .children(send_to_parent)
                      .child(
                          v_flex()
-                             .relative()
-@@ -5772,6 +5825,7 @@ impl ThreadView {
+@@ -5779,6 +5832,7 @@ impl ThreadView {
                                              .children(self.mode_selector.clone())
                                              .children(self.model_selector.clone()),
                                      })
@@ -692,7 +692,7 @@ index 9436307..746acad 100644
                                      .child(self.render_send_button(cx)),
                              ),
                      ),
-@@ -8873,6 +8927,259 @@ impl ThreadView {
+@@ -8880,6 +8934,259 @@ impl ThreadView {
          self.message_editor.read(cx).set_local_commands(commands);
      }
  
@@ -952,7 +952,7 @@ index 9436307..746acad 100644
      /// Mirrors the conversation's pending question into the composer's key
      /// context. Read on every render rather than on the elicitation events, so
      /// every way a question ends -- answered, declined, cancelled, the turn
-@@ -14517,6 +14824,8 @@ impl Render for ThreadView {
+@@ -14524,6 +14831,8 @@ impl Render for ThreadView {
          // renders (settings, connection state, feature flags).
          self.sync_local_commands(cx);
          self.sync_question_pending(cx);
@@ -961,7 +961,7 @@ index 9436307..746acad 100644
  
          let has_messages = self.has_visible_conversation(cx);
          let list_state = self.list_state.clone();
-@@ -14541,8 +14850,16 @@ impl Render for ThreadView {
+@@ -14548,8 +14857,16 @@ impl Render for ThreadView {
              });
  
          v_flex()

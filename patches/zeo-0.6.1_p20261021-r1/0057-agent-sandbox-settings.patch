@@ -13510,7 +13510,7 @@ index 0000000..51b1d6b
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index ad1cf0f..1c9430e 100644
+index 9aff091..b6952e9 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -1,9 +1,11 @@
@@ -13525,7 +13525,7 @@ index ad1cf0f..1c9430e 100644
  mod agent_session_router;
  mod buffer_codegen;
  mod completion_provider;
-@@ -1114,6 +1116,9 @@ mod slash_command_in_code_block_tests;
+@@ -1119,6 +1121,9 @@ mod slash_command_in_code_block_tests;
  #[cfg(test)]
  mod devtools_mention_tests;
  
@@ -13536,10 +13536,10 @@ index ad1cf0f..1c9430e 100644
  mod devtools_delivery_tests;
  
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index d8caf19..15ed1e9 100644
+index af69c15..6a3f3e7 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
-@@ -6238,6 +6238,22 @@ impl ThreadView {
+@@ -6245,6 +6245,22 @@ impl ThreadView {
          )
      }
  

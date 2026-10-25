@@ -410,6 +410,17 @@
 # already in place. 0052, 0057, 0058, 0063 and 0067 are generated on top of it.
 # Numbered 0070 because 0069 was the last number taken (story 039).
 0070-agent-ui-sub-thread-from-selection.patch
+# 0071: Send to Parent and sub-thread items -- a sub-thread's footer gets
+# "Send Last Reply" and "Summarize and Send", which put that text into the
+# parent's composer unsent (opening a closed parent through 0040's router), and
+# 0037's card and 0035's panel list sub-threads as a second kind of item, Running
+# or Idle, archived and deleted like the adapter's tasks. Appends two steps to
+# the task history (5: origin, 6: deleted, a tombstone so a deleted item stays
+# deleted) and re-pins 0056's log_bytes test by index. Last of this group BY
+# DEPENDENCY: it reads 0070's parent links. 0052, 0057, 0058, 0063 and 0067 are
+# regenerated on top of it. Numbered 0071 because 0070 was the last number
+# taken (story 040).
+0071-agent-send-to-parent-and-sub-thread-items.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
