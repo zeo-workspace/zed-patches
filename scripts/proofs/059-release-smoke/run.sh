@@ -439,8 +439,13 @@ printf 'reply: phrase from %s,%s to %s,%s; right-click at %s,%s\n' "${L0}" "${T0
 # The press must land on the first glyph: one in the padding left of it selects nothing (039).
 SELECT="$(jq -cn --argjson a "$((L0 + 2))" --argjson b "$((T0 + 6))" --argjson c "$((L2 + W2 + 2))" \
 	--argjson d "$((T2 + 6))" '{drag: [$a, $b, $c, $d]}')"
+# The sidebar lists by recency: opening Marmalade and Forkling in phase 2 moved them up, and the
+# relaunch keeps that order, so phase 1's point would land on Apricot (Red run, 2026-10-25).
+# Marmalade is re-located in phase 2's last capture, inside the sidebar box.
+point p2-child.png Marmalade sidebar top M3
+printf 'phase 3: Marmalade at %s,%s (phase 1: %s,%s)\n' "${M3X}" "${M3Y}" "${MX}" "${MY}"
 harness 3 "$(steps 3 "${OPEN[@]}" \
-	"$(at click "${MX}" "${MY}")" '{"sleep": 4}' "${AWAY}" '{"sleep": 1}' "$(shot p3-parent.png)" \
+	"$(at click "${M3X}" "${M3Y}")" '{"sleep": 4}' "${AWAY}" '{"sleep": 1}' "$(shot p3-parent.png)" \
 	"$(at rclick "${QX}" "${QY}")" '{"sleep": 2}' "$(shot p3-menu-no-selection.png)" '{"key": ["Escape"]}' '{"sleep": 1}' \
 	"${SELECT}" '{"sleep": 1}' "$(at rclick "${QX}" "${QY}")" '{"sleep": 2}' "$(shot p3-menu-selection.png)" \
 	'{"key": ["Escape"]}' '{"sleep": 1}' \
