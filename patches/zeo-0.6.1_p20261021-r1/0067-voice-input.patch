@@ -495,7 +495,7 @@ index 66b9f67..a19c044 100644
  editor = { workspace = true, features = ["test-support"] }
  eval_utils.workspace = true
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 6c1d9c6..73d805d 100644
+index 0475b45..cce155f 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -58,6 +58,8 @@ pub mod thread_worktree_archive;

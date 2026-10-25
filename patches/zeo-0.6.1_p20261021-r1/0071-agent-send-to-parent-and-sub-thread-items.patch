@@ -3369,7 +3369,7 @@ index 0000000..db30b58
 +    assert_alpha_stays_deleted(&restarted, &db, &links, &mut rig).await;
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index ac7eefe..97c02c1 100644
+index ac7eefe..e97a26b 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -28,6 +28,10 @@ mod model_selector_popover;
@@ -3383,14 +3383,14 @@ index ac7eefe..97c02c1 100644
  mod task_label;
  mod tasks_card;
  mod terminal_codegen;
-@@ -101,6 +105,7 @@ pub use crate::tasks_card::task_log;
- pub use crate::tasks_card::{
-     TaskActivity, TaskKey, TaskRecord, TasksCard, TasksCardEvent, ThreadTitleChanged,
+@@ -93,6 +97,7 @@ pub use crate::agent_session_router::{
  };
+ pub use crate::inline_assistant::InlineAssistant;
+ pub use crate::message_editor::MessageEditorEvent;
 +pub use crate::sub_thread_reporter::{SubThreadActivity, SubThreadRecord};
- pub use crate::thread_metadata_store::ThreadId;
- pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
- pub use conversation_view::open_markdown_in_workspace;
+ pub use crate::task_label::{
+     TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
+ };
 diff --git a/crates/agent_ui/src/conversation_view.rs b/crates/agent_ui/src/conversation_view.rs
 index 31b488a..8a98866 100644
 --- a/crates/agent_ui/src/conversation_view.rs
@@ -7935,7 +7935,7 @@ index 0000000..eca185a
 +    cx.debug_bounds(selector).is_some()
 +}
 diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
-index b806f62..db26806 100644
+index b806f62..8d491ba 100644
 --- a/crates/agent_ui/src/tasks_card.rs
 +++ b/crates/agent_ui/src/tasks_card.rs
 @@ -31,9 +31,12 @@ use ui::{ButtonLike, Chip, CommonAnimationExt as _, Tooltip, prelude::*};
@@ -7945,8 +7945,8 @@ index b806f62..db26806 100644
 +use crate::sub_thread_reporter::SubThreadReporter;
  use crate::task_label::{TaskLabels, collapse_label, display_label};
  
- pub mod task_log;
 +mod sub_thread_row;
+ pub mod task_log;
 +pub use sub_thread_row::SubThreadRow;
  mod tray;
  
@@ -8075,17 +8075,34 @@ index b806f62..db26806 100644
          self.schedule_expiry(cx);
          cx.notify();
      }
-@@ -1397,7 +1444,8 @@ impl TasksCard {
+@@ -1397,15 +1444,17 @@ impl TasksCard {
      }
  
      fn any_running(&self, cx: &App) -> bool {
 -        self.held_threads()
+-            .filter_map(|held| held.thread.upgrade())
+-            .any(|thread| {
+-                thread
+-                    .read(cx)
+-                    .tasks()
+-                    .iter()
+-                    .any(|task| task.status.is_running())
+-            })
 +        self.any_sub_thread_running()
-+            || self.held_threads()
-             .filter_map(|held| held.thread.upgrade())
-             .any(|thread| {
-                 thread
-@@ -1413,7 +1461,7 @@ impl TasksCard {
++            || self
++                .held_threads()
++                .filter_map(|held| held.thread.upgrade())
++                .any(|thread| {
++                    thread
++                        .read(cx)
++                        .tasks()
++                        .iter()
++                        .any(|task| task.status.is_running())
++                })
+     }
+ 
+     fn held_threads(&self) -> impl Iterator<Item = &HeldThread> {
+@@ -1413,7 +1462,7 @@ impl TasksCard {
      }
  
      /// A live thread of `session_id` that the card holds, whatever its tasks.
@@ -8094,7 +8111,7 @@ index b806f62..db26806 100644
          self.held_threads()
              .filter(|held| &held.session_id == session_id)
              .find_map(|held| held.thread.upgrade())
-@@ -1521,6 +1569,7 @@ impl TasksCard {
+@@ -1521,6 +1570,7 @@ impl TasksCard {
          for record in interrupted {
              cx.emit(TaskActivity::Ended(record));
          }
@@ -8102,7 +8119,7 @@ index b806f62..db26806 100644
          self.schedule_expiry(cx);
      }
  }
-@@ -1667,6 +1716,7 @@ impl TasksCard {
+@@ -1667,6 +1717,7 @@ impl TasksCard {
              title,
              project,
              rows,
@@ -8110,7 +8127,7 @@ index b806f62..db26806 100644
          } = group;
          let open_focus_handle = self
              .group_focus_handles
-@@ -1720,6 +1770,11 @@ impl TasksCard {
+@@ -1720,6 +1771,11 @@ impl TasksCard {
                  rows.into_iter()
                      .map(|row| self.render_row(&session_id, row, now, cx)),
              )
@@ -8122,23 +8139,20 @@ index b806f62..db26806 100644
              .into_any_element()
      }
  
-@@ -2142,6 +2197,15 @@ impl TasksCard {
+@@ -2142,6 +2198,12 @@ impl TasksCard {
                      .rows
                      .iter()
                      .map(|row| (group.session_id.clone(), row.task.id.clone()))
 +                    .chain(group.sub_threads.iter().map(|row| {
 +                        (
 +                            row.record.sub_session.clone(),
-+                            AgentTaskId::from(format!(
-+                                "zeo-sub-thread:{}",
-+                                row.record.sub_session
-+                            )),
++                            AgentTaskId::from(format!("zeo-sub-thread:{}", row.record.sub_session)),
 +                        )
 +                    }))
              })
              .collect();
          self.row_focus_handles
-@@ -2521,7 +2585,7 @@ fn records_of(thread: &AcpThread) -> Vec<TaskRecord> {
+@@ -2521,7 +2583,7 @@ fn records_of(thread: &AcpThread) -> Vec<TaskRecord> {
  }
  
  /// Milliseconds since the Unix epoch, negative before it, saturating at `i64`'s range.
