@@ -638,7 +638,7 @@ index 5fa6989..1fa5eb3 100644
          Either::Left((output, _)) => Some(output),
          Either::Right(((), _)) => None,
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 97c02c1..9aff091 100644
+index e97a26b..cdb9dc5 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -11,6 +11,7 @@ mod config_options;
@@ -655,8 +655,8 @@ index 97c02c1..9aff091 100644
  pub use crate::inline_assistant::InlineAssistant;
 +pub use crate::mention_set::{DomRect, DomSummary};
  pub use crate::message_editor::MessageEditorEvent;
+ pub use crate::sub_thread_reporter::{SubThreadActivity, SubThreadRecord};
  pub use crate::task_label::{
-     TASK_LABEL_MAX_CHARS, TaskLabels, collapse_label, display_label, normalize_user_label,
 @@ -767,6 +769,7 @@ pub fn init(
      thread_metadata_store::init(cx);
      thread_organization::init(cx);

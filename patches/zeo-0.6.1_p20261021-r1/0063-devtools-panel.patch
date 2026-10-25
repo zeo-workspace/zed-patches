@@ -282,7 +282,7 @@ index 78bd403..2fe7b22 100644
      }
  
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 0c8a1c4..6c1d9c6 100644
+index 46dd209..0475b45 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -15,7 +15,11 @@ mod config_options;
