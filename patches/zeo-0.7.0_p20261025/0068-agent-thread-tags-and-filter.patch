@@ -92,6 +92,15 @@ adapter. The claude-agent-acp-plus patches that also edit these files
 (0015 and 0028-0030 among them), 0063 and 0067 are generated on top of
 it.
 
+a5c4ca8b review (2026-10-25, story 061): upstream's threads-db index is not a
+numbered migration: ThreadsDatabase::new now runs `CREATE INDEX IF NOT EXISTS
+threads_list_metadata ON threads(...)`, a covering index for its listing query,
+in the separate threads database. No patch touches crates/agent/src/db.rs. This
+patch adds no storage of its own; it reads 0048's ThreadOrganizationDb domain;
+sqlez keys migrations per domain, so nothing collides with upstream's numbering,
+and the `threads` table and the index's columns are untouched. No code change
+needed.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 

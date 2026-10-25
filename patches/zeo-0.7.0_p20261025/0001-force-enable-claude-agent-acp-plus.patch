@@ -70,11 +70,12 @@ HOW TO RE-CHECK THIS HEADER, IN ONE COMMAND
 
     rg -n 'AcpBetaFeatureFlag' crates/
 
-At 92447a17 that yields exactly two non-test call sites:
-acp_thread/src/acp_thread.rs:6948 (the per-turn token count, item 1) and
-agent_servers/src/acp.rs:131 (the protocol choice, below), plus the
-declaration, two imports, and `cx.update_flags(..)` helpers inside `#[cfg(test)]`
-blocks. If that set changes, rewrite this header. If it empties out, or if every
+At a5c4ca8b that yields three non-test call sites:
+acp_thread/src/acp_thread.rs:8103 (the per-turn token count, item 1),
+agent_servers/src/acp.rs:142 (the protocol choice, below) and
+agent_servers/src/acp/v1.rs:671 (the v1 `subagents` client capability, see the
+a5c4ca8b review below), plus the declaration, three imports, and
+`cx.update_flags(..)` helpers inside `#[cfg(test)]` blocks. If that set changes, rewrite this header. If it empties out, or if every
 remaining site gains an unconditional fallback, drop the patch from `PATCHES` in
 the ebuild with a comment naming what superseded it.
 
@@ -120,6 +121,18 @@ adapter process, and its startup time, per connection. 0057 makes both
 attempts start a jailed command the same way. The selection tests' flag-off
 rows cannot be set up while the flag is forced, so the hunks below drop them
 and say so.
+
+a5c4ca8b review (2026-10-25, story 061): acp-beta now gates a third thing. v1's
+AcpConnection::stdio offers `clientCapabilities.subagents` only with the flag
+(acp/v1.rs:671, through client_capabilities_for_agent), and derives
+accepts_subagent_updates from it; without it, SubagentUpdate and SessionMessage
+notifications are dropped with a warning. Forced on, every Zeo build advertises
+the capability to every v1 agent and renders the subagent sessions they announce.
+Claude Agent (Plus) emits no SubagentUpdate, so nothing changes for it; upstream's
+claude-agent-acp does, and its subagents appear natively. The flag-off row of
+upstream's stdio_offers_subagents_only_behind_acp_beta cannot be set up, so this
+patch drops it like the selection tests' rows. A setting to switch the forcing
+off is story 064's.
 ---
 
 diff --git a/crates/agent_servers/src/acp.rs b/crates/agent_servers/src/acp.rs

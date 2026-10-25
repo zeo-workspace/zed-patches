@@ -69,6 +69,15 @@ its description, a 79-character rename stored as 60, kept across a restart.
 (0.2.3_p20261009): a duplicate test of the dock fallback is removed from persistence_tests
 -- dock_default_tests already covers it. (Here because this patch is the last to
 touch that file.)
+
+a5c4ca8b review (2026-10-25, story 061): upstream's threads-db index is not a
+numbered migration: ThreadsDatabase::new now runs `CREATE INDEX IF NOT EXISTS
+threads_list_metadata ON threads(...)`, a covering index for its listing query,
+in the separate threads database. No patch touches crates/agent/src/db.rs. This
+patch appends step 2 (`ALTER TABLE agent_task_history ADD COLUMN label`) to its
+own AgentTaskHistoryDb domain; sqlez keys migrations per domain, so nothing
+collides with upstream's numbering, and the `threads` table and the index's
+columns are untouched. No code change needed.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock

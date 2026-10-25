@@ -68,6 +68,16 @@ docs URL and, above all, `poll_for_updates() == false` -- what keeps Zeo from
 replacing itself with an official Zed. `zeo_accepts_the_stable_wasm_api_range`
 pins wit.rs's arm: Zeo installs from Zed's stable registry, so it must accept
 exactly Stable's range. Each fails with its arm reverted.
+
+a5c4ca8b review (2026-10-25, story 061): upstream now holds credential reads
+while `disable_ai` is set, but the gate lives in language_model's api_key.rs
+(set_credentials_read_gate, installed by language_models::init) and covers only
+the language-model API keys. The credentials crates changed additively: a
+default write_credentials_if_not_exists, a macOS override, a test-support fake.
+This patch's one credentials hunk -- ReleaseChannel::Zeo in the real-keychain arm
+of zed_credentials_provider's new() -- is outside all of it, so Zeo still uses
+the system keychain like Stable, and the ACP adapters, which read no key through
+api_key.rs, are untouched. No code change needed.
 ---
 
 diff --git a/crates/auto_update/src/auto_update.rs b/crates/auto_update/src/auto_update.rs

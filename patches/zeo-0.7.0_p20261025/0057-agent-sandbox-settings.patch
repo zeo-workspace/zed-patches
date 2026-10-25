@@ -124,6 +124,16 @@ sandbox_hook_v2_tests -- a v2 start spawns once, in the root, with the
 cleared env, and its record ends with the connection; a v1 fallback spawns
 twice, both cleared, the refused process ends and the record follows the
 live one.
+
+a5c4ca8b review (2026-10-25, story 061): upstream's only Linux sandbox change
+is in AcpThread::create_terminal, which builds the shell non_interactive() when a
+sandbox_wrap is present. That wrap is Zed's own sandbox for the native agent's
+terminal tool (passed from agent.rs, applied in acp_thread's terminal.rs); the
+terminal and terminal_view diffs only move to Modifiers::secondary(cx). This
+patch jails the adapter process at spawn and leaves the native agent out of
+scope, so the two never meet: argv, cleared env, v2 spawn and fail-closed are
+unchanged. Terminals an ACP agent asks Zeo to create still run outside the jail,
+as before. No code change needed.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
