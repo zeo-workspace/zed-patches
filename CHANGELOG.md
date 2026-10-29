@@ -31,6 +31,51 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.7.0_p20261025] — 2026-10-28 (tagged)
+
+A snapshot rebuild of Zeo 0.7.0 (story 061): the series carried from Zed `92447a17`
+onto `a5c4ca8b` (1.27.0). Zeo's version stays 0.7.0 and `zeo/CHANGELOG.md` gains no
+entry, because no fix changed what a user sees.
+
+### Changed
+
+- The series reached `a5c4ca8b` by cherry-pick, not `refresh.sh`: 67 patches, with ten
+  conflicts resolved keeping both sides (`0007`, `0011`, `0031`, `0034`, `0036`, `0037`,
+  `0057`, `0060`, `0070`), and `0036`'s config recorder re-seated on upstream's ordered
+  `session/load` path. Compile fixes for gpui's OS-aware key APIs, the new
+  `SessionMessage` entry and `accepts_subagent_updates` were folded into their owning
+  patches.
+- `0001`'s header records that `acp-beta` now also gates v1's `subagents` client
+  capability, so every Zeo build advertises it; `0021`'s records that upstream's new
+  credential-read gate does not reach the Zeo keychain arm. `0039`, `0057` and `0068`
+  gained header notes from the same review. Every other header is byte-identical to
+  `0.7.0_p20261021`'s.
+- `rebrand/zed-literals.txt` accepts three new upstream "Zed" literals (two log lines in
+  `acp/v1.rs`, one test row in `sidebar_lists_tests`).
+- `scripts/proofs/` gains `061-a5c4-bump/test_ebuild.py` (the ebuild's `CRATES`,
+  `GIT_CRATES` and `PATCHES` against the patched `Cargo.lock`) and `061-a5c4-proof/run.sh`
+  (the Agent Tasks card on the new base).
+
+### Removed
+
+- `0064`: upstream `a5c4ca8b` ships wasmtime 48.0.7 and rustls 0.23.46 itself, which is
+  what the patch existed to bump.
+
+### Verification
+
+- verify 67/67; check-sync in sync with the overlay; nextest 5781/5781, doctests 43,
+  ignored 5/5, Plus e2e 6/6; selftest 109/109; Xvfb proof 8/8.
+- `CRATES` and `GIT_CRATES` regenerated with pycargoebuild (oo7 from zed-industries'
+  fork at `731c121`, lsp-types at `82d7fc66`); `ebuild prepare` offline and compile.
+- osv-scanner reports 27 IDs over 33 pairs, down from 43 over 50, none new; cargo-audit
+  nothing new; `pkgcheck` no new warning.
+- `zeo-bin` was built by `release-portable.sh`, not `release-zeo-bin.sh`: the host path
+  refused its binary for 85 AVX-512 functions from the znver5-built Rust standard library.
+  The portable binary needs glibc ≤ 2.35, carries no compiler-generated AVX-512, and
+  passed the 059 release smoke 26/26.
+- Release `v0.7.0_p20261025` on `zeo-workspace/zeo` (9 assets) was downloaded back and
+  checked against both `SHA256SUMS` files.
+
 ## [0.7.0_p20261021] — 2026-10-25 (tagged)
 
 The release train (story 059) ships as Zeo 0.7.0 on Zed `92447a17`, the snapshot
