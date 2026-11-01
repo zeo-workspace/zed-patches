@@ -74,6 +74,13 @@ Test added 2026-10-09 (0.2.2_p20261009): with no retained-thread budget, a threa
 background task still runs stays loaded after its turn ends, and the snapshot
 that ends the task releases it. Fails with either half removed -- the running-task
 clause in `is_idle_for_retention`, or TasksUpdated in agent_panel's match arm.
+
+a4b39c38 review: (2026-11-01, story 072) Upstream #66255 keeps native subagent
+outcomes in their own state (subagent_outcomes), apart from
+handle_session_update's arms. The _claude/tasks snapshot this patch reads stays
+in its arm and does not overlap. Claude Agent (Plus) emits no SubagentUpdate, so
+for it this feed is still the only task channel. Moving Zeo's tasks onto the
+native subagent surfaces is story 064's work, not this bump's.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs

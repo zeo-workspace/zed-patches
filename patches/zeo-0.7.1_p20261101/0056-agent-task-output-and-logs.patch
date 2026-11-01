@@ -67,6 +67,12 @@ record, each without a log. Steps 1-3 are unchanged (append-only).
 No new dependency; Cargo.lock is unchanged. Rides claude-agent-acp-plus
 BY DEPENDENCY after 0053, the last task patch: it extends 0037's card,
 0035's panel and store, 0041's open-at-task path and 0042's delete path.
+
+a4b39c38 review: (2026-11-01, story 072) Checked against upstream
+#66255/#66101/#66102. This patch adds no arm to AcpThread::handle_session_update
+beyond 0034's, and it does not touch the SessionMessage arm or
+subagent_association. The output and log surfaces read the same task entries as
+at a5c4ca8b.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs

@@ -51,6 +51,15 @@ user messages, the trimmed command lands in the new composer unsent).
 
 Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
 0014 and 0026, and needs no adapter feature.
+
+a4b39c38 review: (2026-11-01, story 072) Upstream #66101 reworked
+render_session_message: the side of a message between sessions now comes from
+SessionMessageSide, and the row gains a participant button. This patch's call
+there, render_message_content(..., false, ...), stays right: a message between
+sessions never offers the slash-command run button. Agent chunks still pass true
+and thinking chunks false. Upstream's markdown path
+(render_output_content_block) did not change, so the agent-chunk bypass loses
+nothing.
 ---
 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs

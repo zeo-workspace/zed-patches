@@ -64,6 +64,14 @@ claude-agent-acp-plus flag BY DEPENDENCY, like 0011 and 0013.
 Test added (0.2.3_p20261009): a malformed count (-1, "2", 1.5, null) leaves the last one.
 Tests added 2026-10-10 (story 032 v4): Background -> Completed marks a pinned row and header.
 Test added (0.6.1_p20261021): archiving a Background thread is refused.
+
+a4b39c38 review: (2026-11-01, story 072) Upstream #66255 now reports native
+subagent state the way it reports ACP subagents, through update_session_state,
+restore_subagent_outcomes and the linked session messages of #66101/#66102. This
+patch reads its _meta in the SessionInfoUpdate arm of
+AcpThread::handle_session_update, an arm upstream did not touch. Upstream
+changed only the SessionMessage arm there. No new dispatch path bypasses
+handle_session_update.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs

@@ -57,6 +57,12 @@ Verified: `cargo check -p agent_ui`, `cargo test -p agent_ui --lib` (7 passed),
 (exit 0). The button itself is compile-verified, not render-verified — no test in
 this crate drives `render_entry`, so that it appears and writes to the clipboard
 is checked in a running Zed, not here.
+
+a4b39c38 review: (2026-11-01, story 072) Upstream #65989 removed agent
+checkpoints, and UserMessage lost its checkpoint field. The two test literals
+here (conversation_entries, an_empty_user_message_is_not_copyable) dropped their
+`checkpoint: None,` initialiser. The copy button reads only the message content,
+so nothing it does depended on checkpoints.
 ---
 
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs

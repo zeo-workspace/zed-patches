@@ -88,6 +88,14 @@ Tests added 2026-10-09 (0.2.2_p20261009) for the branch nothing reached: a statu
 after the terminal one keeps the entry Completed and adds no tool row, and the
 same frame with no lifecycle before it records nothing at all. Both fail when a
 status-less frame is read as in progress.
+
+a4b39c38 review: (2026-11-01, story 072) Upstream #66215 fixed auto-compaction
+in Zed's native agent (crates/agent/src/thread.rs: once per turn, again later in
+the same turn, the summary placed before an unanswered prompt). This patch does
+not take part: it consumes an adapter-reported compaction on the ACP side, and
+the push_context_compaction constructor it calls is unchanged. No patch in the
+series edits the native compaction code; 0052 and 0058 touch thread.rs only
+inside impl UserMessage.
 ---
 
 diff --git a/crates/acp_thread/src/acp_thread.rs b/crates/acp_thread/src/acp_thread.rs

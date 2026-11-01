@@ -10156,7 +10156,7 @@ index 0000000..2da52ba
 +    );
 +}
 diff --git a/crates/agent_ui/src/thread_organization.rs b/crates/agent_ui/src/thread_organization.rs
-index 96607d9..d932d08 100644
+index 1cf1d4b..11b7ea1 100644
 --- a/crates/agent_ui/src/thread_organization.rs
 +++ b/crates/agent_ui/src/thread_organization.rs
 @@ -12,6 +12,7 @@
@@ -10206,7 +10206,7 @@ index 96607d9..d932d08 100644
      }
  }
  
-@@ -425,6 +433,16 @@ impl ThreadOrganizationStore {
+@@ -426,6 +434,16 @@ impl ThreadOrganizationStore {
          self.threads.get(&thread_id)
      }
  
@@ -10223,7 +10223,7 @@ index 96607d9..d932d08 100644
      pub fn pinned(&self) -> impl Iterator<Item = ThreadId> + '_ {
          let mut pinned: Vec<(u32, ThreadId)> = self
              .threads
-@@ -830,6 +848,29 @@ impl ThreadOrganizationStore {
+@@ -831,6 +849,29 @@ impl ThreadOrganizationStore {
          Ok(())
      }
  
@@ -10253,7 +10253,7 @@ index 96607d9..d932d08 100644
      /// Children keep their link to a deleted parent: the requester decided sub-threads outlive it.
      fn forget_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
          let organization = self.threads.remove(&thread_id);
-@@ -1107,7 +1148,8 @@ fn apply_change(connection: &db::sqlez::connection::Connection, change: Change)
+@@ -1108,7 +1149,8 @@ fn apply_change(connection: &db::sqlez::connection::Connection, change: Change)
                  pinned_position = NULL,
                  manual_position = NULL,
                  manual_project_key = NULL,
@@ -10263,7 +10263,7 @@ index 96607d9..d932d08 100644
              WHERE thread_id = ?
          ))?(thread_id),
          Change::UpsertThread(thread_id, organization) => connection.exec_bound::<(
-@@ -1116,15 +1158,18 @@ fn apply_change(connection: &db::sqlez::connection::Connection, change: Change)
+@@ -1117,15 +1159,18 @@ fn apply_change(connection: &db::sqlez::connection::Connection, change: Change)
              Option<i64>,
              Option<String>,
              Option<i64>,
@@ -10285,7 +10285,7 @@ index 96607d9..d932d08 100644
          ))?((
              thread_id,
              organization.pinned_position.map(i64::from),
-@@ -1134,6 +1179,12 @@ fn apply_change(connection: &db::sqlez::connection::Connection, change: Change)
+@@ -1135,6 +1180,12 @@ fn apply_change(connection: &db::sqlez::connection::Connection, change: Change)
                  .as_ref()
                  .map(|project| project.0.to_string()),
              organization.list_id.map(|list_id| list_id.0),
@@ -10298,7 +10298,7 @@ index 96607d9..d932d08 100644
          )),
          // An upsert, so the link lands whether or not the row's own upsert ran before it.
          Change::SetParent(thread_id, parent, kind) => {
-@@ -1245,12 +1296,16 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
+@@ -1246,12 +1297,16 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
          Option<i64>,
          Option<String>,
          Option<i64>,
@@ -10317,7 +10317,7 @@ index 96607d9..d932d08 100644
          loaded.threads.insert(
              thread_id,
              ThreadOrganization {
-@@ -1259,6 +1314,7 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
+@@ -1260,6 +1315,7 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
                  list_id: list_id.map(ListId),
                  parent: None,
                  manual_project: manual_project.map(|project| ProjectKey(project.into())),
@@ -10325,7 +10325,7 @@ index 96607d9..d932d08 100644
              },
          );
      }
-@@ -1347,6 +1403,10 @@ pub(crate) mod test_helpers;
+@@ -1348,6 +1404,10 @@ pub(crate) mod test_helpers;
  #[path = "thread_organization/migration_tests.rs"]
  mod migration;
  

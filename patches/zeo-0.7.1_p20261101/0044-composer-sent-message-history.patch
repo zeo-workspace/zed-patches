@@ -77,6 +77,12 @@ tests for the model, 22 GPUI tests driving the real keymap with real keystrokes
 
 Pure Zed and generic ACP: it rides `claude-agent-acp-plus` BY CHOICE, like
 0014 and 0026, and needs no adapter feature.
+
+a4b39c38 review: (2026-11-01, story 072) Upstream #65989 removed agent
+checkpoints, and UserMessage lost its checkpoint field. The test helpers
+user_message and without_content in sent_history/tests.rs dropped their
+`checkpoint: None,` initialiser. The composer history reads only the message
+content, so its behaviour is unchanged.
 ---
 
 diff --git a/assets/keymaps/default-linux.json b/assets/keymaps/default-linux.json

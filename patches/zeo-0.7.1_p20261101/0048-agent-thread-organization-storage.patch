@@ -92,6 +92,18 @@ SET list_id = NULL WHERE list_id = ? -- now runs in the same write before
 DeleteList, the shape ClearManual already has, and leaves the skipped row's
 other values as they were. Three more tests, in store_clear_list_tests.rs.
 
+a4b39c38 review: (2026-11-01, story 072) Upstream removed
+remote_connection_identity, same_remote_connection_identity and
+RemoteConnectionIdentity::persistence_key, and dropped the container name from
+RemoteConnectionIdentity::Docker. ProjectKey's host part now comes from
+RemoteConnectionOptions::identity() for SSH and WSL, which gives the same bytes
+as before (host, username, port; distro, user). For Docker it is still built
+from DockerConnectionOptions as ["docker", container_id, name, remote_user], so
+Docker projects organized by earlier versions keep their keys. Wherever this
+header says "the fields same_remote_connection_identity compares", read
+RemoteConnectionOptions::identity for SSH/WSL and the triple above for Docker.
+project_key_stored_form_is_pinned now pins the Docker bytes as well.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
 
@@ -129,10 +141,10 @@ index 3fdb3a9..559ebb2 100644
                  self.threads_by_session.remove(sid);
 diff --git a/crates/agent_ui/src/thread_organization.rs b/crates/agent_ui/src/thread_organization.rs
 new file mode 100644
-index 0000000..a80c347
+index 0000000..8b828aa
 --- /dev/null
 +++ b/crates/agent_ui/src/thread_organization.rs
-@@ -0,0 +1,1380 @@
+@@ -0,0 +1,1381 @@
 +//! How the user organized their threads: pinned order, a per-project manual order, lists, tags
 +//! and a sub-thread's parent link.
 +//!
@@ -301,8 +313,9 @@ index 0000000..a80c347
 +    }
 +}
 +
-+/// Built from the fields `RemoteConnectionOptions::identity` compares, so a nickname or a
-+/// password never makes the same host a second project.
++/// SSH and WSL: the fields `RemoteConnectionOptions::identity` compares, so a nickname or a
++/// password never makes the same host a second project. Docker: container id, name and remote
++/// user — the key earlier versions stored, which no longer equals upstream's identity.
 +fn host_identity(options: &RemoteConnectionOptions) -> serde_json::Value {
 +    // Arrays, not objects: an object's key order depends on serde_json's `preserve_order`
 +    // feature, and a key that changed with a feature flag would silently lose every remote
@@ -2470,10 +2483,10 @@ index 0000000..57fa672
 +}
 diff --git a/crates/agent_ui/src/thread_organization/project_key_tests.rs b/crates/agent_ui/src/thread_organization/project_key_tests.rs
 new file mode 100644
-index 0000000..ef7cf32
+index 0000000..820ae9d
 --- /dev/null
 +++ b/crates/agent_ui/src/thread_organization/project_key_tests.rs
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,187 @@
 +// Story 031, task 2.3 — `ProjectKey::from_group` (R3.4, R3.5).
 +//
 +// Materialize with, in `src/thread_organization.rs`:
@@ -2491,7 +2504,9 @@ index 0000000..ef7cf32
 +use std::path::Path;
 +
 +use project::ProjectGroupKey;
-+use remote::{RemoteConnectionOptions, SshConnectionOptions, WslConnectionOptions};
++use remote::{
++    DockerConnectionOptions, RemoteConnectionOptions, SshConnectionOptions, WslConnectionOptions,
++};
 +use workspace::PathList;
 +
 +use super::ProjectKey;
@@ -2645,6 +2660,18 @@ index 0000000..ef7cf32
 +    assert_eq!(
 +        key(wsl("Ubuntu", None), &["/home/u"]).0.as_ref(),
 +        r#"[["wsl","Ubuntu",null],["/home/u"]]"#
++    );
++    // The container name stays in the Docker key although upstream's identity dropped it at
++    // a4b39c38: Docker projects stored by earlier versions keep their organization.
++    let docker = Some(RemoteConnectionOptions::Docker(DockerConnectionOptions {
++        name: "devbox".to_string(),
++        container_id: "c0ffee".to_string(),
++        remote_user: "vscode".to_string(),
++        ..Default::default()
++    }));
++    assert_eq!(
++        key(docker, &["/workspaces/app"]).0.as_ref(),
++        r#"[["docker","c0ffee","devbox","vscode"],["/workspaces/app"]]"#
 +    );
 +}
 diff --git a/crates/agent_ui/src/thread_organization/store_admission_tests.rs b/crates/agent_ui/src/thread_organization/store_admission_tests.rs

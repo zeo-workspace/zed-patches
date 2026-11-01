@@ -135,6 +135,34 @@ def lock_git(packages: list) -> dict:
     return out
 
 
+def offline_rewrite_commits(ebuild_text: str) -> dict:
+    """NAME_COMMIT -> commit, for every `local NAME_COMMIT="<sha>"` of the ebuild's "Cargo offline
+    fetch workaround" block. pycargoebuild moves GIT_CRATES but never these: a stale one leaves the
+    [patch] entry on its git source, `prepare` still passes (sed matches nothing) and only the
+    offline `compile` fails (found at a4b39c38 for livekit and tree-sitter)."""
+    start = ebuild_text.find("# Cargo offline fetch workaround")
+    end = ebuild_text.find("Cargo fetch workaround failed", start)
+    if start < 0 or end < 0:
+        raise ValueError("no Cargo offline fetch workaround block in the ebuild")
+    return dict(re.findall(r'local ([A-Z_]+_COMMIT)="([0-9a-f]{40})"', ebuild_text[start:end]))
+
+
+def patch_crates_io_git(cargo_toml_text: str) -> dict:
+    """name -> repository URL as written, for every git entry of the workspace's [patch.crates-io].
+    cargo.eclass does not redirect these; the ebuild's offline rewrite has to (crash-context joined
+    the table at a4b39c38)."""
+    table = tomllib.loads(cargo_toml_text).get("patch", {}).get("crates-io", {})
+    return {name: spec["git"] for name, spec in table.items() if isinstance(spec, dict) and "git" in spec}
+
+
+def offline_rewrite_block(ebuild_text: str) -> str:
+    start = ebuild_text.find("# Cargo offline fetch workaround")
+    end = ebuild_text.find("Cargo fetch workaround failed", start)
+    if start < 0 or end < 0:
+        raise ValueError("no Cargo offline fetch workaround block in the ebuild")
+    return ebuild_text[start:end]
+
+
 def git_differences(lock: dict, git_crates: dict) -> list:
     """Every way GIT_CRATES disagrees with the lock's git packages, one line each."""
     problems = []
@@ -280,6 +308,17 @@ class ParserHostileTests(unittest.TestCase):
         self.assertEqual(crates_named({"tree-sitter-go@0.25.0", "crash-context@0.8.0"}, "tree-sitter-go"),
                          {"tree-sitter-go@0.25.0"})
 
+    def test_14_hostile_a_rewrite_commit_outside_the_block_is_not_read(self):
+        text = ('local X_COMMIT="' + "a" * 40 + '"\n# Cargo offline fetch workaround\n'
+                '\tlocal LIVEKIT_COMMIT="' + "b" * 40 + '"\n\t-i Cargo.toml || die "Cargo fetch workaround failed"\n'
+                'local Y_COMMIT="' + "c" * 40 + '"\n')
+        self.assertEqual(offline_rewrite_commits(text), {"LIVEKIT_COMMIT": "b" * 40})
+
+    def test_15_hostile_only_git_entries_of_patch_crates_io_count(self):
+        text = ('[patch.crates-io]\na = { git = "https://x/a", rev = "1" }\nb = { path = "p" }\n'
+                '[dependencies]\nc = { git = "https://x/c" }\n')
+        self.assertEqual(patch_crates_io_git(text), {"a": "https://x/a"})
+
     def test_13_series_comments_are_not_entries(self):
         text = "# Numbered 0065 because 0064 was the last number taken.\n0063-devtools-panel.patch\n0065-x.patch\n"
         self.assertEqual(series_entries(text), ["0063-devtools-panel.patch", "0065-x.patch"])
@@ -343,6 +382,19 @@ class EbuildMatchesLockTests(unittest.TestCase):
 
     def test_tree_sitter_is_still_under_lib(self):
         self.assertEqual(self.git.get("tree-sitter"), TREE_SITTER_ENTRY)
+
+    def test_the_offline_rewrite_names_only_commits_the_lock_uses(self):
+        used = {commit for _, commit in lock_git(self.packages).values()}
+        stale = {name: commit for name, commit in offline_rewrite_commits(self.ebuild).items()
+                 if commit not in used}
+        self.assertEqual(stale, {}, "the [patch] rewrite would keep these on their git source")
+
+    def test_the_offline_rewrite_covers_every_patch_crates_io_git_entry(self):
+        block = offline_rewrite_block(self.ebuild)
+        cargo_toml = read(pathlib.Path(required("ZP_TREE")) / "Cargo.toml")
+        missing = sorted(name for name, url in patch_crates_io_git(cargo_toml).items()
+                         if f'{name} = {{ git = \\"{url}\\"' not in block)
+        self.assertEqual(missing, [], "offline cargo would try to fetch these from git")
 
     def test_tree_sitter_go_and_crash_context_are_new_git_entries(self):
         self.assertEqual({name: self.git.get(name) for name in NEW_GIT_ENTRIES}, NEW_GIT_ENTRIES)

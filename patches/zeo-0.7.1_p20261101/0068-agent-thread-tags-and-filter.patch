@@ -118,10 +118,10 @@ index ed99247..6835ce5 100644
  
  pub mod threads_archive_view;
 diff --git a/crates/agent_ui/src/thread_organization.rs b/crates/agent_ui/src/thread_organization.rs
-index a80c347..96607d9 100644
+index 8b828aa..1cf1d4b 100644
 --- a/crates/agent_ui/src/thread_organization.rs
 +++ b/crates/agent_ui/src/thread_organization.rs
-@@ -1341,7 +1341,7 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
+@@ -1342,7 +1342,7 @@ fn load(db: &ThreadOrganizationDb) -> Result<Loaded> {
  
  #[cfg(test)]
  #[path = "thread_organization/test_helpers.rs"]
