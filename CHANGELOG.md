@@ -31,6 +31,32 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.7.1_p20261101] — 2026-11-01 (untagged)
+
+Zeo 0.7.1 (story 072): the series carried from Zed `a5c4ca8b` onto `a4b39c38` (1.28.0).
+User-visible notes are in `zeo/CHANGELOG.md` under 0.7.1.
+
+### Changed
+
+- The series reached `a4b39c38` by cherry-pick: 67 patches, four real conflicts resolved
+  keeping both sides (`0049`, `0005`, `0011`, `0028`). Compile fixes folded into their
+  owning patches: `0014`/`0044` drop `checkpoint: None` (upstream #65989), `0015` clones the
+  now-borrowed remote options, `0048` moves to `RemoteConnectionOptions::identity()` and keeps
+  the container name in its persisted Docker key, `0049` uses upstream's
+  `find_workspace_for_thread` helpers, `0052`'s lock entry names `nix 0.30.1`.
+- Nine headers gain an `a4b39c38 review:` paragraph: `0001`, `0014`, `0017`, `0029`, `0034`,
+  `0044`, `0045`, `0048`, `0056`.
+- `0048`'s `project_key_stored_form_is_pinned` now pins the Docker key bytes too.
+
+### Tooling
+
+- The ebuild's "Cargo offline fetch workaround" hardcodes the commits of the
+  `[patch.crates-io]` git entries it rewrites, and pycargoebuild never moves them: livekit
+  and tree-sitter were stale and `crash-context` was missing. `ebuild prepare` still passed
+  (a `sed` that matches nothing is no error); `test.sh`'s guard and cargo `--offline` caught
+  it. `proofs/072-a4b3-bump/test_ebuild.py` now checks both — re-check that block on every
+  bump that moves a `[patch.crates-io]` git crate.
+
 ## [0.7.0_p20261025] — 2026-10-28 (tagged)
 
 A snapshot rebuild of Zeo 0.7.0 (story 061): the series carried from Zed `92447a17`
