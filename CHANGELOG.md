@@ -31,7 +31,7 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-## [0.7.1_p20261101] — 2026-11-01 (untagged)
+## [0.7.1_p20261101] — 2026-11-01 (tagged)
 
 Zeo 0.7.1 (story 072): the series carried from Zed `a5c4ca8b` onto `a4b39c38` (1.28.0).
 User-visible notes are in `zeo/CHANGELOG.md` under 0.7.1.
