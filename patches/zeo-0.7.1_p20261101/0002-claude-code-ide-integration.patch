@@ -25,11 +25,14 @@ The protocol this speaks is defined by the CLI and documented nowhere, so two
 clauses are worth naming here -- both were wrong in this patch's first version,
 and both fail silently:
 
-  - The lock file must carry `useWebSocket: true`. The CLI branches on that field
-    alone; `transport: "ws"` is never read, and without the boolean the CLI
-    builds http://host:port/sse and reaches nothing. Note serde's camelCase
-    renders `use_websocket` as `useWebsocket`, with a lowercase `s`, which the
-    CLI also ignores -- hence the explicit #[serde(rename)].
+  - The lock file must carry `transport: "ws"`. The CLI parses
+    `transport === "ws"` and passes the result on as `useWebSocket`, the key of
+    its parser's OUTPUT, which is what the URL branch tests; without `transport`
+    it builds http://host:port/sse and reaches nothing. The `useWebSocket: true`
+    this lock also writes is not read by the CLI (VS Code's lock has none) and
+    stays only as harmless parity with the first fix; serde's camelCase would
+    render it `useWebsocket`, hence the explicit #[serde(rename)]. Corrected
+    2026-11-03 (story 066): this note said the opposite, against CLI 2.1.251.
   - The handshake must echo `Sec-WebSocket-Protocol: mcp`. The CLI offers it on
     every connection and its WebSocket client closes with 1002, "Missing client
     protocol", when the 101 does not name it back.
