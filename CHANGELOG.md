@@ -31,8 +31,17 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.8.0_p20261101] — 2026-11-03 (tagged)
+
+Zeo 0.8.0 (story 073): the release train on the same Zed snapshot as 0.7.1 (`a4b39c38`), the
+series carried from `zeo-0.7.1_p20261101` to `zeo-0.8.0_p20261101`. User-visible notes are in
+`zeo/CHANGELOG.md` under 0.8.0.
+
 ### Added
 
+- `0072` (USE `claude-agent-acp-plus`, story 064): Zed's own subagent surfaces cover ACP (RFD)
+  subagents. Sixteen patches regenerated on top of it, among them `0002`, `0052`, `0057`,
+  `0058`, `0063`, `0066` and `0067`.
 - `0073` (USE `claude-agent-acp-plus`, after `0072`): Claude Agent (Plus)'s `plan_updates`
   option leaves the composer row and becomes a "ToDo" toggle in the agent panel's options
   menu. `0052`, `0057` and `0063` regenerated on top of it, offsets only.
@@ -42,6 +51,15 @@ bumps inside a range are summarised rather than listed one by one.
 - `0066` reads the plugin's new layout, `.epico/` with `EPICO.md`, and falls back to
   `.epic/`/`EPIC.md` for a project not migrated yet; labels say "Epico". The parity contract
   now runs `epico-index.sh` 0.25.1: 72 rows of this workspace's `.epico/`, 0 mismatches.
+- `0002` (USE `claude-code-ide`, story 066): the Claude Code IDE protocol aligned with what
+  the CLI parses — the editor selection is pushed as it changes, "Mention Selection in Claude
+  Code" is added, and closing a diff tab no longer reports a rejection.
+
+### Tooling
+
+- `release-portable.sh` names every artefact the way GitHub serves it: `~` becomes `.` in the
+  `.deb` and `.rpm` file names before `SHA256SUMS` is written, so the downloaded set verifies
+  with no rename (0.7.1 needed one). The `~` stays in the package metadata.
 
 ## [0.7.1_p20261101] — 2026-11-01 (tagged)
 
