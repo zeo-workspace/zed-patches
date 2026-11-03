@@ -90,7 +90,7 @@ browser_channel_tests/browser_wire_subagents.rs).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index d55e7bf..6886846 100644
+index 8977d3d..8894601 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -565,6 +565,7 @@ dependencies = [
@@ -109,7 +109,7 @@ index d55e7bf..6886846 100644
   "streaming_diff",
   "task",
   "telemetry",
-@@ -22882,6 +22884,18 @@ version = "0.3.3"
+@@ -22885,6 +22887,18 @@ version = "0.3.3"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "6df3dc4292935e51816d896edcd52aa30bc297907c26167fec31e2b0c6a32524"
  
@@ -12295,10 +12295,10 @@ index 796efb7..cff7b56 100644
 +    }
 +}
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index c994135..255af91 100644
+index 44c1d01..3517adf 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -6315,6 +6315,7 @@ mod tests {
+@@ -6316,6 +6316,7 @@ mod tests {
                  "debug_panel",
                  "debugger",
                  "dev",

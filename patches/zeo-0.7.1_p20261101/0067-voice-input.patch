@@ -111,7 +111,7 @@ reqwest_client without_proxy.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index fbd2f13..d8d8ed1 100644
+index 0c2dcd6..39be99a 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -545,6 +545,7 @@ dependencies = [
@@ -139,7 +139,7 @@ index fbd2f13..d8d8ed1 100644
   "proc-macro2",
   "quote",
   "regex",
-@@ -19779,6 +19783,30 @@ dependencies = [
+@@ -19782,6 +19786,30 @@ dependencies = [
   "settings",
  ]
  
@@ -170,7 +170,7 @@ index fbd2f13..d8d8ed1 100644
  [[package]]
  name = "vscode_theme"
  version = "0.2.0"
-@@ -20857,6 +20885,29 @@ dependencies = [
+@@ -20860,6 +20888,29 @@ dependencies = [
   "zed_actions",
  ]
  
@@ -200,7 +200,7 @@ index fbd2f13..d8d8ed1 100644
  [[package]]
  name = "whoami"
  version = "1.6.1"
-@@ -22697,6 +22748,7 @@ dependencies = [
+@@ -22700,6 +22751,7 @@ dependencies = [
   "uuid",
   "vim",
   "vim_mode_setting",
@@ -237,10 +237,10 @@ index eaa1371..f002403 100644
  windows-registry = "0.6.0"
  xkbcommon = { version = "0.8", default-features = false }
 diff --git a/assets/keymaps/default-linux.json b/assets/keymaps/default-linux.json
-index 2121900..1c0bdf1 100644
+index a170328..c205e00 100644
 --- a/assets/keymaps/default-linux.json
 +++ b/assets/keymaps/default-linux.json
-@@ -400,6 +400,46 @@
+@@ -401,6 +401,46 @@
        "ctrl-enter": "agent::IgnoreSendWhileQuestionPending",
      },
    },
@@ -288,10 +288,10 @@ index 2121900..1c0bdf1 100644
      "context": "Elicitation || (Elicitation > Editor)",
      "use_key_equivalents": true,
 diff --git a/assets/keymaps/default-macos.json b/assets/keymaps/default-macos.json
-index f0475ea..c829688 100644
+index 4907478..e2eab1b 100644
 --- a/assets/keymaps/default-macos.json
 +++ b/assets/keymaps/default-macos.json
-@@ -435,6 +435,46 @@
+@@ -436,6 +436,46 @@
        "cmd-enter": "agent::IgnoreSendWhileQuestionPending",
      },
    },
@@ -339,10 +339,10 @@ index f0475ea..c829688 100644
      "context": "Elicitation || (Elicitation > Editor)",
      "use_key_equivalents": true,
 diff --git a/assets/keymaps/default-windows.json b/assets/keymaps/default-windows.json
-index a7a911e..ea33513 100644
+index 4da72b0..3e9c525 100644
 --- a/assets/keymaps/default-windows.json
 +++ b/assets/keymaps/default-windows.json
-@@ -403,6 +403,46 @@
+@@ -404,6 +404,46 @@
        "ctrl-enter": "agent::IgnoreSendWhileQuestionPending",
      },
    },
@@ -16334,10 +16334,10 @@ index ba61816..d8db98d 100644
              cx,
              app_state.fs.clone(),
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index c1e6820..396007b 100644
+index 9ff7a76..8579dfe 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -6381,6 +6381,7 @@ mod tests {
+@@ -6382,6 +6382,7 @@ mod tests {
                  "toolchain",
                  "variable_list",
                  "vim",

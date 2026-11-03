@@ -12503,10 +12503,10 @@ index 35af9bd..21ef9d9 100644
              // Collapsed project header
              ListEntry::ProjectHeader {
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 255af91..458120e 100644
+index 3517adf..dd53675 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -6315,6 +6315,7 @@ mod tests {
+@@ -6316,6 +6316,7 @@ mod tests {
                  "debug_panel",
                  "debugger",
                  "dev",
