@@ -412,23 +412,6 @@
 # regenerated on top of it. Numbered 0071 because 0070 was the last number
 # taken (story 040).
 0071-agent-send-to-parent-and-sub-thread-items.patch
-# 0072: Zed's own subagent surfaces cover ACP (RFD) subagents (story 064) -- a
-# Waiting card status that keeps Stop, the awaiting-permission bar listing RFD
-# children, one card for a child the parent never wrote to (never a second one
-# for a native spawn_agent child, upstream #66255), and a sidebar row that reads
-# a thread's subagents and says why archive is refused. Last of this group BY
-# DEPENDENCY: its sidebar half reads 0030's question state beside 0070's
-# sub-thread markers. 0002, 0052, 0057, 0058, 0063, 0066 and 0067 are
-# regenerated on top of it. Numbered 0072 because 0071 was the last number taken.
-0072-agent-ui-native-subagent-surfaces.patch
-# 0073: Claude Agent (Plus)'s Plan updates option becomes a "ToDo" toggle in the
-# agent panel's options menu ("Toggle Agent Menu"), under Current Thread, and
-# leaves the composer row. Matched by the adapter's id, plan_updates; toggling
-# is thread-local and saves no default, as 0010 rules for every gesture. Last of
-# this group: the only agent offering the option is that adapter. 0052, 0057
-# and 0063 are regenerated on top of it (offsets only). Numbered 0073 because
-# 0072 was the last number taken.
-0073-agent-ui-todo-toggle-in-agent-menu.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
@@ -477,10 +460,9 @@
 
 # @feature: epic
 # 0066: the Epic Stories panel (story 042) -- a read-only dock panel listing the
-# project's .epico/ stories and archived stories (legacy .epic/ while a project
-# is not migrated), each with its status and its tasks.md progress, read with
-# the plugin's own grammar (a parity test runs the real epico-index.sh against
-# it) and followed live; it writes nothing
+# project's .epic/ stories and archived stories, each with its status and its
+# tasks.md progress, read with epic plugin 0.13.1's own grammar (a parity test
+# runs the real epic-index.sh against it) and followed live; it writes nothing
 # and runs nothing. A patch because a Zed extension cannot render a panel. Its
 # own group, after every devtools group and before test: USE epic (default on)
 # needs claude-agent-acp-plus, whose 0035 wiring its hunks sit beside, and the

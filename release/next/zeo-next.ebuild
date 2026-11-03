@@ -2122,6 +2122,11 @@ src_prepare() {
 			# 0030 and sits beside 0070; 0002, 0052, 0057, 0058, 0063, 0066 and
 			# 0067 are regenerated on top of it.
 			"${FILESDIR}/0072-agent-ui-native-subagent-surfaces.patch"
+			# 0073: the adapter's Plan updates option becomes a "ToDo" toggle
+			# in the agent menu and leaves the composer row; thread-local, as
+			# 0010 rules. After 0072; 0052, 0057 and 0063 are regenerated on
+			# top of it (offsets only).
+			"${FILESDIR}/0073-agent-ui-todo-toggle-in-agent-menu.patch"
 		)
 	fi
 
