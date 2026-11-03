@@ -31,7 +31,13 @@ set -euo pipefail
 # bundler on every release.
 
 readonly EXPECT_PARSER='return{workspaceFolders:'
-readonly EXPECT_FIELD='useWebSocket'
+# The lock file's transport is read from `transport`, never from `useWebSocket`:
+# the CLI parses `y=q.transport==="ws"` and only then names the result
+# `useWebSocket` in the object it hands the URL branch. VS Code's own lock has no
+# `useWebSocket` at all. Grepping the output key passed for the wrong reason until
+# 2026-11-03 (story 066); the input parse is a code shape, so it is a pattern.
+readonly EXPECT_TRANSPORT_PARSE='[a-zA-Z_$]+=[a-zA-Z_$]+\.transport==="ws"'
+readonly NOTE_OUTPUT_KEY='useWebSocket'
 # The one clause that is a code shape rather than a protocol literal, and so the
 # one that must be a pattern. The bundler renames the identifiers around it on
 # every release -- `u` and `K` in 2.1.252 were `c` and `N` in 2.1.257 -- while the
@@ -42,10 +48,11 @@ readonly EXPECT_TRANSPORT='if\([a-zA-Z_$]+\.useWebSocket\)[a-zA-Z_$]+=`ws://'
 readonly EXPECT_SUBPROTOCOL='protocols:["mcp"]'
 readonly EXPECT_AUTH_HEADER='X-Claude-Code-Ide-Authorization'
 
-# Derived against claude 2.1.251 on 2026-08-29. Unchanged in 2.1.252 and 2.1.257 --
-# the only thing that moved across those releases was minified naming, which is
-# why exactly one clause below is a pattern and the rest are literals.
-readonly DERIVED_AGAINST='2.1.251'
+# Derived against claude 2.1.251 on 2026-08-29; unchanged in 2.1.252 and 2.1.257,
+# where only minified naming moved -- which is why the code-shape clauses are
+# patterns and the rest are literals. Re-derived against 2.1.316 on 2026-11-03
+# (story 066), when clause 2 moved from the parser's output key to its input.
+readonly DERIVED_AGAINST='2.1.316'
 
 drift=0
 strings_file=""
@@ -110,10 +117,16 @@ check_cli() {
 
 	strings_file="$(mktemp)"
 	strings -n 4 "${resolved}" >"${strings_file}" 2>/dev/null ||
-		{ skip 'cannot read strings from the CLI binary'; return 0; }
+		{
+			skip 'cannot read strings from the CLI binary'
+			return 0
+		}
 
 	expect "${EXPECT_PARSER}" 'lock file is still parsed field-by-field'
-	expect "${EXPECT_FIELD}" "lock file is still read for '${EXPECT_FIELD}'"
+	expect_pattern "${EXPECT_TRANSPORT_PARSE}" 'lock file is still read for transport==="ws"'
+	if grep -qF -- "${NOTE_OUTPUT_KEY}" "${strings_file}"; then
+		line note "'${NOTE_OUTPUT_KEY}' is still the parser's output key (informational; never written for it)"
+	fi
 	expect_pattern "${EXPECT_TRANSPORT}" 'useWebSocket still selects the ws:// URL'
 	expect "${EXPECT_SUBPROTOCOL}" 'the CLI still offers the mcp subprotocol'
 	expect "${EXPECT_AUTH_HEADER}" 'the auth header name is unchanged'
@@ -201,7 +214,7 @@ probe_handshake() {
 	# probe -- the server has no reason to hang up. Under `pipefail` that status
 	# would fail the substitution and throw away the bytes already read, so the
 	# pipeline swallows its own status instead of the caller discarding the output.
-	response="$( { printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\nX-Claude-Code-Ide-Authorization: %s\r\n\r\n' \
+	response="$({ printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\nX-Claude-Code-Ide-Authorization: %s\r\n\r\n' \
 		"${port}" "${token}" | timeout 4 nc 127.0.0.1 "${port}" 2>/dev/null |
 		head -c 512 | tr '[:upper:]' '[:lower:]'; } || true)"
 
@@ -215,7 +228,7 @@ probe_handshake() {
 	fi
 
 	local denied
-	denied="$( { printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\n\r\n' \
+	denied="$({ printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\n\r\n' \
 		"${port}" | timeout 4 nc 127.0.0.1 "${port}" 2>/dev/null | head -c 64; } || true)"
 	if [[ "${denied}" != HTTP/1.1\ 401* ]]; then
 		bad "port ${port}: an unauthenticated upgrade was not refused"
@@ -278,10 +291,11 @@ check_live() {
 	fi
 	port="$(basename "${lock}" .lock)"
 
-	if [[ "$(jq -r '.useWebSocket // false' "${lock}" 2>/dev/null)" == "true" ]]; then
+	# `transport` is what the CLI reads; `useWebSocket` in the file is ignored by it.
+	if [[ "$(jq -r '.transport // ""' "${lock}" 2>/dev/null)" == "ws" ]]; then
 		ok "port ${port}: lock file selects the websocket transport"
 	else
-		bad "port ${port}: lock file has no useWebSocket -- the CLI will try http://.../sse"
+		bad "port ${port}: lock file has no transport \"ws\" -- the CLI will try http://.../sse"
 	fi
 
 	# Read into a variable and never echo it: the token is the whole access control.

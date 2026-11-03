@@ -98,10 +98,10 @@ the fs symlink log line).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 6886846..fbd2f13 100644
+index 8894601..0c2dcd6 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -5838,6 +5838,30 @@ dependencies = [
+@@ -5841,6 +5841,30 @@ dependencies = [
   "serde",
  ]
  
@@ -132,7 +132,7 @@ index 6886846..fbd2f13 100644
  [[package]]
  name = "equator"
  version = "0.4.2"
-@@ -22560,6 +22584,7 @@ dependencies = [
+@@ -22563,6 +22587,7 @@ dependencies = [
   "editor",
   "encoding_selector",
   "env_logger 0.11.8",
@@ -8528,7 +8528,7 @@ index c5eb571..ba61816 100644
  
          repl::init(app_state.fs.clone(), cx);
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 458120e..c1e6820 100644
+index dd53675..9ff7a76 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
 @@ -785,6 +785,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
@@ -8547,7 +8547,7 @@ index 458120e..c1e6820 100644
              initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
          );
  
-@@ -6321,6 +6323,7 @@ mod tests {
+@@ -6322,6 +6324,7 @@ mod tests {
                  "edit_prediction",
                  "editor",
                  "encoding_selector",

@@ -1524,6 +1524,104 @@ test_protocol_falls_back_to_either_label_without_a_pid() {
 	rm -rf "${tmp}"
 }
 
+# --- check-protocol.sh: the static clauses, against a fixture CLI (story 066) --
+#
+# The static clauses read `strings` of whatever `claude` resolves to, so a shell
+# script carrying the anchors after its `exit` is a CLI as far as they can tell.
+# The anchors are copied from CLI 2.1.316, minified names and all; the transport
+# parse is the line a case removes to prove the clause keys on it rather than on
+# `useWebSocket`, which survives in the parser's OUTPUT and in the URL branch.
+# CLAUDE_CONFIG_DIR is an empty directory, so the live clause skips and the exit
+# code belongs to the static clauses alone.
+
+# fake_cli <dir> <with-transport-parse:0|1> — a `claude` on <dir>/bin.
+fake_cli() {
+	local dir="$1" with_parse="$2"
+	mkdir -p "${dir}/bin"
+	{
+		printf '#!/bin/sh\necho "2.1.316 (Claude Code)"\nexit 0\n'
+		# shellcheck disable=SC2016 # the anchors are JavaScript, not expansions
+		printf '%s\n' ';return{workspaceFolders:r,port:parseInt(G),pid:s,ideName:h,useWebSocket:y,runningInWindows:S,authToken:w}}'
+		if [[ "${with_parse}" == 1 ]]; then
+			printf '%s\n' 'h=q.ideName,y=q.transport==="ws",S=q.runningInWindows===!0,w=q.authToken'
+		fi
+		# shellcheck disable=SC2016
+		printf '%s\n' 'ke;if(L.useWebSocket)ke=`ws://${Se}:${L.port}`;else ke=`http://${Se}:${L.port}/sse`'
+		printf '%s\n' 'protocols:["mcp"]' 'headers:{"X-Claude-Code-Ide-Authorization":authToken}'
+	} >"${dir}/bin/claude"
+	chmod +x "${dir}/bin/claude"
+}
+
+# run_protocol_static <dir> — check-protocol.sh with only the fixture CLI to read.
+run_protocol_static() {
+	mkdir -p "$1/config"
+	PATH="$1/bin:/usr/bin:/bin" CLAUDE_CONFIG_DIR="$1/config" \
+		bash "${SCRIPTS}/check-protocol.sh" 2>&1
+}
+
+test_protocol_static_passes_on_the_transport_parse() {
+	case_start "protocol: a CLI that parses transport===\"ws\" passes every static clause, on the version derived against"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	fake_cli "${tmp}" 1
+	out="$(run_protocol_static "${tmp}")"
+	status=$?
+	assert_status 0 "${status}" &&
+		assert_not_contains "${out}" "DRIFT" &&
+		assert_contains "${out}" "2.1.316 (the version this was derived against)" && ok
+	rm -rf "${tmp}"
+}
+
+test_protocol_static_drifts_without_the_transport_parse() {
+	case_start "protocol: a CLI that no longer parses transport===\"ws\" is DRIFT, whatever useWebSocket still says"
+	local tmp out status
+	tmp="$(mktemp -d)"
+	fake_cli "${tmp}" 0
+	out="$(run_protocol_static "${tmp}")"
+	status=$?
+	assert_status 1 "${status}" &&
+		assert_contains "${out}" "DRIFT" &&
+		assert_contains "${out}" 'transport==="ws"' && ok
+	rm -rf "${tmp}"
+}
+
+# make_raw_lock <ide-dir> <port> <json> — a lock file written verbatim.
+make_raw_lock() {
+	mkdir -p "$1"
+	printf '%s\n' "$3" >"$1/$2.lock"
+}
+
+test_protocol_live_lock_without_transport_is_bad() {
+	case_start "protocol: a live lock with useWebSocket but no transport \"ws\" is reported bad"
+	local tmp ide out pid live
+	tmp="$(mktemp -d)"
+	ide="${tmp}/ide"
+	live="$(dead_port 64000)"
+	pid="$(start_listener "${live}" "${tmp}/ready")"
+	make_raw_lock "${ide}" "${live}" \
+		'{"pid":1,"ideName":"Zed","useWebSocket":true,"authToken":"fixture-token","workspaceFolders":["/tmp"]}'
+	out="$(run_protocol "${tmp}")"
+	kill "${pid}" 2>/dev/null
+	assert_contains "${out}" "port ${live}: lock file has no transport \"ws\"" &&
+		assert_not_contains "${out}" "lock file selects the websocket transport" && ok
+	rm -rf "${tmp}"
+}
+
+test_protocol_live_lock_with_transport_alone_is_ok() {
+	case_start "protocol: a live lock with transport \"ws\" and no useWebSocket selects the websocket transport"
+	local tmp ide out pid live
+	tmp="$(mktemp -d)"
+	ide="${tmp}/ide"
+	live="$(dead_port 64000)"
+	pid="$(start_listener "${live}" "${tmp}/ready")"
+	make_raw_lock "${ide}" "${live}" \
+		'{"pid":1,"ideName":"Zed","transport":"ws","authToken":"fixture-token","workspaceFolders":["/tmp"]}'
+	out="$(run_protocol "${tmp}")"
+	kill "${pid}" 2>/dev/null
+	assert_contains "${out}" "port ${live}: lock file selects the websocket transport" && ok
+	rm -rf "${tmp}"
+}
+
 # --- xvfb-proof.sh: a private display and an isolated Zeo (story 021) --------
 #
 # Every tool the harness drives is a stub on PATH: no X server starts, no Zeo
@@ -2840,6 +2938,10 @@ main() {
 		test_protocol_skips_a_zeo_label_on_a_foreign_process
 		test_protocol_trusts_the_executable_over_the_label
 		test_protocol_falls_back_to_either_label_without_a_pid
+		test_protocol_static_passes_on_the_transport_parse
+		test_protocol_static_drifts_without_the_transport_parse
+		test_protocol_live_lock_without_transport_is_bad
+		test_protocol_live_lock_with_transport_alone_is_ok
 
 		test_status_installed_agreeing_is_ok
 		test_status_installed_behind_is_drift
