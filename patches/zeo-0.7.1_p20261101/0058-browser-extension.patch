@@ -612,7 +612,7 @@ index b3c9b39..66b9f67 100644
  
  [dev-dependencies]
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 08ae5a8..5569868 100644
+index 9dd7614..9e2dd18 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -7,6 +7,8 @@ mod agent_panel;
