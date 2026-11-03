@@ -13262,10 +13262,10 @@ index 0000000..1a9c116
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index ab8624b..31a2bff 100644
+index bdf98b2..a8ceb69 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -723,6 +723,7 @@ pub fn init(cx: &mut App) {
+@@ -724,6 +724,7 @@ pub fn init(cx: &mut App) {
          },
      )
      .detach();
@@ -13273,7 +13273,7 @@ index ab8624b..31a2bff 100644
  }
  
  fn format_selection_for_terminal(
-@@ -1153,6 +1154,8 @@ pub struct AgentPanel {
+@@ -1154,6 +1155,8 @@ pub struct AgentPanel {
      _active_draft_reclaim_observation: Option<Subscription>,
      _thread_metadata_store_subscription: Subscription,
      _settings_subscription: Subscription,
@@ -13282,7 +13282,7 @@ index ab8624b..31a2bff 100644
      retained_thread_subscriptions: HashMap<ThreadId, Subscription>,
      last_context_source: Option<AgentContextSource>,
      /// The floating list of the live tasks of every conversation this panel holds.
-@@ -1542,6 +1545,8 @@ impl AgentPanel {
+@@ -1543,6 +1546,8 @@ impl AgentPanel {
              // The tasks card's `enabled` and `position` are read when the panel renders.
              cx.notify();
          });
@@ -13291,7 +13291,7 @@ index ab8624b..31a2bff 100644
  
          cx.on_release(|this, cx| {
              this.dismiss_all_terminal_notifications(cx);
-@@ -1655,6 +1660,7 @@ impl AgentPanel {
+@@ -1656,6 +1661,7 @@ impl AgentPanel {
              _active_draft_reclaim_observation: None,
              _thread_metadata_store_subscription,
              _settings_subscription,
@@ -13299,7 +13299,7 @@ index ab8624b..31a2bff 100644
              retained_thread_subscriptions: HashMap::default(),
              last_context_source: None,
              tasks_card,
-@@ -7018,7 +7024,12 @@ impl AgentPanel {
+@@ -7051,7 +7057,12 @@ impl AgentPanel {
                  .active_conversation_view()
                  .and_then(|conversation_view| conversation_view.read(cx).root_thread_view())
                  .and_then(|thread_view| {

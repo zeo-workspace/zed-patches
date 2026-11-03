@@ -31,6 +31,18 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+### Added
+
+- `0073` (USE `claude-agent-acp-plus`, after `0072`): Claude Agent (Plus)'s `plan_updates`
+  option leaves the composer row and becomes a "ToDo" toggle in the agent panel's options
+  menu. `0052`, `0057` and `0063` regenerated on top of it, offsets only.
+
+### Changed
+
+- `0066` reads the plugin's new layout, `.epico/` with `EPICO.md`, and falls back to
+  `.epic/`/`EPIC.md` for a project not migrated yet; labels say "Epico". The parity contract
+  now runs `epico-index.sh` 0.25.1: 72 rows of this workspace's `.epico/`, 0 mismatches.
+
 ## [0.7.1_p20261101] — 2026-11-01 (tagged)
 
 Zeo 0.7.1 (story 072): the series carried from Zed `a5c4ca8b` onto `a4b39c38` (1.28.0).
