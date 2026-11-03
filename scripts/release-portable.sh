@@ -130,9 +130,23 @@ main() {
 			die 1 "the Flatpak build failed"
 	fi
 
+	untilde_artefacts "${dist}"
 	(cd "${dist}" && sha256sum -- * | grep -v ' SHA256SUMS' > "SHA256SUMS-portable-${pvr}")
 	printf '\nartefacts in %s:\n' "${dist}"
 	ls -la "${dist}"
+}
+
+# untilde_artefacts <dir> — renames every artefact whose name holds "~" to use "."
+# instead. GitHub stores such an asset under the "." name (0.7.1's .deb and .rpm), so
+# a SHA256SUMS written over the "~" names listed files the release does not serve.
+# The "~" stays inside the packages' own metadata, where Debian and RPM order it.
+untilde_artefacts() {
+	local dir=$1 path name
+	for path in "${dir}"/*~*; do
+		[[ -e "${path}" ]] || continue
+		name="${path##*/}"
+		mv -- "${path}" "${dir}/${name//\~/.}"
+	done
 }
 
 main "$@"

@@ -2326,6 +2326,15 @@ test_release_patches_skips_default_off_groups() {
 	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
 }
 
+# --- release-portable.sh: asset names carry no ~ (story 073, R4.2) --------------
+test_release_portable_untilde_artefacts() {
+	case_start "release-portable: ~ becomes . in every artefact name, so SHA256SUMS names what GitHub serves"
+	local out status
+	out="$(ZP_REPO="${REPO_ROOT}" bash "${SCRIPTS}/tests/release-portable-untilde.sh" 2>&1)"
+	status=$?
+	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
+}
+
 test_xvfb_proof_launch_isolates_bus_and_runtime_dir() {
 	case_start "xvfb-proof: Zeo runs on a private session bus with its own XDG_RUNTIME_DIR, mode 700"
 	local tmp out wd log
@@ -2991,6 +3000,7 @@ main() {
 		test_xvfb_proof_drag_xdotool_failure_fails_the_step
 
 		test_release_patches_skips_default_off_groups
+		test_release_portable_untilde_artefacts
 	)
 
 	for t in "${tests[@]}"; do
