@@ -117,7 +117,10 @@ check_cli() {
 
 	strings_file="$(mktemp)"
 	strings -n 4 "${resolved}" >"${strings_file}" 2>/dev/null ||
-		{ skip 'cannot read strings from the CLI binary'; return 0; }
+		{
+			skip 'cannot read strings from the CLI binary'
+			return 0
+		}
 
 	expect "${EXPECT_PARSER}" 'lock file is still parsed field-by-field'
 	expect_pattern "${EXPECT_TRANSPORT_PARSE}" 'lock file is still read for transport==="ws"'
@@ -211,7 +214,7 @@ probe_handshake() {
 	# probe -- the server has no reason to hang up. Under `pipefail` that status
 	# would fail the substitution and throw away the bytes already read, so the
 	# pipeline swallows its own status instead of the caller discarding the output.
-	response="$( { printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\nX-Claude-Code-Ide-Authorization: %s\r\n\r\n' \
+	response="$({ printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\nX-Claude-Code-Ide-Authorization: %s\r\n\r\n' \
 		"${port}" "${token}" | timeout 4 nc 127.0.0.1 "${port}" 2>/dev/null |
 		head -c 512 | tr '[:upper:]' '[:lower:]'; } || true)"
 
@@ -225,7 +228,7 @@ probe_handshake() {
 	fi
 
 	local denied
-	denied="$( { printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\n\r\n' \
+	denied="$({ printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mcp\r\n\r\n' \
 		"${port}" | timeout 4 nc 127.0.0.1 "${port}" 2>/dev/null | head -c 64; } || true)"
 	if [[ "${denied}" != HTTP/1.1\ 401* ]]; then
 		bad "port ${port}: an unauthenticated upgrade was not refused"
