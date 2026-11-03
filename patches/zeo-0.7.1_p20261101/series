@@ -412,6 +412,15 @@
 # regenerated on top of it. Numbered 0071 because 0070 was the last number
 # taken (story 040).
 0071-agent-send-to-parent-and-sub-thread-items.patch
+# 0072: Zed's own subagent surfaces cover ACP (RFD) subagents (story 064) -- a
+# Waiting card status that keeps Stop, the awaiting-permission bar listing RFD
+# children, one card for a child the parent never wrote to (never a second one
+# for a native spawn_agent child, upstream #66255), and a sidebar row that reads
+# a thread's subagents and says why archive is refused. Last of this group BY
+# DEPENDENCY: its sidebar half reads 0030's question state beside 0070's
+# sub-thread markers. 0002, 0052, 0057, 0058, 0063, 0066 and 0067 are
+# regenerated on top of it. Numbered 0072 because 0071 was the last number taken.
+0072-agent-ui-native-subagent-surfaces.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
