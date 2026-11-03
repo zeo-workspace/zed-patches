@@ -86,8 +86,15 @@ registry, beside the adapter's feed.
     copied to scratch) reads back byte for byte with a NULL child.
   - Restored outcomes are not endings: a child whose first observed status is
     terminal is shown Done and recorded nowhere.
+  - Waiting reads Waiting. A child in RequiresAction reads "Waiting for you"
+    on the card's progress line and in the panel's status text, in the
+    warning colour, where both used to say Running: the card reads the row's
+    TaskRowStatus, and the panel a live-only `waiting` field on TaskRecord
+    that panel_row lays over the stored record (TasksCard::live_task_waiting).
+    AgentTaskStatus still folds Waiting into Running, so expiry, the history
+    and the tray are unchanged, and the field is never stored.
 It lands here because 0071 is the last patch of the group that touches
-tasks_card.rs, the history and the panel. 36 tests.
+tasks_card.rs, the history and the panel. 46 tests.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -113,7 +120,7 @@ index 21945b6..3fe7e3b 100644
 +#[cfg(test)]
 +mod native_subagent_support;
 diff --git a/crates/agent_tasks_panel/src/history_db.rs b/crates/agent_tasks_panel/src/history_db.rs
-index d5f0e9e..19619b8 100644
+index d5f0e9e..d464854 100644
 --- a/crates/agent_tasks_panel/src/history_db.rs
 +++ b/crates/agent_tasks_panel/src/history_db.rs
 @@ -39,12 +39,16 @@ use db::{
@@ -299,16 +306,17 @@ index d5f0e9e..19619b8 100644
          let status = match parse_status(&status) {
              Ok(status) => status,
              Err(error) => {
-@@ -397,6 +474,8 @@ impl Column for HistoryRow {
+@@ -397,6 +474,9 @@ impl Column for HistoryRow {
              tokens,
              tool_uses,
              tool_call_id: tool_call_id.map(Into::into),
 +            // Read back by origin and task id; the column is what `record_subagent` writes.
 +            child_session_id: None,
++            waiting: false,
          };
          Ok((
              HistoryRow(Ok(HistoryEntry {
-@@ -404,6 +483,7 @@ impl Column for HistoryRow {
+@@ -404,6 +484,7 @@ impl Column for HistoryRow {
                  archived,
                  label: label.map(Into::into),
                  log_bytes,
@@ -316,7 +324,7 @@ index d5f0e9e..19619b8 100644
              })),
              next,
          ))
-@@ -468,3 +548,31 @@ mod log_bytes;
+@@ -468,3 +549,31 @@ mod log_bytes;
  #[cfg(test)]
  #[path = "history_db/delete_removed_tests.rs"]
  mod delete_removed;
@@ -3087,7 +3095,7 @@ index 0000000..742603f
 +    run_sql(db, Box::leak(sql.into_boxed_str())).await;
 +}
 diff --git a/crates/agent_tasks_panel/src/panel.rs b/crates/agent_tasks_panel/src/panel.rs
-index 991006f..0868c02 100644
+index 991006f..bb9af41 100644
 --- a/crates/agent_tasks_panel/src/panel.rs
 +++ b/crates/agent_tasks_panel/src/panel.rs
 @@ -14,8 +14,9 @@ use std::{cmp::Reverse, ops::Range, sync::Arc};
@@ -3097,8 +3105,8 @@ index 991006f..0868c02 100644
 -    AgentPanel, DEFAULT_THREAD_TITLE, OpenAgentSessionOptions, OpenedAgentSession, TaskRecord,
 -    TasksCard, collapse_label, display_label, open_agent_session, task_log,
 +    AgentPanel, DEFAULT_THREAD_TITLE, OpenAgentSessionOptions, OpenedAgentSession,
-+    OpenedAgentSubagent, SUBAGENT_TASK_ID_PREFIX, TaskRecord, TasksCard, collapse_label,
-+    display_label, open_agent_session, open_agent_subagent, task_log,
++    OpenedAgentSubagent, SUBAGENT_TASK_ID_PREFIX, TASK_WAITING_LABEL, TaskRecord, TasksCard,
++    collapse_label, display_label, open_agent_session, open_agent_subagent, task_log,
      thread_metadata_store::ThreadMetadataStore,
  };
  use anyhow::{Result, anyhow};
@@ -3132,7 +3140,19 @@ index 991006f..0868c02 100644
  
  /// What a row says when its thread opened but holds no entry for the task's starting tool call:
  /// no id was recorded, or the call belongs to a nested subagent (story 023 R3.3).
-@@ -751,9 +773,16 @@ impl AgentTasksPanel {
+@@ -483,7 +505,10 @@ impl AgentTasksPanel {
+                     .is_running()
+                     .then(|| store.live_task(&key.0, &key.1, cx))
+                     .flatten()
+-                    .map(|(_card, task)| task);
++                    .map(|(card, task)| {
++                        let waiting = card.read(cx).live_task_waiting(&key.0, &key.1, cx);
++                        LiveTask { task, waiting }
++                    });
+                 let selected = self.selection.contains(&key);
+                 let notice = self.notices.get(&key).cloned();
+                 panel_row(
+@@ -751,9 +776,16 @@ impl AgentTasksPanel {
      /// listener is updating this panel, and focusing the agent panel in a dock this panel
      /// shares would update it again (story 024 R1.7).
      pub fn open_task(&mut self, key: &TaskKey, window: &mut Window, cx: &mut Context<Self>) {
@@ -3150,7 +3170,7 @@ index 991006f..0868c02 100644
          if !thread_exists {
              log::info!(
                  "agent tasks panel: not opening task {task_id} of session {session_id}: \
-@@ -773,6 +802,9 @@ impl AgentTasksPanel {
+@@ -773,6 +805,9 @@ impl AgentTasksPanel {
              })
              .and_then(|entry| entry.record.tool_call_id.clone())
              .map(|id| acp_v2::ToolCallId::new(id.to_string()));
@@ -3160,7 +3180,7 @@ index 991006f..0868c02 100644
          let key = key.clone();
          let workspace = self.workspace.clone();
          let fallback_window = window.window_handle();
-@@ -781,12 +813,12 @@ impl AgentTasksPanel {
+@@ -781,12 +816,12 @@ impl AgentTasksPanel {
                  let app_state =
                      workspace.read_with(cx, |workspace, _| workspace.app_state().clone())?;
                  anyhow::Ok(open_agent_session(
@@ -3175,7 +3195,7 @@ index 991006f..0868c02 100644
                      },
                      app_state,
                      cx,
-@@ -803,6 +835,82 @@ impl AgentTasksPanel {
+@@ -803,6 +838,82 @@ impl AgentTasksPanel {
          .detach();
      }
  
@@ -3258,7 +3278,7 @@ index 991006f..0868c02 100644
      /// Shows how opening `key`'s thread ended: a failure on the task's row, with a WARN line
      /// naming the session and the task (story 024 R1.6); an open with nothing to jump to says
      /// so (story 023 R3.3); a jump clears an earlier notice.
-@@ -1607,8 +1715,14 @@ fn render_row(
+@@ -1607,8 +1718,15 @@ fn render_row(
      let row_id = row_element_id(&key.0, &key.1);
      let control_id =
          |control: &'static str| ElementId::NamedChild(Arc::new(row_id.clone()), control.into());
@@ -3271,10 +3291,11 @@ index 991006f..0868c02 100644
 +            sub_thread_row::sub_thread_state(record).into(),
 +            Color::Muted,
 +        ),
++        None if record.waiting => (row_detail(record).into(), Color::Warning),
          None => (row_detail(record).into(), status_color(record.status)),
      };
      // The user's label wins over the description, which `panel_row` keeps live (R3.9). The
-@@ -1635,12 +1749,15 @@ fn render_row(
+@@ -1635,12 +1753,15 @@ fn render_row(
          .min_w_0()
          .max_w(relative(0.4))
          .flex_shrink_1()
@@ -3293,7 +3314,7 @@ index 991006f..0868c02 100644
  
      let open_or_rename = match rename_editor {
          Some(editor) => render_rename_editor(label_slot.child(editor), detail_label, cx),
-@@ -1660,20 +1777,27 @@ fn render_row(
+@@ -1660,20 +1781,27 @@ fn render_row(
                          // A flex line, so the text is as wide as itself and starts at the slot's
                          // left edge, shrinking only to truncate.
                          label_slot.child(
@@ -3335,7 +3356,55 @@ index 991006f..0868c02 100644
                          ),
                      )
                      .child(detail_label),
-@@ -2354,6 +2478,10 @@ mod close_button;
+@@ -1969,9 +2097,15 @@ fn parse_dock_position(text: &str) -> Option<DockPosition> {
+     }
+ }
+ 
+-/// `Running · 500 tokens · 4 tool uses`, or the outcome alone when no usage was reported.
++/// `Running · 500 tokens · 4 tool uses`, or the outcome alone when no usage was reported. A
++/// subagent waiting on the operator reads `Waiting for you` in place of `Running` (R1.8).
+ fn row_detail(record: &TaskRecord) -> String {
+-    let mut parts = vec![status_label(record.status).to_string()];
++    let status = if record.waiting && record.status.is_running() {
++        TASK_WAITING_LABEL
++    } else {
++        status_label(record.status)
++    };
++    let mut parts = vec![status.to_string()];
+     if let Some(tokens) = record.tokens {
+         parts.push(format!("{tokens} tokens"));
+     }
+@@ -2003,19 +2137,26 @@ fn status_color(status: AgentTaskStatus) -> Color {
+     }
+ }
+ 
++/// The card's view of a task while it runs, and whether it waits on the operator.
++struct LiveTask {
++    task: AgentTask,
++    waiting: bool,
++}
++
+ /// A row for `entry`, with `live` — the card's view of the task while it runs — laid over
+-/// the stored record, which holds no progress.
++/// the stored record, which holds no progress and never the waiting state.
+ fn panel_row(
+     entry: &HistoryEntry,
+-    live: Option<AgentTask>,
++    live: Option<LiveTask>,
+     selected: bool,
+     notice: Option<SharedString>,
+     error: Option<SharedString>,
+ ) -> PanelRow {
+     let mut entry = entry.clone();
+     let can_stop = live.is_some();
+-    if let Some(task) = live {
++    if let Some(LiveTask { task, waiting }) = live {
+         let record = &mut entry.record;
++        record.waiting = waiting;
+         record.status = task.status;
+         record.description = task.description;
+         record.tokens = task.usage.as_ref().map(|usage| usage.tokens);
+@@ -2354,6 +2495,10 @@ mod close_button;
  #[path = "panel/scrollbar_tests.rs"]
  mod scrollbar;
  
@@ -3346,13 +3415,17 @@ index 991006f..0868c02 100644
  #[cfg(test)]
  #[path = "panel/text_filter_tests.rs"]
  mod text_filter;
-@@ -2386,6 +2514,10 @@ mod header_archive_filter;
+@@ -2386,6 +2531,14 @@ mod header_archive_filter;
  #[path = "panel/open_log_tests.rs"]
  mod open_log;
  
 +#[cfg(test)]
 +#[path = "panel/native_subagent_tests.rs"]
 +mod native_subagent;
++
++#[cfg(test)]
++#[path = "panel/waiting_label_tests.rs"]
++mod waiting_label;
 +
  #[cfg(test)]
  #[path = "panel/open_log_remote_tests.rs"]
@@ -3917,6 +3990,288 @@ index 0000000..effc0cd
 +        .expect("still listed once idle");
 +    assert_ne!(row.entry.record.status, AgentTaskStatus::Running);
 +}
+diff --git a/crates/agent_tasks_panel/src/panel/waiting_label_tests.rs b/crates/agent_tasks_panel/src/panel/waiting_label_tests.rs
+new file mode 100644
+index 0000000..81a1896
+--- /dev/null
++++ b/crates/agent_tasks_panel/src/panel/waiting_label_tests.rs
+@@ -0,0 +1,276 @@
++// Story 064, task 11.1 — the Agent Tasks panel's row for a subagent that needs the operator reads
++// "Waiting for you", never "Running"; a running one keeps "Running"; nothing new is persisted
++// (R1.8). Fixup of `0071`. Module path: `panel::waiting_label`; wired in `src/panel.rs` beside
++// `mod native_subagent;`:
++//
++//     #[cfg(test)]
++//     #[path = "panel/waiting_label_tests.rs"]
++//     mod waiting_label;
++//
++// Validation filter: `cargo test -p agent_tasks_panel panel`. Fixtures: `native_subagent_support.rs`.
++//
++// Contract (design.md, "Waiting text (R1.8)"): the row's status text is `row_detail(&TaskRecord)`,
++// the panel's own (private, reached as `super::row_detail`), which `render_row` paints for every
++// row that is neither a sub-thread nor carrying a notice; the Waiting state reaches it as a
++// live-only flag on the `TaskRecord` the card hands over, laid over the stored record by
++// `panel_row`. `record.status` stays `AgentTaskStatus::Running`, in the row, in the store and in
++// the history db, and `agent_task_history` gains no column. If the flag lands elsewhere, adjust
++// `detail` below only.
++//
++// Hostile halves first:
++//   - Waiting must NOT collapse into Running: the waiting child's row text is not "Running";
++//   - Running must NOT split into Waiting: a running sibling and a feed task of the same parent
++//     keep "Running";
++//   - Waiting must NOT be persisted: the stored record and the db say Running (or nothing) while
++//     the child waits, the db's columns are the ones it had before, and no stored status reads
++//     "waiting" — also after the child ends;
++//   - then the benign half: the child runs again and its row reads Running.
++
++use acp_thread::AgentTaskStatus;
++use agent_client_protocol::schema::v2 as acp_v2;
++use gpui::{Entity, TestAppContext};
++
++use crate::native_subagent_support::*;
++use crate::test_helpers::*;
++use crate::{AgentTaskHistoryDb, TaskHistoryStore};
++
++/// The status text R1.8 names, byte for byte.
++const WAITING: &str = "Waiting for you";
++
++fn detail(row: &super::PanelRow) -> String {
++    super::row_detail(&row.entry.record)
++}
++
++fn report_waiting(child: &Entity<acp_thread::AcpThread>, panels: &mut Panels) {
++    report(
++        child,
++        acp_v2::StateUpdate::RequiresAction(acp_v2::RequiresActionStateUpdate::new()),
++        &mut panels.cx,
++    );
++}
++
++fn row(panels: &mut Panels, parent: &acp_v2::SessionId, task: &str) -> super::PanelRow {
++    find_row(panels, &parent.to_string(), task)
++        .unwrap_or_else(|| panic!("{task} is a row of the parent's group"))
++}
++
++async fn columns(db: &AgentTaskHistoryDb) -> Vec<String> {
++    db.write(|connection| {
++        connection
++            .select::<String>("SELECT name FROM pragma_table_info('agent_task_history')")
++            .expect("select")()
++        .expect("run")
++    })
++    .await
++}
++
++async fn stored_statuses(db: &AgentTaskHistoryDb) -> Vec<(String, String)> {
++    db.write(|connection| {
++        connection
++            .select::<(String, String)>("SELECT task_id, status FROM agent_task_history")
++            .expect("select")()
++        .expect("run")
++    })
++    .await
++}
++
++/// The record the store holds for `key`, without the card's live values laid over it.
++fn store_status(panels: &mut Panels, parent: &acp_v2::SessionId, task: &str) -> AgentTaskStatus {
++    panels.cx.update(|_, cx| {
++        let store = TaskHistoryStore::try_global(cx).expect("the crate's init made the store");
++        store
++            .read(cx)
++            .records()
++            .iter()
++            .find(|entry| {
++                entry.record.session_id == *parent && entry.record.task_id.as_ref() == task
++            })
++            .map(|entry| entry.record.status)
++            .unwrap_or_else(|| panic!("the store holds {task}"))
++    })
++}
++
++fn assert_reads_waiting(text: &str, what: &str) {
++    assert!(
++        text.starts_with(WAITING),
++        "{what}: a waiting row reads {WAITING:?}, it read {text:?}"
++    );
++    assert!(
++        !text.contains("Running"),
++        "{what}: a waiting row never reads \"Running\": {text:?}"
++    );
++}
++
++// ── R1.8 — Waiting is not Running ───────────────────────────────────────────
++
++/// Hostile: Alpha waits for the operator, Bravo runs. Alpha's row reads "Waiting for you";
++/// Bravo's keeps "Running". Today both read "Running".
++#[gpui::test]
++async fn panel_waiting_label_child_in_requires_action_reads_waiting_for_you(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let connection = rfd_connection();
++    let parent = open_thread_on(
++        &panels.agent_panel,
++        connection.clone(),
++        "Parent",
++        &mut panels.cx,
++    );
++    let parent_session = session_of(&parent, &panels.cx);
++    let alpha = spawn_child(&parent, &connection, "alpha", "Alpha", &mut panels.cx);
++    let bravo = spawn_child(&parent, &connection, "bravo", "Bravo", &mut panels.cx);
++    report_waiting(&alpha, &mut panels);
++    report_running(&bravo, &mut panels.cx);
++
++    let alpha_row = row(&mut panels, &parent_session, "acp-subagent:alpha");
++    let bravo_row = row(&mut panels, &parent_session, "acp-subagent:bravo");
++    assert!(
++        detail(&bravo_row).starts_with("Running") && !detail(&bravo_row).contains(WAITING),
++        "a running sibling keeps \"Running\": {:?}",
++        detail(&bravo_row)
++    );
++    // The waiting row is still a live row: Stop reaches it, Archive does not.
++    assert_eq!(
++        alpha_row.entry.record.status,
++        AgentTaskStatus::Running,
++        "the row's status stays Running; only its text changes"
++    );
++    assert!(alpha_row.can_stop, "a waiting child can still be stopped");
++    assert!(!alpha_row.can_archive, "a waiting child is not archivable");
++    assert_reads_waiting(&detail(&alpha_row), "Alpha");
++}
++
++/// Hostile converse, third element: a feed task of the same parent has no Waiting state and
++/// keeps "Running" beside a waiting child.
++#[gpui::test]
++async fn panel_waiting_label_feed_task_beside_a_waiting_child_reads_running(
++    cx: &mut TestAppContext,
++) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let connection = rfd_connection();
++    let parent = open_thread_on(
++        &panels.agent_panel,
++        connection.clone(),
++        "Parent",
++        &mut panels.cx,
++    );
++    let parent_session = session_of(&parent, &panels.cx);
++    let alpha = spawn_child(&parent, &connection, "alpha", "Alpha", &mut panels.cx);
++    report_waiting(&alpha, &mut panels);
++    send_tasks(
++        &parent,
++        vec![wire_task("t1", "running", 1_000, Some((500, 4)))],
++        &mut panels.cx,
++    );
++
++    let feed = row(&mut panels, &parent_session, "t1");
++    assert_eq!(
++        detail(&feed),
++        "Running · 500 tokens · 4 tool uses",
++        "a feed task reads as it always has"
++    );
++    assert_reads_waiting(
++        &detail(&row(&mut panels, &parent_session, "acp-subagent:alpha")),
++        "Alpha",
++    );
++}
++
++// ── R1.8 — nothing new is persisted ─────────────────────────────────────────
++
++/// Hostile: Waiting is live-only. While Alpha waits, the store's record says Running and the db
++/// holds no "waiting"; when Alpha ends, the db row says completed; the table's columns never
++/// change.
++#[gpui::test]
++async fn panel_waiting_label_is_never_persisted(cx: &mut TestAppContext) {
++    let db = init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let columns_before = columns(&db).await;
++    let connection = rfd_connection();
++    let parent = open_thread_on(
++        &panels.agent_panel,
++        connection.clone(),
++        "Parent",
++        &mut panels.cx,
++    );
++    let parent_session = session_of(&parent, &panels.cx);
++    let alpha = spawn_child(&parent, &connection, "alpha", "Alpha", &mut panels.cx);
++    report_waiting(&alpha, &mut panels);
++
++    // Read now, asserted last: the persistence checks below hold today and must keep holding.
++    let waiting_text = detail(&row(&mut panels, &parent_session, "acp-subagent:alpha"));
++    assert_eq!(
++        store_status(&mut panels, &parent_session, "acp-subagent:alpha"),
++        AgentTaskStatus::Running,
++        "the store's record stays Running while the child waits"
++    );
++    let while_waiting = stored_statuses(&db).await;
++    assert!(
++        while_waiting
++            .iter()
++            .filter(|(task, _)| task == "acp-subagent:alpha")
++            .all(|(_, status)| status == "running"),
++        "a waiting child is stored as running, if at all: {while_waiting:?}"
++    );
++    assert_eq!(
++        columns(&db).await,
++        columns_before,
++        "agent_task_history gains no column"
++    );
++
++    report_done(&alpha, &mut panels.cx);
++
++    let after = stored_statuses(&db).await;
++    assert!(
++        after
++            .iter()
++            .any(|(task, status)| task == "acp-subagent:alpha" && status == "completed"),
++        "the ended child is recorded as completed: {after:?}"
++    );
++    assert!(
++        after
++            .iter()
++            .all(|(_, status)| !status.to_lowercase().contains("wait")),
++        "no stored status reads waiting: {after:?}"
++    );
++    assert_eq!(columns(&db).await, columns_before, "still no new column");
++    assert_eq!(
++        detail(&row(&mut panels, &parent_session, "acp-subagent:alpha")),
++        "Completed",
++        "the ended row reads its outcome"
++    );
++    assert_reads_waiting(&waiting_text, "Alpha, while it waited");
++}
++
++// ── Benign — Waiting does not stick ─────────────────────────────────────────
++
++/// The operator answers and the child runs again: its row reads "Running" once more.
++#[gpui::test]
++async fn panel_waiting_label_child_running_again_reads_running(cx: &mut TestAppContext) {
++    init_base(cx);
++    let mut panels = open_panels(cx).await;
++    let connection = rfd_connection();
++    let parent = open_thread_on(
++        &panels.agent_panel,
++        connection.clone(),
++        "Parent",
++        &mut panels.cx,
++    );
++    let parent_session = session_of(&parent, &panels.cx);
++    let alpha = spawn_child(&parent, &connection, "alpha", "Alpha", &mut panels.cx);
++    report_waiting(&alpha, &mut panels);
++    assert_reads_waiting(
++        &detail(&row(&mut panels, &parent_session, "acp-subagent:alpha")),
++        "Alpha, waiting",
++    );
++
++    report_running(&alpha, &mut panels.cx);
++
++    let text = detail(&row(&mut panels, &parent_session, "acp-subagent:alpha"));
++    assert!(
++        text.starts_with("Running") && !text.contains(WAITING),
++        "back to Running: {text:?}"
++    );
++}
 diff --git a/crates/agent_tasks_panel/src/store.rs b/crates/agent_tasks_panel/src/store.rs
 index 61f3c9c..c765299 100644
 --- a/crates/agent_tasks_panel/src/store.rs
@@ -4346,10 +4701,10 @@ index 0000000..f8c66b5
 +}
 diff --git a/crates/agent_tasks_panel/src/store/sub_thread.rs b/crates/agent_tasks_panel/src/store/sub_thread.rs
 new file mode 100644
-index 0000000..414877a
+index 0000000..0db39eb
 --- /dev/null
 +++ b/crates/agent_tasks_panel/src/store/sub_thread.rs
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,125 @@
 +//! Story 040: the store's half of sub-thread items. `SubThreadActivity` from any registered card
 +//! is applied to memory first, then queued on the same ordered writer as every task write
 +//! (design.md, TaskHistoryStore and AgentTaskHistoryDb).
@@ -4454,6 +4809,7 @@ index 0000000..414877a
 +                        tool_uses: None,
 +                        tool_call_id: None,
 +                        child_session_id: None,
++                        waiting: false,
 +                    },
 +                    archived: false,
 +                    label: None,
@@ -5244,6 +5600,18 @@ index 0000000..db30b58
 +
 +    assert_alpha_stays_deleted(&restarted, &db, &links, &mut rig).await;
 +}
+diff --git a/crates/agent_tasks_panel/src/test_helpers.rs b/crates/agent_tasks_panel/src/test_helpers.rs
+index daed4f9..91deaed 100644
+--- a/crates/agent_tasks_panel/src/test_helpers.rs
++++ b/crates/agent_tasks_panel/src/test_helpers.rs
+@@ -135,6 +135,7 @@ pub(crate) fn record(
+         // Story 023: no tool call id unless a test gives one.
+         tool_call_id: None,
+         child_session_id: None,
++        waiting: false,
+     }
+ }
+ 
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
 index 5445caa..ef6546f 100644
 --- a/crates/agent_ui/src/agent_panel.rs
@@ -5315,7 +5683,7 @@ index 5445caa..ef6546f 100644
      /// call `tool_call_id` as the subagent's own, and returns that thread's session.
      /// `Ok(None)` when there is none to show: no tool call id, no such root entry,
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index ac7eefe..a718753 100644
+index ac7eefe..6052ef3 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -28,6 +28,10 @@ mod model_selector_popover;
@@ -5347,8 +5715,8 @@ index ac7eefe..a718753 100644
  pub use crate::tasks_card::task_log;
  pub use crate::tasks_card::{
 -    TaskActivity, TaskKey, TaskRecord, TasksCard, TasksCardEvent, ThreadTitleChanged,
-+    SUBAGENT_TASK_ID_PREFIX, TaskActivity, TaskKey, TaskRecord, TasksCard, TasksCardEvent,
-+    ThreadTitleChanged,
++    SUBAGENT_TASK_ID_PREFIX, TASK_WAITING_LABEL, TaskActivity, TaskKey, TaskRecord, TasksCard,
++    TasksCardEvent, ThreadTitleChanged,
  };
  pub use crate::thread_metadata_store::ThreadId;
  pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
@@ -10122,7 +10490,7 @@ index 0000000..eca185a
 +    cx.debug_bounds(selector).is_some()
 +}
 diff --git a/crates/agent_ui/src/tasks_card.rs b/crates/agent_ui/src/tasks_card.rs
-index b806f62..b32650b 100644
+index b806f62..7d25324 100644
 --- a/crates/agent_ui/src/tasks_card.rs
 +++ b/crates/agent_ui/src/tasks_card.rs
 @@ -17,6 +17,7 @@ use std::{
@@ -10173,7 +10541,18 @@ index b806f62..b32650b 100644
  #[cfg(test)]
  #[path = "tasks_card/open_subagent_tests.rs"]
  mod open_subagent;
-@@ -178,6 +197,13 @@ pub enum TasksCardEvent {
+@@ -119,6 +138,10 @@ mod progress;
+ #[path = "tasks_card/progress_line_tests.rs"]
+ mod progress_line;
+ 
++#[cfg(test)]
++#[path = "tasks_card/waiting_label_tests.rs"]
++mod waiting_label;
++
+ // GPUI's test windows never activate their accessibility tree (the test platform's
+ // `a11y_init` drops the activation callback), so `debug_a11y_tree_json` has nothing to
+ // show; tests read the row controls' screen-reader labels of the last render from here.
+@@ -178,6 +201,13 @@ pub enum TasksCardEvent {
          task_id: AgentTaskId,
          tool_call_id: Option<acp_v2::ToolCallId>,
      },
@@ -10187,25 +10566,29 @@ index b806f62..b32650b 100644
  }
  
  impl EventEmitter<TasksCardEvent> for TasksCard {}
-@@ -230,6 +256,9 @@ pub struct TaskRecord {
+@@ -230,6 +260,12 @@ pub struct TaskRecord {
      pub tool_uses: Option<u64>,
      /// The tool call that started the task, when the feed names one (story 023).
      pub tool_call_id: Option<SharedString>,
 +    /// A native ACP subagent's own session (story 064): the history writes it through
 +    /// `record_subagent`. `None` for every feed task.
 +    pub child_session_id: Option<acp_v2::SessionId>,
++    /// A live subagent waiting on the operator (story 064, R1.8): laid over the record by the
++    /// Agent Tasks panel from the card's row, never stored — the history keeps `Running`.
++    pub waiting: bool,
  }
  
  impl TaskRecord {
-@@ -253,6 +282,7 @@ impl TaskRecord {
+@@ -253,6 +289,8 @@ impl TaskRecord {
                  .as_ref()
                  .filter(|id| !id.0.is_empty())
                  .map(|id| SharedString::from(id.0.to_string())),
 +            child_session_id: None,
++            waiting: false,
          }
      }
  
-@@ -269,12 +299,39 @@ pub struct ThreadGroup {
+@@ -269,12 +307,39 @@ pub struct ThreadGroup {
      /// The last component of the thread's first work directory, or empty.
      pub project: SharedString,
      pub rows: Vec<TaskRow>,
@@ -10245,7 +10628,7 @@ index b806f62..b32650b 100644
      pub watched: bool,
      /// Opened with its disclosure, or watched: a watched row is always expanded (R4.6).
      pub expanded: bool,
-@@ -334,6 +391,15 @@ pub struct TasksCard {
+@@ -334,6 +399,15 @@ pub struct TasksCard {
      row_focus_handles: HashMap<(TaskKey, RowControl), FocusHandle>,
      /// The same for each group header's Open control; it goes with its group.
      group_focus_handles: HashMap<acp_v2::SessionId, FocusHandle>,
@@ -10261,7 +10644,7 @@ index b806f62..b32650b 100644
  }
  
  /// A per-row control that takes keyboard focus.
-@@ -390,6 +456,8 @@ struct HeldThread {
+@@ -390,6 +464,8 @@ struct HeldThread {
  #[derive(Clone, Debug)]
  struct EndedRow {
      task: AgentTask,
@@ -10270,7 +10653,7 @@ index b806f62..b32650b 100644
      expires_at: Instant,
      /// Higher means the ending reached the card more recently.
      sequence: u64,
-@@ -428,6 +496,10 @@ impl TasksCard {
+@@ -428,6 +504,10 @@ impl TasksCard {
              pill_focus_handle: control_focus_handle(cx),
              row_focus_handles: HashMap::default(),
              group_focus_handles: HashMap::default(),
@@ -10281,7 +10664,7 @@ index b806f62..b32650b 100644
          }
      }
  
-@@ -478,6 +550,7 @@ impl TasksCard {
+@@ -478,6 +558,7 @@ impl TasksCard {
          let now = cx.background_executor().now();
          let mut seen_sessions = HashSet::default();
          let mut groups = Vec::new();
@@ -10289,7 +10672,7 @@ index b806f62..b32650b 100644
  
          for thread in self.held_threads().filter_map(|held| held.thread.upgrade()) {
              let thread = thread.read(cx);
-@@ -487,10 +560,9 @@ impl TasksCard {
+@@ -487,10 +568,9 @@ impl TasksCard {
                  continue;
              }
  
@@ -10303,7 +10686,7 @@ index b806f62..b32650b 100644
                  .collect();
              // A task running again under an ended id is listed once, as running.
              let ended: Vec<&EndedRow> = self
-@@ -499,22 +571,32 @@ impl TasksCard {
+@@ -499,22 +579,32 @@ impl TasksCard {
                  .filter(|((ended_session, task_id), ended)| {
                      ended_session == session_id
                          && ended.expires_at > now
@@ -10340,7 +10723,7 @@ index b806f62..b32650b 100644
                  (None, None) => continue,
              };
              rows.sort_by_key(|row| row.task.started_at);
-@@ -527,9 +609,17 @@ impl TasksCard {
+@@ -527,9 +617,17 @@ impl TasksCard {
                          .unwrap_or_else(|| SharedString::new_static(DEFAULT_THREAD_TITLE)),
                      project: project_name(thread),
                      rows,
@@ -10358,15 +10741,28 @@ index b806f62..b32650b 100644
  
          // The session id only breaks ties, so equal start times list the same way
          // on every render.
-@@ -560,7 +650,6 @@ impl TasksCard {
+@@ -560,7 +658,19 @@ impl TasksCard {
          cx: &App,
      ) -> Option<AgentTask> {
          self.running_task(&(session_id.clone(), task_id.clone()), cx)
 -            .cloned()
++    }
++
++    /// Whether that live task is a subagent waiting on the operator (R1.8 of story 064), which
++    /// `AgentTask`'s status cannot say: it folds Waiting into Running.
++    pub fn live_task_waiting(
++        &self,
++        session_id: &acp_v2::SessionId,
++        task_id: &AgentTaskId,
++        cx: &App,
++    ) -> bool {
++        self.current_row(&(session_id.clone(), task_id.clone()), cx)
++            .filter(is_live)
++            .is_some_and(|row| row.status == TaskRowStatus::Waiting)
      }
  
      pub fn toggle_minimized(&mut self, cx: &mut Context<Self>) {
-@@ -700,10 +789,19 @@ impl TasksCard {
+@@ -700,10 +810,19 @@ impl TasksCard {
          cx: &mut Context<Self>,
      ) {
          let key = (session_id, task_id);
@@ -10390,7 +10786,7 @@ index b806f62..b32650b 100644
              log::debug!(
                  "tasks card: stop requested for task {} of session {}, which is not running",
                  key.1,
-@@ -731,6 +829,14 @@ impl TasksCard {
+@@ -731,6 +850,14 @@ impl TasksCard {
      /// Sends the stop for a confirmed task, unless it ended while the prompt was
      /// open: that race is not the user's error, so it sends nothing and shows none.
      fn stop(&mut self, key: TaskKey, cx: &mut Context<Self>) {
@@ -10405,7 +10801,7 @@ index b806f62..b32650b 100644
          let Some(thread) = self.thread_running(&key, cx) else {
              log::debug!(
                  "tasks card: task {} of session {} ended before its stop was confirmed; \
-@@ -765,6 +871,51 @@ impl TasksCard {
+@@ -765,6 +892,51 @@ impl TasksCard {
          .detach();
      }
  
@@ -10457,7 +10853,7 @@ index b806f62..b32650b 100644
      /// Moves one thread's foreground task to the background (R4.5). It asks
      /// nothing first: the task keeps running, so no work is lost. An error, or an
      /// answer that nothing moved, is shown on the row (R4.7).
-@@ -777,6 +928,7 @@ impl TasksCard {
+@@ -777,6 +949,7 @@ impl TasksCard {
          let key = (session_id, task_id);
          let tool_call_id = self
              .running_task(&key, cx)
@@ -10465,7 +10861,7 @@ index b806f62..b32650b 100644
              .and_then(background_target)
              .cloned();
          let (Some(tool_call_id), Some(thread)) = (tool_call_id, self.thread_running(&key, cx))
-@@ -830,9 +982,18 @@ impl TasksCard {
+@@ -830,9 +1003,18 @@ impl TasksCard {
          cx: &mut Context<Self>,
      ) {
          let key = (session_id, task_id);
@@ -10485,7 +10881,7 @@ index b806f62..b32650b 100644
          self.emit_open(key, tool_call_id, cx);
      }
  
-@@ -892,7 +1053,7 @@ impl TasksCard {
+@@ -892,7 +1074,7 @@ impl TasksCard {
      ) {
          let tool_call_id = self
              .task_on_show(&(session_id.clone(), task_id.clone()), cx)
@@ -10494,7 +10890,7 @@ index b806f62..b32650b 100644
          cx.emit(TasksCardEvent::OpenSubagent {
              session_id,
              task_id,
-@@ -1021,20 +1182,26 @@ impl TasksCard {
+@@ -1021,20 +1203,26 @@ impl TasksCard {
          message: SharedString,
          cx: &mut Context<Self>,
      ) {
@@ -10530,7 +10926,7 @@ index b806f62..b32650b 100644
      }
  
      fn is_expanded(&self, key: &TaskKey) -> bool {
-@@ -1063,7 +1230,12 @@ impl TasksCard {
+@@ -1063,7 +1251,12 @@ impl TasksCard {
              AcpThreadEvent::TaskEnded { task_id, .. } => {
                  card.handle_task_ended(&thread, task_id, cx)
              }
@@ -10544,7 +10940,7 @@ index b806f62..b32650b 100644
              _ => {}
          });
          HeldThread {
-@@ -1171,6 +1343,10 @@ impl TasksCard {
+@@ -1171,6 +1364,10 @@ impl TasksCard {
              );
              return;
          };
@@ -10555,7 +10951,7 @@ index b806f62..b32650b 100644
          let status = task.status;
          // Read now: the adapter drops the ended task from its next snapshot, and the
          // card drops its ended row `ENDED_ROW_TTL` later (R6.1).
-@@ -1196,12 +1372,14 @@ impl TasksCard {
+@@ -1196,12 +1393,14 @@ impl TasksCard {
          self.ended.insert(
              key.clone(),
              EndedRow {
@@ -10571,7 +10967,7 @@ index b806f62..b32650b 100644
          self.record_ended(record, cx);
          if copies_log && first_ending {
              self.save_log(key, &thread_entity, LogSave::CopyOnEnd, cx);
-@@ -1293,6 +1471,149 @@ impl TasksCard {
+@@ -1293,6 +1492,149 @@ impl TasksCard {
          for record in records {
              self.record_started(record, cx);
          }
@@ -10721,7 +11117,7 @@ index b806f62..b32650b 100644
      }
  
      /// Tells `zeo-systray` about an ending the user is not looking at, when it is
-@@ -1300,7 +1621,7 @@ impl TasksCard {
+@@ -1300,7 +1642,7 @@ impl TasksCard {
      fn tell_tray(
          &mut self,
          key: TaskKey,
@@ -10730,7 +11126,7 @@ index b806f62..b32650b 100644
          datagram: Option<tray::TaskOutcomeDatagram>,
          cx: &mut Context<Self>,
      ) {
-@@ -1311,7 +1632,7 @@ impl TasksCard {
+@@ -1311,7 +1653,7 @@ impl TasksCard {
              return;
          };
          let watched = self.watched.contains(&key);
@@ -10739,7 +11135,7 @@ index b806f62..b32650b 100644
              return;
          }
          let (session_id, task_id) = &key;
-@@ -1329,7 +1650,13 @@ impl TasksCard {
+@@ -1329,7 +1671,13 @@ impl TasksCard {
  
      /// Keeps one wake pending, at the earliest expiry; none when nothing is ended.
      fn schedule_expiry(&mut self, cx: &mut Context<Self>) {
@@ -10754,7 +11150,7 @@ index b806f62..b32650b 100644
              self._expiry = None;
              return;
          };
-@@ -1357,6 +1684,7 @@ impl TasksCard {
+@@ -1357,6 +1705,7 @@ impl TasksCard {
                  self.row_errors.remove(&key);
              }
          }
@@ -10762,7 +11158,7 @@ index b806f62..b32650b 100644
          self.schedule_expiry(cx);
          cx.notify();
      }
-@@ -1397,15 +1725,11 @@ impl TasksCard {
+@@ -1397,15 +1746,11 @@ impl TasksCard {
      }
  
      fn any_running(&self, cx: &App) -> bool {
@@ -10783,7 +11179,7 @@ index b806f62..b32650b 100644
      }
  
      fn held_threads(&self) -> impl Iterator<Item = &HeldThread> {
-@@ -1413,7 +1737,7 @@ impl TasksCard {
+@@ -1413,7 +1758,7 @@ impl TasksCard {
      }
  
      /// A live thread of `session_id` that the card holds, whatever its tasks.
@@ -10792,7 +11188,7 @@ index b806f62..b32650b 100644
          self.held_threads()
              .filter(|held| &held.session_id == session_id)
              .find_map(|held| held.thread.upgrade())
-@@ -1433,41 +1757,46 @@ impl TasksCard {
+@@ -1433,41 +1778,46 @@ impl TasksCard {
              .filter(|held| &held.session_id == session_id)
              .filter_map(|held| held.thread.upgrade())
              .find(|thread| {
@@ -10858,7 +11254,7 @@ index b806f62..b32650b 100644
              })
      }
  
-@@ -1489,6 +1818,10 @@ impl TasksCard {
+@@ -1489,6 +1839,10 @@ impl TasksCard {
              .retain(|(session_id, _)| held.contains(session_id));
          self.tray_weighed
              .retain(|(session_id, _)| held.contains(session_id));
@@ -10869,7 +11265,7 @@ index b806f62..b32650b 100644
          // Only here, after the panel's deferred sync: activation removes a view and
          // re-adds it, and that gap is not a closed thread (R1.7).
          let ended_at_ms = unix_ms(SystemTime::now());
-@@ -1521,6 +1854,7 @@ impl TasksCard {
+@@ -1521,6 +1875,7 @@ impl TasksCard {
          for record in interrupted {
              cx.emit(TaskActivity::Ended(record));
          }
@@ -10877,7 +11273,7 @@ index b806f62..b32650b 100644
          self.schedule_expiry(cx);
      }
  }
-@@ -1667,6 +2001,7 @@ impl TasksCard {
+@@ -1667,6 +2022,7 @@ impl TasksCard {
              title,
              project,
              rows,
@@ -10885,7 +11281,7 @@ index b806f62..b32650b 100644
          } = group;
          let open_focus_handle = self
              .group_focus_handles
-@@ -1720,6 +2055,11 @@ impl TasksCard {
+@@ -1720,6 +2076,11 @@ impl TasksCard {
                  rows.into_iter()
                      .map(|row| self.render_row(&session_id, row, now, cx)),
              )
@@ -10897,7 +11293,7 @@ index b806f62..b32650b 100644
              .into_any_element()
      }
  
-@@ -1732,11 +2072,21 @@ impl TasksCard {
+@@ -1732,11 +2093,21 @@ impl TasksCard {
      ) -> AnyElement {
          let TaskRow {
              task,
@@ -10919,7 +11315,19 @@ index b806f62..b32650b 100644
          let task_id = task.id.clone();
          let key: TaskKey = (session_id.clone(), task_id.clone());
          let element_key = format!("{}-{}", session_id.0, task_id);
-@@ -1887,18 +2237,29 @@ impl TasksCard {
+@@ -1778,9 +2149,9 @@ impl TasksCard {
+                         .min_w_0()
+                         .gap_1()
+                         .child(
+-                            Label::new(format!("{} ·", progress_activity(&task)))
++                            Label::new(format!("{} ·", row_activity(&task, status)))
+                                 .size(LabelSize::XSmall)
+-                                .color(Color::Muted)
++                                .color(row_activity_color(status))
+                                 .single_line()
+                                 .truncate(),
+                         )
+@@ -1887,18 +2258,29 @@ impl TasksCard {
              .flex_none()
              .child(watch_button);
  
@@ -10952,7 +11360,7 @@ index b806f62..b32650b 100644
              ))
              .track_focus(&stop_focus_handle)
              .on_click(cx.listener({
-@@ -1976,38 +2337,41 @@ impl TasksCard {
+@@ -1976,38 +2358,41 @@ impl TasksCard {
                  .child(button)
          });
  
@@ -11025,7 +11433,7 @@ index b806f62..b32650b 100644
  
          let offers_background = task.status.is_running() && background_target(&task).is_some();
          let background_button = offers_background.then(|| {
-@@ -2142,6 +2506,12 @@ impl TasksCard {
+@@ -2142,6 +2527,12 @@ impl TasksCard {
                      .rows
                      .iter()
                      .map(|row| (group.session_id.clone(), row.task.id.clone()))
@@ -11038,7 +11446,7 @@ index b806f62..b32650b 100644
              })
              .collect();
          self.row_focus_handles
-@@ -2393,6 +2763,9 @@ const SHELL_KIND: &str = "shell";
+@@ -2393,6 +2784,9 @@ const SHELL_KIND: &str = "shell";
  /// The task kind that runs in a thread of its own (R5.4).
  const SUBAGENT_KIND: &str = "subagent";
  
@@ -11048,7 +11456,44 @@ index b806f62..b32650b 100644
  /// A tail entry on one row of the block: `single_line` stops soft wrapping, but a line break
  /// inside the text would still start a new line and draw over the next entry.
  fn tail_line(line: &SharedString) -> SharedString {
-@@ -2516,12 +2889,48 @@ fn records_of(thread: &AcpThread) -> Vec<TaskRecord> {
+@@ -2459,6 +2853,36 @@ pub(crate) fn progress_label(task: &AgentTask, now: SystemTime) -> Option<Shared
+     Some(format!("{} · {}", progress_activity(task), format_duration(elapsed)).into())
+ }
+ 
++/// What an active row paints on its second line, read from the row's own status (R1.8 of
++/// story 064): `progress_label` reads `AgentTask`, whose status folds Waiting into Running.
++#[cfg(test)]
++pub(crate) fn row_progress_label(row: &TaskRow, now: SystemTime) -> Option<SharedString> {
++    if !row.task.status.is_running() {
++        return None;
++    }
++    let elapsed = now.duration_since(row.task.started_at).unwrap_or_default();
++    let activity = row_activity(&row.task, row.status);
++    Some(format!("{activity} · {}", format_duration(elapsed)).into())
++}
++
++/// A subagent waiting on the operator says so in place of its tool line (R1.8 of story 064).
++fn row_activity(task: &AgentTask, status: TaskRowStatus) -> String {
++    match status {
++        TaskRowStatus::Waiting => TASK_WAITING_LABEL.to_string(),
++        _ => progress_activity(task),
++    }
++}
++
++fn row_activity_color(status: TaskRowStatus) -> Color {
++    match status {
++        TaskRowStatus::Waiting => Color::Warning,
++        _ => Color::Muted,
++    }
++}
++
++/// The text the subagent card shows for `RequiresAction` too (0072), so both surfaces agree.
++pub const TASK_WAITING_LABEL: &str = "Waiting for you";
++
+ /// The last tool and the tool count, or `starting` while the feed reports no tool use.
+ fn progress_activity(task: &AgentTask) -> String {
+     let tool_uses = task.usage.as_ref().map_or(0, |usage| usage.tool_uses);
+@@ -2516,12 +2940,48 @@ fn records_of(thread: &AcpThread) -> Vec<TaskRecord> {
      thread
          .tasks()
          .iter()
@@ -12981,4 +13426,287 @@ index 0000000..ea850e6
 +        ),
 +        "Open has a tooltip"
 +    );
++}
+diff --git a/crates/agent_ui/src/tasks_card/waiting_label_tests.rs b/crates/agent_ui/src/tasks_card/waiting_label_tests.rs
+new file mode 100644
+index 0000000..4bbb960
+--- /dev/null
++++ b/crates/agent_ui/src/tasks_card/waiting_label_tests.rs
+@@ -0,0 +1,277 @@
++// Story 064, task 11.1 — a subagent that needs the operator reads "Waiting for you" on the tasks
++// card, never "Running" or "starting"; a running one keeps its progress line (R1.8). Fixup of
++// `0071`. Module path: `tasks_card::waiting_label`; wired in `src/tasks_card.rs` beside the other
++// card test modules:
++//
++//     #[cfg(test)]
++//     #[path = "tasks_card/waiting_label_tests.rs"]
++//     mod waiting_label;
++//
++// Validation filter: `cargo test -p agent_ui tasks_card`.
++//
++// Contract beyond design.md (adjust `second_line` below only): GPUI's test window records painted
++// BOUNDS, not painted text, so the text a row paints is read through a test-only sibling of
++// story 023's `progress_label`:
++//
++//     #[cfg(test)]
++//     pub(crate) fn row_progress_label(row: &TaskRow, now: SystemTime) -> Option<SharedString>
++//
++// — what an active row paints on its second line: "Waiting for you" (an elapsed time may follow)
++// while `row.status` is `TaskRowStatus::Waiting`, else exactly `progress_label(&row.task, now)`.
++// `progress_label` itself cannot carry the state: it reads `AgentTask`, whose status
++// `TaskRowStatus::to_task_status` folds Waiting into Running on purpose (design.md, "Waiting
++// text"), and that fold is kept for expiry, history and the tray.
++//
++// Hostile halves first:
++//   - Waiting must NOT collapse into Running: the row's text is not the "starting" progress line
++//     and says neither "Running" nor "starting" — and stays so when the feed enriches that child
++//     with tool use, which is what would bring `progress_activity` back;
++//   - Running must NOT split into Waiting: a running sibling in the same group, and a feed task of
++//     the same parent, keep their progress line — the state is the row's, not the group's;
++//   - Waiting must not stick: once the child runs again its row reads its progress line;
++//   - then the benign half: the waiting row is still a live row — painted, stoppable, no ended
++//     status, and `task.status` still Running.
++
++use std::time::SystemTime;
++
++use acp_thread::AgentTaskStatus;
++use agent_client_protocol::schema::v2 as acp_v2;
++use gpui::{Entity, TestAppContext};
++use serde_json::json;
++
++use super::native_subagent_support::*;
++use super::test_helpers::*;
++use super::{TaskRow, TaskRowStatus};
++
++/// The status text R1.8 names, byte for byte.
++const WAITING: &str = "Waiting for you";
++
++fn second_line(row: &TaskRow, now: SystemTime) -> Option<String> {
++    super::row_progress_label(row, now).map(|text| text.to_string())
++}
++
++fn progress_line(row: &TaskRow, now: SystemTime) -> Option<String> {
++    super::progress_label(&row.task, now).map(|text| text.to_string())
++}
++
++fn report_waiting(rig: &mut SubagentRig, child: &Entity<acp_thread::AcpThread>) {
++    rig.report(
++        child,
++        acp_v2::StateUpdate::RequiresAction(acp_v2::RequiresActionStateUpdate::new()),
++    );
++}
++
++fn assert_reads_waiting(text: Option<String>, what: &str) {
++    let text = text.unwrap_or_else(|| panic!("{what}: a waiting row paints a status line"));
++    assert!(
++        text.starts_with(WAITING),
++        "{what}: a waiting row reads {WAITING:?}, it read {text:?}"
++    );
++    assert!(
++        !text.contains("Running") && !text.contains("starting"),
++        "{what}: a waiting row never reads \"Running\" or \"starting\": {text:?}"
++    );
++}
++
++// ── R1.8 — Waiting is not Running ───────────────────────────────────────────
++
++/// Hostile: a child in RequiresAction. Today the card paints it as a running row that has not
++/// used a tool yet — "starting · 0s".
++#[gpui::test]
++async fn test_tasks_card_waiting_child_reads_waiting_for_you(cx: &mut TestAppContext) {
++    let mut rig = subagent_rig(cx).await;
++    let alpha = rig.spawn_child("alpha", Some("Alpha"), true);
++    report_waiting(&mut rig, &alpha);
++    let row = rig.row_of(&alpha).expect("the waiting child has a row");
++    assert_eq!(
++        row.status,
++        TaskRowStatus::Waiting,
++        "precondition: the merger reads the child as Waiting"
++    );
++
++    let now = SystemTime::now();
++    assert_reads_waiting(second_line(&row, now), "Alpha");
++    assert_ne!(
++        second_line(&row, now),
++        progress_line(&row, now),
++        "the waiting text replaces the progress line"
++    );
++}
++
++/// Hostile: the feed names the waiting child and reports tool use. Enrichment brings the last
++/// tool and the count onto the row's task — which is exactly what `progress_activity` prints —
++/// but the row still reads Waiting.
++#[gpui::test]
++async fn test_tasks_card_waiting_child_enriched_by_the_feed_still_reads_waiting(
++    cx: &mut TestAppContext,
++) {
++    let mut rig = subagent_rig(cx).await;
++    let alpha = rig.spawn_child("alpha", Some("Alpha"), true);
++    report_waiting(&mut rig, &alpha);
++    let mut entry = wire_task("feed-alpha", "running", true, 1_000);
++    entry["type"] = json!("subagent");
++    entry["childSessionId"] = json!("alpha");
++    entry["lastTool"] = json!("Bash");
++    entry["usage"] = json!({ "tokens": 900, "toolUses": 3, "durationMs": 2_000 });
++    let parent = rig.parent.clone();
++    send_tasks(&parent, vec![entry], &mut rig.cx);
++
++    assert_eq!(
++        rig.rows_for(&alpha),
++        1,
++        "the feed entry folds into the child's row"
++    );
++    let row = rig.row_of(&alpha).expect("the waiting child has a row");
++    assert_eq!(
++        row.status,
++        TaskRowStatus::Waiting,
++        "the registry's status wins"
++    );
++    assert_eq!(
++        row.task.last_tool.as_deref(),
++        Some("Bash"),
++        "precondition: the feed enriched the row"
++    );
++    let now = SystemTime::now();
++    assert_reads_waiting(second_line(&row, now), "Alpha, enriched");
++    assert!(
++        !second_line(&row, now).unwrap_or_default().contains("Bash"),
++        "the tool line does not come back while the child waits"
++    );
++}
++
++// ── R1.8 converse — Running is not Waiting ──────────────────────────────────
++
++/// Hostile converse: Alpha waits, Bravo runs, in the same parent's group. Bravo keeps its
++/// progress line; only Alpha's row changes.
++#[gpui::test]
++async fn test_tasks_card_running_sibling_of_a_waiting_child_keeps_its_progress(
++    cx: &mut TestAppContext,
++) {
++    let mut rig = subagent_rig(cx).await;
++    let alpha = rig.spawn_child("alpha", Some("Alpha"), true);
++    let bravo = rig.spawn_child("bravo", Some("Bravo"), true);
++    report_waiting(&mut rig, &alpha);
++    rig.report_running(&bravo);
++
++    let now = SystemTime::now();
++    let alpha_row = rig.row_of(&alpha).expect("Alpha's row");
++    let bravo_row = rig.row_of(&bravo).expect("Bravo's row");
++    assert_eq!(bravo_row.status, TaskRowStatus::Running);
++    let bravo_text = second_line(&bravo_row, now);
++    assert_eq!(
++        bravo_text,
++        progress_line(&bravo_row, now),
++        "a running child keeps its progress line"
++    );
++    assert!(
++        bravo_text
++            .as_deref()
++            .is_some_and(|text| text.starts_with("starting") && !text.contains(WAITING)),
++        "Bravo has used no tool yet: {bravo_text:?}"
++    );
++    assert_reads_waiting(second_line(&alpha_row, now), "Alpha");
++}
++
++/// Hostile converse, third element: a feed task of the same parent — no registry, no Waiting
++/// state — keeps the progress line it has always had.
++#[gpui::test]
++async fn test_tasks_card_feed_task_beside_a_waiting_child_keeps_its_progress(
++    cx: &mut TestAppContext,
++) {
++    let mut rig = subagent_rig(cx).await;
++    let alpha = rig.spawn_child("alpha", Some("Alpha"), true);
++    report_waiting(&mut rig, &alpha);
++    let parent = rig.parent.clone();
++    send_tasks(
++        &parent,
++        vec![wire_task("t1", "running", true, 1_000)],
++        &mut rig.cx,
++    );
++
++    let parent_session = rig.parent_session.clone();
++    let card = rig.card.clone();
++    let feed_row =
++        find_row(&card, &parent_session, "t1", &mut rig.cx).expect("the feed task has a row");
++    assert_eq!(feed_row.status, TaskRowStatus::Running);
++    let now = SystemTime::now();
++    let text = second_line(&feed_row, now);
++    assert_eq!(text, progress_line(&feed_row, now));
++    assert!(
++        text.as_deref().is_some_and(|text| !text.contains(WAITING)),
++        "a feed task never reads Waiting: {text:?}"
++    );
++    assert_reads_waiting(
++        second_line(&rig.row_of(&alpha).expect("Alpha's row"), now),
++        "Alpha",
++    );
++}
++
++/// Waiting does not stick: the operator answers, the child runs again, and its row reads its
++/// progress line once more.
++#[gpui::test]
++async fn test_tasks_card_child_running_again_after_waiting_reads_its_progress(
++    cx: &mut TestAppContext,
++) {
++    let mut rig = subagent_rig(cx).await;
++    let alpha = rig.spawn_child("alpha", Some("Alpha"), true);
++    rig.report_running(&alpha);
++    report_waiting(&mut rig, &alpha);
++    let now = SystemTime::now();
++    assert_reads_waiting(
++        second_line(&rig.row_of(&alpha).expect("Alpha's row"), now),
++        "Alpha, waiting",
++    );
++
++    rig.report_running(&alpha);
++
++    let row = rig.row_of(&alpha).expect("Alpha's row");
++    assert_eq!(row.status, TaskRowStatus::Running);
++    let now = SystemTime::now();
++    let text = second_line(&row, now);
++    assert_eq!(text, progress_line(&row, now), "back to the progress line");
++    assert!(
++        text.as_deref().is_some_and(|text| !text.contains(WAITING)),
++        "{text:?}"
++    );
++}
++
++// ── Benign — the waiting row is still a live row ────────────────────────────
++
++/// The waiting row is painted with its Stop, paints no ended status (which is where an
++/// "Running"/"Completed" word would sit), and its task status is still Running: expiry,
++/// history and the tray read that fold and must not change.
++#[gpui::test]
++async fn test_tasks_card_waiting_row_stays_a_live_row(cx: &mut TestAppContext) {
++    let mut rig = subagent_rig(cx).await;
++    let alpha = rig.spawn_child("alpha", Some("Alpha"), true);
++    report_waiting(&mut rig, &alpha);
++    rig.draw();
++
++    let row = rig.row_of(&alpha).expect("Alpha's row");
++    assert_eq!(
++        row.task.status,
++        AgentTaskStatus::Running,
++        "the AgentTask fold stays Running (expiry, history, tray)"
++    );
++    let id = row.task.id.clone();
++    assert!(
++        rig.cx
++            .debug_bounds(selector(format!("tasks-card-row-{id}")))
++            .is_some(),
++        "the waiting row is painted"
++    );
++    assert!(
++        rig.cx
++            .debug_bounds(selector(format!("tasks-card-stop-{id}")))
++            .is_some(),
++        "a waiting child keeps its Stop"
++    );
++    assert!(
++        rig.cx
++            .debug_bounds(selector(format!("tasks-card-ended-{id}")))
++            .is_none(),
++        "a waiting row paints no ended status"
++    );
++    assert_reads_waiting(second_line(&row, SystemTime::now()), "Alpha");
 +}
