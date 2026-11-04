@@ -5602,10 +5602,10 @@ index 0000000..c8c8a25
 +}
 diff --git a/crates/epic_panel/src/panel_rows_tests.rs b/crates/epic_panel/src/panel_rows_tests.rs
 new file mode 100644
-index 0000000..490ba1f
+index 0000000..3ccffb6
 --- /dev/null
 +++ b/crates/epic_panel/src/panel_rows_tests.rs
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,310 @@
 +// Story 042, task 5.2 — rows, groups, empty states, badges, tooltips and the keyboard (R1.4,
 +// R2.1, R2.3, R2.4, R2.5, R2.7, R2.8, R2.9, R2.10, R2.11, R2.12, R3.8, R6.1-R6.3; Q16).
 +// Module path: `panel::panel_rows_tests`. See panel_test_helpers.rs for the assumed contract.
@@ -5890,7 +5890,10 @@ index 0000000..490ba1f
 +    let mut rig = rig(cx, &[("/work/project", legacy)], &["/work/project"]).await;
 +    assert_eq!(
 +        lines(&mut rig),
-+        ["Open EPIC.md".to_string(), format!("001 old | done | {DASH}")]
++        [
++            "Open EPIC.md".to_string(),
++            format!("001 old | done | {DASH}")
++        ]
 +    );
 +}
 +
@@ -5907,7 +5910,10 @@ index 0000000..490ba1f
 +    let mut rig = rig(cx, &[("/work/project", both)], &["/work/project"]).await;
 +    assert_eq!(
 +        lines(&mut rig),
-+        ["Open EPICO.md".to_string(), format!("002 current | draft | {DASH}")]
++        [
++            "Open EPICO.md".to_string(),
++            format!("002 current | draft | {DASH}")
++        ]
 +    );
 +}
 diff --git a/crates/epic_panel/src/panel_shell_tests.rs b/crates/epic_panel/src/panel_shell_tests.rs
