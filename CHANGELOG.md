@@ -31,6 +31,34 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.8.0_p20261108`: the series carried from `zeo-0.8.0_p20261101` (Zed `a4b39c38`) to Zed
+`d2a4fb6d`, 75 upstream commits, Zed 1.28.0 → 1.29.0. Snapshot-only, so no user-visible change
+and no `zeo/CHANGELOG.md` section (`zeo/docs/RELEASING.md`). Untagged until it is cut.
+
+### Changed
+
+- Every patch rebuilt by cherry-pick onto the new baseline: 64 of 69 clean. `0026` re-authored
+  on upstream's rewritten `render_thread_controls`: the floating overlay stays, upstream's new
+  inline turn-end controls (`ThreadControlsPosition`, `agent_message_copy_index` and its test)
+  are dropped, so the thread looks as it did. `0034` and `0036` conflicted on imports only.
+- `agent-client-protocol` 3.6.0 → 5.0.0 (`-schema` 1.13.0 → 1.15.1): `schema::v1`/`v2` became
+  `v1::schema`/`v2::schema` in about 26 patches; `Agent.builder()` is `Agent.v1()` in the tests
+  of `0034`, `0036` and `0070`'s fork tests; response callbacks take `agent_client_protocol::Error`.
+- `0058`: the new `ToolCallStatus::Paused` maps to `in_progress`, so zeo-browser's wire contract
+  does not change. `0070`: `ErrorCode::RESOURCE_NOT_FOUND`, and its helper renamed
+  `is_sub_thread_resource_not_found` (upstream now has a private `is_resource_not_found`).
+- `0001`'s header records that `acp-beta` now also offers plan operations (zed#66345) to v1 agents.
+- rustfmt debt paid in 40 files, per snapshot so each patch stays its own: `#[path]`-mounted test
+  files are invisible to `cargo fmt`, which is why it reported 21. Includes `0011`'s import line
+  (story 072) and the `0066` test lines that only `train/zeo-next` carried (story 073).
+- `0057`: the `redundant_clone` clippy error is gone; the clone now exists only under `cfg(test)`.
+
+### Tooling
+
+- `scripts/rewrite-acp5-paths.py`: the ACP 5.0.0 path rewrite, `--check` a tree or `--chain` a
+  series' snapshots. The 2026-09-28 equivalent lived in `/tmp` and was lost.
+- `rebrand/zed-literals.txt`: one upstream settings description naming "Zed Agent" accepted.
+
 ## [0.8.0_p20261101] — 2026-11-03 (tagged)
 
 Zeo 0.8.0 (story 073): the release train on the same Zed snapshot as 0.7.1 (`a4b39c38`), the

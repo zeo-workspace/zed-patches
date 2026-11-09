@@ -251,6 +251,7 @@ crates/settings_ui/src/page_data.rs	"Use LSP tasks over Zed language extension t
 crates/settings_ui/src/page_data.rs	"What to restore from the previous session when opening Zed."
 crates/settings_ui/src/page_data.rs	"When opening Zed, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project."
 crates/settings_ui/src/page_data.rs	"Whether breakpoints should be reused across Zed sessions."
+crates/settings_ui/src/page_data.rs	"Whether to automatically generate a title for Zed Agent threads using the summary model. When disabled, titles are only created when manually requested."
 crates/settings_ui/src/page_data.rs	"Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zed will automatically surround text with ()."
 crates/settings_ui/src/page_data.rs	"Whether to automatically type closing characters for you. For example, when you type '(', Zed will automatically add a closing ')' at the correct position."
 crates/settings_ui/src/page_data.rs	"Whether to disable all AI features in Zed."
