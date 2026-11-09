@@ -429,6 +429,41 @@
 # and 0063 are regenerated on top of it (offsets only). Numbered 0073 because
 # 0072 was the last number taken.
 0073-agent-ui-todo-toggle-in-agent-menu.patch
+# 0074-0083: Wave 2 of the Zeo next proposal (docs/ZEO-NEXT-PROPOSAL.md §5),
+# one patch per item, each stacked on the patch it changes rather than folded
+# into it, so every one carries its own reasoning and a bump re-resolves each
+# alone. All belong to this group: each extends an earlier patch of it, or
+# upstream code only. 0052, 0057, 0058, 0063 and 0067 are regenerated on top
+# of them (offsets only, plus 0084's context in 0063).
+# 0074: the five-hour quota window reads "5-hour limit", the CLI's own words
+# since 2.1.312 and plus's /usage text (on 0011/0013).
+0074-agent-ui-five-hour-limit-label.patch
+# 0075: the user message's copy control is upstream's CopyButton, with its
+# "Copied!" check (on 0014).
+0075-agent-ui-user-message-copy-button.patch
+# 0076: the Claude task _meta (0029's count, 0034's list) is read on a v2
+# session info update too, not only on the v1 arm.
+0076-acp-thread-task-meta-on-v2.patch
+# 0077: the Pinned section remembers being collapsed, in upstream's key-value
+# store (on 0049; not 0048's append-only domain -- see the header).
+0077-sidebar-pinned-remembers-collapsed.patch
+# 0078: Pause/Resume auto-scroll among the floating controls, with a "N new"
+# marker (on 0026).
+0078-agent-ui-pause-auto-scroll.patch
+# 0079: a foreground task cannot outlive its turn: still running at the turn's
+# end, it ends interrupted; a background one is left alone (on 0034).
+0079-acp-thread-foreground-task-ends-with-turn.patch
+# 0080: the tasks card draws its scrollbar always, rows can be dismissed, and
+# "Clear finished" empties ended rows (on 0037).
+0080-agent-ui-tasks-card-dismiss-and-clear.patch
+# 0081: the expanded item plan draws its scrollbar always (upstream code; the
+# list stays on screen longer now that plus sends a keyed plan).
+0081-agent-ui-plan-scrollbar.patch
+# 0082: the pending question card minimizes to a one-line bar, with the
+# agent::ToggleQuestionCard action (on 0027; 0043's Enter rule unchanged).
+0082-agent-ui-question-card-minimize.patch
+# 0083: agent.tasks_card.start_minimized, default false (on 0037).
+0083-agent-ui-tasks-card-start-minimized.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
@@ -460,6 +495,11 @@
 # needs devtools-bridge, which the ebuild's REQUIRED_USE ties to it. It applies on
 # top of 0052 with or without 0057, and 0050/0051 apply on top of it unchanged.
 0058-browser-extension.patch
+# 0084: the browser's cancel is answered once the cancellation resolved -- ok,
+# or send_failed with the agent's message -- not before it (review debt from
+# the 0.5.1 bump). Right after 0058, in its group: it changes 0058's handler.
+# 0063 is regenerated on top of it.
+0084-browser-cancel-answers-after-the-outcome.patch
 
 # @feature: devtools-panel
 # 0063: the devtools panel (story 055) -- the zeo-devtools Vite plugin serves a
@@ -502,6 +542,9 @@
 # devtools-panel and epic each on or off, and 0050/0051 apply on top of it
 # unchanged.
 0067-voice-input.patch
+# 0085: the microphone ends the composer's left-hand group, next to Add
+# Context, instead of sitting beside Send (proposal §5.6). In 0067's group.
+0085-agent-ui-voice-button-beside-add-context.patch
 
 # @feature: test
 # 0050, 0051: tests only -- nothing in them is compiled into the editor -- so the
