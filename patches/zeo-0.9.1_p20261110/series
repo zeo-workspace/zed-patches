@@ -468,6 +468,11 @@
 # Zed 483b746b reversed the row, which drew Claude Agent's Mode last (Zeo
 # 0.9.1, operator report 2026-11-09). Upstream code only.
 0086-agent-ui-config-options-keep-agent-order.patch
+# 0087: message times and turn duration (Zeo next proposal §6.4, Wave 3): a
+# side table in acp_thread fed by the agent's _meta.claudeCode.timestamp (plus
+# >= 0.37.0) or the live receive time, and a row under each user message and
+# each completed turn's last reply. On 0086.
+0087-agent-ui-message-times-and-turn-duration.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
