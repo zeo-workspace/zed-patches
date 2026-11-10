@@ -31,6 +31,19 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.9.1_p20261110`: `patches/zeo-0.9.1_p20261109` becomes `patches/zeo-0.9.1_p20261110`, Zed
+`483b746b` → `f0d896f2` (4 upstream commits, 2026-11-09). Snapshot-only: Zeo stays 0.9.1, so no
+`zeo/CHANGELOG.md` section. The seven-day release hold is waived by the operator for this bump
+(`docs/ZEO-NEXT-PROPOSAL.md`, Status, 2026-11-10).
+
+### Changed
+
+- `agent-client-protocol` 5.0.0 → 5.1.0 (`-derive` 5.0.0 → 5.1.0, `-schema` 1.15.1 → 1.16.0,
+  zed#66748), the step the previous bump stopped short of. Upstream needed no source change for
+  it, and no patch did either: all 82 commits cherry-picked cleanly onto the new baseline.
+- `0002`, `0035`, `0036`, `0039`, `0052`, `0057`, `0058`, `0066`, `0067`, `0072` regenerated
+  (`index` and `@@` lines only); the other 72 are byte-identical.
+
 Zeo `0.9.1_p20261109`: `patches/zeo-0.9.0_p20261109` becomes `patches/zeo-0.9.1_p20261109`, same
 Zed `483b746b`. Three fixes from the operator's report; user-visible, recorded in
 `zeo/CHANGELOG.md` under 0.9.1.
