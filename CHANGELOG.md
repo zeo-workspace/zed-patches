@@ -31,6 +31,20 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.9.1_p20261109`: `patches/zeo-0.9.0_p20261109` becomes `patches/zeo-0.9.1_p20261109`, same
+Zed `483b746b`. Three fixes from the operator's report; user-visible, recorded in
+`zeo/CHANGELOG.md` under 0.9.1.
+
+### Added
+
+- `0086` (unconditional, in 0074-0083's group): the composer's config options keep the agent's
+  order; Zed `483b746b` reversed the row.
+
+### Changed
+
+- `0080` and `0082` carry their fixes, each with a "Fixed in Zeo 0.9.1" paragraph in the header.
+  `0052`, `0057`, `0058`, `0067`, `0083`, `0084` and `0085` regenerated on top (offsets only).
+
 Zeo `0.8.0_p20261108`: the series carried from `zeo-0.8.0_p20261101` (Zed `a4b39c38`) to Zed
 `d2a4fb6d`, 75 upstream commits, Zed 1.28.0 → 1.29.0. Snapshot-only, so no user-visible change
 and no `zeo/CHANGELOG.md` section (`zeo/docs/RELEASING.md`). Untagged until it is cut.

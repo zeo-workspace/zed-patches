@@ -464,6 +464,10 @@
 0082-agent-ui-question-card-minimize.patch
 # 0083: agent.tasks_card.start_minimized, default false (on 0037).
 0083-agent-ui-tasks-card-start-minimized.patch
+# 0086: the composer's config options keep the agent's order, left to right;
+# Zed 483b746b reversed the row, which drew Claude Agent's Mode last (Zeo
+# 0.9.1, operator report 2026-11-09). Upstream code only.
+0086-agent-ui-config-options-keep-agent-order.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
