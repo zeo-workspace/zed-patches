@@ -76,6 +76,9 @@ unzip -q /in/webrtc.zip -d /work/webrtc
 # src_compile. RUSTFLAGS replaces .cargo/config.toml's rustflags instead of adding
 # to them, so Zed's own two flags are repeated here next to the CPU target.
 export RELEASE_VERSION="${ZEO_PV}" RELEASE_CHANNEL="zeo"
+# 0091: the About window's Zed row shows the packaged upstream commit, as the ebuild's
+# src_compile passes it. Without this the row reads "+zeo" instead of the commit.
+export ZEO_UPSTREAM_COMMIT="${ZEO_COMMIT}"
 export ZED_UPDATE_EXPLANATION="Update Zeo where you installed it: your package manager, Flatpak, or a new AppImage from https://github.com/zeo-workspace/zeo/releases"
 export LK_CUSTOM_WEBRTC=/work/webrtc/linux-x64-release
 export RUSTFLAGS="-C target-cpu=x86-64-v3 -C symbol-mangling-version=v0 --cfg tokio_unstable"

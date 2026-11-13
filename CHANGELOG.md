@@ -56,6 +56,12 @@ recorded in `zeo/CHANGELOG.md` under 0.10.0. Seventeen patches added; the series
 - `0052`, `0057`, `0058`, `0067`, `0084` and `0085` regenerated on top of `0087` (`index` and `@@`
   lines only); the other 76 are byte-identical.
 
+### Fixed
+
+- `release/portable/build-in-container.sh` exports `ZEO_UPSTREAM_COMMIT`, as the ebuild's
+  `src_compile` does: without it a portable build's About window read `1.29.0+zeo` on the Zed
+  row instead of the packaged commit (`0091`). Found by the smoke run of the 0.10.0 binary.
+
 Zeo `0.9.1_p20261110`: `patches/zeo-0.9.1_p20261109` becomes `patches/zeo-0.9.1_p20261110`, Zed
 `483b746b` → `f0d896f2` (4 upstream commits, 2026-11-09). Snapshot-only: Zeo stays 0.9.1, so no
 `zeo/CHANGELOG.md` section. The seven-day release hold is waived by the operator for this bump
