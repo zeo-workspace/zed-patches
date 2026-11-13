@@ -546,6 +546,10 @@
 # 0105: the sub-thread entries of a message's menu are "Fork to a sub-thread"
 # and "Open to a new sub-thread" (Zeo 0.10.2). Labels only. On 0070.
 0105-agent-ui-sub-thread-menu-labels.patch
+# 0106: another project's pins stay out of its group -- every project pin
+# leaves the groups, and only the active project's are listed, in its Pinned
+# section (Zeo 0.10.3, the operator's correction to 0103). On 0103.
+0106-sidebar-hide-other-projects-pins.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch

@@ -31,6 +31,22 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.10.3_p20261110`: `patches/zeo-0.10.2_p20261110` becomes `patches/zeo-0.10.3_p20261110`, same
+Zed `f0d896f2`. One correction from the operator's session on 0.10.2; user-visible, recorded in
+`zeo/CHANGELOG.md` under 0.10.3. The series is 102.
+
+### Added
+
+- `0106` (USE `claude-agent-acp-plus`, after `0105`): another project's pins stay out of its group.
+  Every project pin leaves the groups, not only the active project's; the Pinned section still
+  lists only the active project's.
+
+### Changed
+
+- `0063` regenerated on top (`index` and `@@` lines only). `0106` was cut from a branch in series
+  order (`series-0106` in the prepared tree), whose final tree is byte-identical to the one the
+  tests ran on.
+
 Zeo `0.10.2_p20261110`: `patches/zeo-0.10.1_p20261110` becomes `patches/zeo-0.10.2_p20261110`, same
 Zed `f0d896f2`. Two corrections from the operator's session on 0.10.1; user-visible, recorded in
 `zeo/CHANGELOG.md` under 0.10.2. The series is 101.
