@@ -31,6 +31,21 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.10.1_p20261110`: `patches/zeo-0.10.0_p20261110` becomes `patches/zeo-0.10.1_p20261110`, same
+Zed `f0d896f2`. One correction from the operator's first session on 0.10.0; user-visible, recorded
+in `zeo/CHANGELOG.md` under 0.10.1.
+
+### Changed
+
+- `0103` carries the correction, with a "Fixed in Zeo 0.10.1" paragraph in its header: pinning is
+  to the project by default, and the active project's pins have a Pinned section above the global
+  one. Its patch file is now cut from a branch in series order, since its hunks reach lines that
+  `0063` changes later in the series.
+- `0063` regenerated on top: its devtools filter now lands inside `0103`'s loop over the two
+  sections. `0002`, `0052`, `0057`, `0058`, `0084`, `0066`, `0067` and `0085` regenerated too
+  (`index` and `@@` lines only). The tree the whole series produces is byte-identical to the one
+  the tests ran on.
+
 Zeo `0.10.0_p20261110`: `patches/zeo-0.9.1_p20261110` becomes `patches/zeo-0.10.0_p20261110`, same
 Zed `f0d896f2`. Wave 3 of the Zeo next proposal (`docs/ZEO-NEXT-PROPOSAL.md` §6); user-visible,
 recorded in `zeo/CHANGELOG.md` under 0.10.0. Seventeen patches added; the series is 99.
