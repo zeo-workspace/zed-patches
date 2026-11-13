@@ -33,8 +33,7 @@ bumps inside a range are summarised rather than listed one by one.
 
 Zeo `0.10.0_p20261110`: `patches/zeo-0.9.1_p20261110` becomes `patches/zeo-0.10.0_p20261110`, same
 Zed `f0d896f2`. Wave 3 of the Zeo next proposal (`docs/ZEO-NEXT-PROPOSAL.md` §6); user-visible,
-recorded in `zeo/CHANGELOG.md` under 0.10.0. Seventeen patches added, none of the other 82
-changed; the series is 99.
+recorded in `zeo/CHANGELOG.md` under 0.10.0. Seventeen patches added; the series is 99.
 
 ### Added
 
@@ -51,6 +50,11 @@ changed; the series is 99.
   commit and links (§6.18), `0098` "Install CLI" only while `zeo` is not reachable (§6.25).
 - `0096` and `0103` each keep their data in a database domain of their own rather than a step
   appended to `0048`'s migration list, which `0063` extends under USE `devtools-panel`.
+
+### Changed
+
+- `0052`, `0057`, `0058`, `0067`, `0084` and `0085` regenerated on top of `0087` (`index` and `@@`
+  lines only); the other 76 are byte-identical.
 
 Zeo `0.9.1_p20261110`: `patches/zeo-0.9.1_p20261109` becomes `patches/zeo-0.9.1_p20261110`, Zed
 `483b746b` → `f0d896f2` (4 upstream commits, 2026-11-09). Snapshot-only: Zeo stays 0.9.1, so no
