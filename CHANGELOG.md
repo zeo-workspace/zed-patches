@@ -31,6 +31,24 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.10.2_p20261110`: `patches/zeo-0.10.1_p20261110` becomes `patches/zeo-0.10.2_p20261110`, same
+Zed `f0d896f2`. Two corrections from the operator's session on 0.10.1; user-visible, recorded in
+`zeo/CHANGELOG.md` under 0.10.2. The series is 101.
+
+### Added
+
+- `0104` (USE `claude-agent-acp-plus`, after `0103`): the tasks card sits below the pinned user
+  message. Whatever floats over the top of a conversation reports where it ends
+  (`ThreadView::top_overlay_bottom`), and the card's free area starts there.
+- `0105` (same group): the sub-thread entries of a message's menu are "Fork to a sub-thread" and
+  "Open to a new sub-thread". Labels only.
+
+### Changed
+
+- `0052`, `0057`, `0058`, `0084`, `0063`, `0067` and `0085` regenerated on top (`index` and `@@`
+  lines only). Both new patches were cut from a branch in series order, whose final tree is
+  byte-identical to the one the tests ran on.
+
 Zeo `0.10.1_p20261110`: `patches/zeo-0.10.0_p20261110` becomes `patches/zeo-0.10.1_p20261110`, same
 Zed `f0d896f2`. One correction from the operator's first session on 0.10.0; user-visible, recorded
 in `zeo/CHANGELOG.md` under 0.10.1.
