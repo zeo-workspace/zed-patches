@@ -31,6 +31,27 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Zeo `0.10.0_p20261110`: `patches/zeo-0.9.1_p20261110` becomes `patches/zeo-0.10.0_p20261110`, same
+Zed `f0d896f2`. Wave 3 of the Zeo next proposal (`docs/ZEO-NEXT-PROPOSAL.md` §6); user-visible,
+recorded in `zeo/CHANGELOG.md` under 0.10.0. Seventeen patches added, none of the other 82
+changed; the series is 99.
+
+### Added
+
+- USE `claude-agent-acp-plus`, after `0086`, in this order: `0087` message times and turn
+  duration (§6.4), `0088` the tasks card clears a child's titlebar (§6.14), `0089` the quota
+  rows refresh live (§6.16), `0090` terminals minimized by default (§6.17), `0092` the tasks
+  card moves to the bottom (§6.19), `0093` pages in the Agent Tasks panel (§6.20), `0094` the
+  card's eye previews the task (§6.22), `0095` the card's buttons and preview in the panel
+  (§6.21), `0096` a thread description (§6.6), `0097` purpose tags (§6.2), `0099` the 5-hour arc
+  (§6.26), `0100` a task's log in a tab of the panel (§6.1, §6.27), `0101` an ended shell's
+  result line and a subagent row's latest entry (§6.1), `0102` the sent message pinned at the
+  top (§6.3), `0103` pins per project (§6.5).
+- Unconditional, in the rebrand group after `0047`: `0091` the About window's stage, packaged
+  commit and links (§6.18), `0098` "Install CLI" only while `zeo` is not reachable (§6.25).
+- `0096` and `0103` each keep their data in a database domain of their own rather than a step
+  appended to `0048`'s migration list, which `0063` extends under USE `devtools-panel`.
+
 Zeo `0.9.1_p20261110`: `patches/zeo-0.9.1_p20261109` becomes `patches/zeo-0.9.1_p20261110`, Zed
 `483b746b` → `f0d896f2` (4 upstream commits, 2026-11-09). Snapshot-only: Zeo stays 0.9.1, so no
 `zeo/CHANGELOG.md` section. The seven-day release hold is waived by the operator for this bump
