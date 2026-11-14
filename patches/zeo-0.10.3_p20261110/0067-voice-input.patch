@@ -495,10 +495,10 @@ index 66b9f67..a19c044 100644
  editor = { workspace = true, features = ["test-support"] }
  eval_utils.workspace = true
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index eb06c56..a2d9300 100644
+index 7964a3b..2cf82bb 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
-@@ -60,6 +60,8 @@ pub mod thread_worktree_archive;
+@@ -61,6 +61,8 @@ pub mod thread_worktree_archive;
  pub mod threads_archive_view;
  mod ui;
  mod unicode_confusables;
@@ -507,7 +507,7 @@ index eb06c56..a2d9300 100644
  
  use std::rc::Rc;
  use std::sync::Arc;
-@@ -785,6 +787,7 @@ pub fn init(
+@@ -786,6 +788,7 @@ pub fn init(
          init_language_model_settings(cx);
      }
      agent_panel::init(cx);
@@ -515,7 +515,7 @@ index eb06c56..a2d9300 100644
      context_server_configuration::init(language_registry, fs.clone(), cx);
      thread_metadata_store::init(cx);
      thread_organization::init(cx);
-@@ -1138,6 +1141,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1139,6 +1142,43 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
      Some(command)
  }
  
@@ -983,7 +983,7 @@ index f824178..ac8d36f 100644
                  if this.parent_session_id.is_none() {
                      this.cancel_generation(cx);
 diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
-index 022ba92..b3087f8 100644
+index e8652ea..3cebfaf 100644
 --- a/crates/agent_ui/src/message_editor.rs
 +++ b/crates/agent_ui/src/message_editor.rs
 @@ -227,6 +227,9 @@ pub struct MessageEditor {
@@ -1016,7 +1016,7 @@ index 022ba92..b3087f8 100644
  
              editor.set_custom_context_menu(|editor, _point, window, cx| {
                  let has_selection = editor.has_non_empty_selection(&editor.display_snapshot(cx));
-@@ -659,6 +666,7 @@ impl MessageEditor {
+@@ -670,6 +677,7 @@ impl MessageEditor {
              session_capabilities,
              local_commands,
              question_pending,
@@ -1024,7 +1024,7 @@ index 022ba92..b3087f8 100644
              swallowed_send: false,
              skip_slash_command_check: false,
              agent_id,
-@@ -682,6 +690,12 @@ impl MessageEditor {
+@@ -693,6 +701,12 @@ impl MessageEditor {
          self.question_pending.set(question_pending);
      }
  
@@ -1037,7 +1037,7 @@ index 022ba92..b3087f8 100644
      /// Whether the composer is explaining a swallowed Enter: one was pressed
      /// while a question was pending, and the question is still pending.
      pub fn shows_swallowed_send_hint(&self) -> bool {
-@@ -2205,6 +2219,53 @@ impl MessageEditor {
+@@ -2216,6 +2230,53 @@ impl MessageEditor {
          });
      }
  
@@ -1091,7 +1091,7 @@ index 022ba92..b3087f8 100644
      pub fn set_placeholder_text(
          &mut self,
          placeholder: &str,
-@@ -2447,13 +2508,32 @@ impl Render for MessageEditor {
+@@ -2458,13 +2519,32 @@ impl Render for MessageEditor {
      }
  }
  
@@ -1126,7 +1126,7 @@ index 022ba92..b3087f8 100644
      }
  }
  
-@@ -2474,6 +2554,11 @@ impl Addon for MessageEditorAddon {
+@@ -2485,6 +2565,11 @@ impl Addon for MessageEditorAddon {
          if self.question_pending.get() {
              key_context.add("question_pending");
          }

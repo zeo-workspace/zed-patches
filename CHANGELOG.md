@@ -31,6 +31,20 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Next Zeo (planned 0.11.0), still under `patches/zeo-0.10.3_p20261110` until the release renames it.
+
+### Added
+
+- `0107` (USE `claude-agent-acp-plus`, after `0106`): code blocks and quotes in the composer get a
+  block look, and a typed ``` closes itself (§6.12). The editor gains a per-type left border for
+  row highlights (`Editor::set_row_highlight_left_border`, `LineHighlight.left_border`).
+
+### Changed
+
+- `0052`, `0057`, `0058`, `0063` and `0067` regenerated on top (`index` and `@@` lines; `0058` also
+  one context line, the `mod` it adds now sits under `mod composer_blocks;`). Cut from
+  `series-0107` in the prepared tree, byte-identical to the tested tree.
+
 Zeo `0.10.3_p20261110`: `patches/zeo-0.10.2_p20261110` becomes `patches/zeo-0.10.3_p20261110`, same
 Zed `f0d896f2`. One correction from the operator's session on 0.10.2; user-visible, recorded in
 `zeo/CHANGELOG.md` under 0.10.3. The series is 102.

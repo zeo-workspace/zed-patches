@@ -13533,7 +13533,7 @@ index 0000000..51b1d6b
 +    }
 +}
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index ffb6995..2517c40 100644
+index ff651a8..be863af 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -1,9 +1,11 @@
@@ -13548,7 +13548,7 @@ index ffb6995..2517c40 100644
  mod agent_session_router;
  mod buffer_codegen;
  mod completion_provider;
-@@ -1125,6 +1127,9 @@ mod slash_command_in_code_block_tests;
+@@ -1126,6 +1128,9 @@ mod slash_command_in_code_block_tests;
  #[cfg(test)]
  mod devtools_mention_tests;
  

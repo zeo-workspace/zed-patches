@@ -550,6 +550,11 @@
 # leaves the groups, and only the active project's are listed, in its Pinned
 # section (Zeo 0.10.3, the operator's correction to 0103). On 0103.
 0106-sidebar-hide-other-projects-pins.patch
+# 0107: code blocks and quotes in the composer get a background and a left
+# stripe, and typing ``` on a line of its own closes the fence (Zeo next
+# proposal §6.12). Adds a per-type left border to the editor's row
+# highlights. On 0016.
+0107-agent-ui-composer-code-blocks.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch

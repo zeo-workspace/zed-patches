@@ -612,7 +612,7 @@ index b3c9b39..66b9f67 100644
  
  [dev-dependencies]
 diff --git a/crates/agent_ui/src/agent_ui.rs b/crates/agent_ui/src/agent_ui.rs
-index 2517c40..bdbb99f 100644
+index be863af..46dcc5e 100644
 --- a/crates/agent_ui/src/agent_ui.rs
 +++ b/crates/agent_ui/src/agent_ui.rs
 @@ -7,6 +7,8 @@ mod agent_panel;
@@ -623,8 +623,8 @@ index 2517c40..bdbb99f 100644
 +pub mod browser_wire;
  mod buffer_codegen;
  mod completion_provider;
- mod config_options;
-@@ -102,7 +104,10 @@ pub use crate::agent_session_router::{
+ mod composer_blocks;
+@@ -103,7 +105,10 @@ pub use crate::agent_session_router::{
      open_agent_subagent,
  };
  pub use crate::inline_assistant::InlineAssistant;
@@ -636,7 +636,7 @@ index 2517c40..bdbb99f 100644
  pub use crate::message_editor::MessageEditorEvent;
  pub use crate::sub_thread_reporter::{SubThreadActivity, SubThreadRecord};
  pub use crate::task_label::{
-@@ -1124,6 +1129,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
+@@ -1125,6 +1130,8 @@ pub(crate) fn slash_command_in_code_block(code: &str) -> Option<&str> {
  #[cfg(test)]
  mod slash_command_in_code_block_tests;
  
@@ -8396,7 +8396,7 @@ index 0b7083b..86f0e2d 100644
      fn test_is_raster_image_path_is_case_insensitive() {
          // Regression test for #54308: drag-and-dropping a file whose extension
 diff --git a/crates/agent_ui/src/message_editor.rs b/crates/agent_ui/src/message_editor.rs
-index 8295cfd..022ba92 100644
+index 7f242b0..e8652ea 100644
 --- a/crates/agent_ui/src/message_editor.rs
 +++ b/crates/agent_ui/src/message_editor.rs
 @@ -7,7 +7,10 @@ use crate::{
@@ -8411,7 +8411,7 @@ index 8295cfd..022ba92 100644
  };
  use acp_thread::MentionUri;
  use agent::ThreadStore;
-@@ -1763,13 +1766,42 @@ impl MessageEditor {
+@@ -1774,13 +1777,42 @@ impl MessageEditor {
          elements: Vec<(MentionUri, DomSummary)>,
          window: &mut Window,
          cx: &mut Context<Self>,
@@ -8456,7 +8456,7 @@ index 8295cfd..022ba92 100644
              let link_text = mention_uri.as_link().to_string();
              let content_len = link_text.len();
              let crease_text: SharedString = mention_uri.name().into();
-@@ -1788,8 +1820,8 @@ impl MessageEditor {
+@@ -1799,8 +1831,8 @@ impl MessageEditor {
                  })
                  .context("the composer has no single buffer to insert into")?;
              let editor = self.editor.clone();
@@ -8467,7 +8467,7 @@ index 8295cfd..022ba92 100644
                      crease_text,
                      start_anchor,
                      content_len,
-@@ -1799,7 +1831,18 @@ impl MessageEditor {
+@@ -1810,7 +1842,18 @@ impl MessageEditor {
                      &workspace,
                      window,
                      cx,
