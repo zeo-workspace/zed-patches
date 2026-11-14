@@ -90,14 +90,14 @@ browser_channel_tests/browser_wire_subagents.rs).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index fd3e2af..d58b271 100644
+index b903aee..d4c91df 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -566,6 +566,7 @@ dependencies = [
   "http_client",
   "idna",
   "image",
-+ "indexmap 2.14.0",
++ "indexmap 2.14.2",
   "indoc",
   "itertools 0.14.0",
   "jsonschema",

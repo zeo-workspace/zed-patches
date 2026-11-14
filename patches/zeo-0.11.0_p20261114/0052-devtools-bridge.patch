@@ -84,7 +84,7 @@ its own unit, integration and Playwright suites in zeo-devtools.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index aadadc9..9d9d2c4 100644
+index aadadc9..3ea40c9 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -4927,6 +4927,32 @@ dependencies = [
@@ -103,7 +103,7 @@ index aadadc9..9d9d2c4 100644
 + "fs",
 + "futures 0.3.34",
 + "gpui",
-+ "indexmap 2.14.0",
++ "indexmap 2.14.2",
 + "language_model",
 + "log",
 + "nix 0.30.1",

@@ -111,7 +111,7 @@ reqwest_client without_proxy.
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 52e0dd4..fc7b95a 100644
+index d0ef7fb..05aa36d 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -546,6 +546,7 @@ dependencies = [

@@ -98,7 +98,7 @@ the fs symlink log line).
 ---
 
 diff --git a/Cargo.lock b/Cargo.lock
-index d58b271..52e0dd4 100644
+index d4c91df..d0ef7fb 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -5857,6 +5857,30 @@ dependencies = [
