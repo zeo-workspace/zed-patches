@@ -254,10 +254,10 @@ index 7a6fcbb..d12db2f 100644
  }
 diff --git a/crates/acp_thread/src/acp_thread_message_times_tests.rs b/crates/acp_thread/src/acp_thread_message_times_tests.rs
 new file mode 100644
-index 0000000..a878d28
+index 0000000..2e2f466
 --- /dev/null
 +++ b/crates/acp_thread/src/acp_thread_message_times_tests.rs
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,190 @@
 +// Zeo next proposal §6.4 (ask 24): message times and turn duration.
 +//
 +// Each user and agent message records when it was sent: the agent's `_meta.claudeCode.timestamp`
@@ -301,7 +301,9 @@ index 0000000..a878d28
 +    cx: &mut TestAppContext,
 +) {
 +    thread.update(cx, |thread, cx| {
-+        thread.handle_session_update(update, cx).expect("update applies")
++        thread
++            .handle_session_update(update, cx)
++            .expect("update applies")
 +    });
 +}
 +
@@ -332,7 +334,10 @@ index 0000000..a878d28
 +
 +    thread.read_with(cx, |thread, _| {
 +        let user = thread.message_time(0).expect("the user message has a time");
-+        assert_eq!((user.first, user.last), (message_times_at(T_SENT), message_times_at(T_SENT)));
++        assert_eq!(
++            (user.first, user.last),
++            (message_times_at(T_SENT), message_times_at(T_SENT))
++        );
 +        let reply = thread.message_time(1).expect("the reply has a time");
 +        assert_eq!(reply.first, message_times_at(T_REPLY), "first chunk");
 +        assert_eq!(reply.last, message_times_at(T_LAST), "last chunk");
@@ -359,7 +364,11 @@ index 0000000..a878d28
 +    );
 +
 +    thread.read_with(cx, |thread, _| {
-+        assert_eq!(thread.message_time(0), None, "received now is not when it was sent");
++        assert_eq!(
++            thread.message_time(0),
++            None,
++            "received now is not when it was sent"
++        );
 +        assert_eq!(thread.message_time(1), None);
 +        assert_eq!(thread.turn_duration(0), None);
 +    });
@@ -394,7 +403,10 @@ index 0000000..a878d28
 +            let time = thread
 +                .message_time(ix)
 +                .unwrap_or_else(|| panic!("entry {ix} stamped live"));
-+            assert!(before <= time.first && time.last <= after, "entry {ix}: {time:?}");
++            assert!(
++                before <= time.first && time.last <= after,
++                "entry {ix}: {time:?}"
++            );
 +        }
 +        assert!(thread.turn_duration(0).is_some());
 +    });

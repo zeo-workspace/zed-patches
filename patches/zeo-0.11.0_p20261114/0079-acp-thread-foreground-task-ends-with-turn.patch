@@ -96,10 +96,10 @@ index 2059cc7..7a6fcbb 100644
  }
 diff --git a/crates/acp_thread/src/acp_thread_tasks_turn_end_tests.rs b/crates/acp_thread/src/acp_thread_tasks_turn_end_tests.rs
 new file mode 100644
-index 0000000..6c75fea
+index 0000000..dd05ce2
 --- /dev/null
 +++ b/crates/acp_thread/src/acp_thread_tasks_turn_end_tests.rs
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,67 @@
 +// Zeo next proposal §5.2: a foreground task cannot outlive its turn. When the turn ends, a
 +// foreground task still reported running ends as interrupted; a background one is left alone.
 +//
@@ -146,11 +146,13 @@ index 0000000..6c75fea
 +}
 +
 +#[gpui::test]
-+async fn tasks_turn_end_leaves_a_task_backgrounded_at_the_end_of_the_turn(
-+    cx: &mut TestAppContext,
-+) {
++async fn tasks_turn_end_leaves_a_task_backgrounded_at_the_end_of_the_turn(cx: &mut TestAppContext) {
 +    let (thread, events) = tasks_thread(Rc::new(FakeAgentConnection::new()), cx).await;
-+    tasks_send(&thread, tasks_snapshot(vec![tasks_foreground("t", 1_000)]), cx);
++    tasks_send(
++        &thread,
++        tasks_snapshot(vec![tasks_foreground("t", 1_000)]),
++        cx,
++    );
 +    // The agent moves it to the background just before the turn ends.
 +    tasks_send(
 +        &thread,

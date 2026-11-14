@@ -441,7 +441,7 @@ index 0000000..6d18f31
 +    );
 +}
 diff --git a/crates/install_cli/src/install_cli.rs b/crates/install_cli/src/install_cli.rs
-index 2810690..db53164 100644
+index 2810690..3042e26 100644
 --- a/crates/install_cli/src/install_cli.rs
 +++ b/crates/install_cli/src/install_cli.rs
 @@ -1,7 +1,9 @@
@@ -450,9 +450,9 @@ index 2810690..db53164 100644
  mod install_cli_binary;
  mod register_zed_scheme;
  
++pub use cli_presence::{CLI_NAME, CliPresence};
  #[cfg(not(target_os = "windows"))]
  pub use install_cli_binary::{InstallCliBinary, install_cli_binary};
-+pub use cli_presence::{CLI_NAME, CliPresence};
  pub use register_zed_scheme::{RegisterZedScheme, register_zed_scheme};
 diff --git a/crates/install_cli/src/install_cli_binary.rs b/crates/install_cli/src/install_cli_binary.rs
 index c17c2dc..18f2c40 100644

@@ -555,6 +555,12 @@
 # proposal §6.12). Adds a per-type left border to the editor's row
 # highlights. On 0016.
 0107-agent-ui-composer-code-blocks.patch
+# 0108: the series' floating elements -- the pinned user message, the
+# question card and its bar, the tasks card floating or docked, the
+# navigation controls -- keep to the conversation's column
+# (agent.max_content_width), as upstream's entries do (Zeo next proposal
+# §6.30). On 0026, 0027, 0037, 0082, 0092, 0094 and 0102.
+0108-agent-ui-floating-elements-keep-to-the-content-column.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch

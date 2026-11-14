@@ -166,7 +166,7 @@ index 0d1fe24..d1b6c68 100644
    // that receives element selections from a dev-server page and hands them to
    // the agent panel. Turning it off stops listening and removes the socket.
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 0877347..3dbae48 100644
+index add03f7..216d88e 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
 @@ -3906,6 +3906,58 @@ impl AgentPanel {
@@ -248,7 +248,7 @@ index 0877347..3dbae48 100644
      pub fn active_thread_view(&self, cx: &App) -> Option<Entity<ThreadView>> {
          let server_view = self.active_conversation_view()?;
          server_view.read(cx).root_thread_view()
-@@ -5111,13 +5176,17 @@ impl AgentPanel {
+@@ -5115,13 +5180,17 @@ impl AgentPanel {
          let mut potential_removals = self
              .retained_threads
              .iter()
@@ -268,7 +268,7 @@ index 0877347..3dbae48 100644
                  };
                  let thread = thread_view.read(cx).thread.read(cx);
                  thread.connection().supports_load_session() && thread.is_idle_for_retention()
-@@ -5134,7 +5203,11 @@ impl AgentPanel {
+@@ -5138,7 +5207,11 @@ impl AgentPanel {
              .take(n)
              .collect::<Vec<_>>();
          for id in to_remove {
