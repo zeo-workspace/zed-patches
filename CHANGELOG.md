@@ -31,7 +31,25 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-Next Zeo (planned 0.11.0), still under `patches/zeo-0.10.3_p20261110` until the release renames it.
+Zeo `0.11.0_p20261114`: the series moves to Zed `f0fa51bb` (2026-11-14; `agent-client-protocol`
+5.2.0 with schema 1.17, Zed 1.30.0) as `patches/zeo-0.11.0_p20261114`. The `wave3` chain was
+cherry-picked onto the new baseline; user-visible notes are in `zeo/CHANGELOG.md` under 0.11.0.
+The series is 104.
+
+### Added
+
+- `0108` (USE `claude-agent-acp-plus`, after `0107`): the series' floating elements -- the pinned
+  user message, the question card and its bar, the tasks card floating or docked, the navigation
+  controls -- keep to `agent.max_content_width`'s centred column (proposal §6.30).
+
+### Changed
+
+- `0068`: adapted to the new base (its tags picker owns its width). `0079`, `0087`, `0098`:
+  rustfmt fixups of drift carried from `f0d896f2`. `0052`, `0058`: their `Cargo.lock` lines name
+  `indexmap 2.14.2`, the version the new base resolves -- the cherry-pick had kept 2.14.0, which
+  only the `--locked` portable build refuses. The rest regenerated for offsets.
+
+Next Zeo (planned 0.11.0), under `patches/zeo-0.10.3_p20261110` before the release renamed it:
 
 ### Added
 
