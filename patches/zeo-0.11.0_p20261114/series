@@ -589,6 +589,11 @@
 # `_claude/context/usage` (plus 0.38.0); "View Report" opens the breakdown as
 # Markdown with its preview (Zeo next proposal §6.34). On 0113.
 0114-agent-ui-context-usage-card-and-report.patch
+# 0115: a composer message starting with `/btw` goes out at once, while a turn
+# runs too, through `_claude/btw` (plus 0.38.0); the answer shows in a
+# dismissable card and never enters the conversation (Zeo next proposal §6.8).
+# On 0114.
+0115-agent-ui-btw-side-question-card.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
