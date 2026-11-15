@@ -574,6 +574,11 @@
 # set from Settings → Status Bar → Panel Button Order (Zeo next proposal
 # §6.36, without drag and drop). On 0110.
 0111-workspace-panel-button-order.patch
+# 0112: a fork button on every finished turn's controls opens 0070's "with
+# context" sub-thread cut at that turn (`_meta["_claude/forkAt"]`, plus
+# 0.38.0), named by the turn's last agent message id (Zeo next proposal
+# §6.33). On 0070.
+0112-agent-ui-fork-from-a-turn.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
