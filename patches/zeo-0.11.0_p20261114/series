@@ -561,6 +561,11 @@
 # (agent.max_content_width), as upstream's entries do (Zeo next proposal
 # §6.30). On 0026, 0027, 0037, 0082, 0092, 0094 and 0102.
 0108-agent-ui-floating-elements-keep-to-the-content-column.patch
+# 0109: the pinned user message scrolls with a visible scrollbar when expanded,
+# its expand/collapse toggle shows only when the minimized line hides
+# something, and it sits on the panel's background (Zeo next proposal §6.32).
+# On 0102 and 0108.
+0109-agent-ui-pinned-message-scrollbar-and-toggle.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
