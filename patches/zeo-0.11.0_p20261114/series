@@ -584,6 +584,11 @@
 # turns into a new session, which opens as a sub-thread; the original is
 # kept (Zeo next proposal §6.33). On 0112.
 0113-agent-ui-rewind-to-a-turn.patch
+# 0114: a click on the context ring opens a "Context Usage" card above the
+# composer (how full, a segmented bar, one row per category) from
+# `_claude/context/usage` (plus 0.38.0); "View Report" opens the breakdown as
+# Markdown with its preview (Zeo next proposal §6.34). On 0113.
+0114-agent-ui-context-usage-card-and-report.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
