@@ -570,6 +570,10 @@
 # (projects::OpenRemote), hidden by status_bar.remote_projects_button, also in
 # the settings window's Status Bar section (Zeo next proposal §6.36).
 0110-recent-projects-status-bar-remote-button.patch
+# 0111: the status bar's panel buttons follow status_bar.panel_button_order,
+# set from Settings → Status Bar → Panel Button Order (Zeo next proposal
+# §6.36, without drag and drop). On 0110.
+0111-workspace-panel-button-order.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
