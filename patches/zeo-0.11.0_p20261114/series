@@ -594,6 +594,11 @@
 # dismissable card and never enters the conversation (Zeo next proposal §6.8).
 # On 0114.
 0115-agent-ui-btw-side-question-card.patch
+# 0116: the queue's Steer, upstream native-only, also for an ACP agent that
+# advertises steering (`_meta.steering.supported`): the queued message goes
+# into the running turn at once through `_session/steering` and joins the
+# thread where the agent took it (Zeo next proposal §6.8). On 0115.
+0116-agent-ui-steer-into-an-acp-agents-turn.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
