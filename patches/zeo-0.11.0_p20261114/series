@@ -579,6 +579,11 @@
 # 0.38.0), named by the turn's last agent message id (Zeo next proposal
 # §6.33). On 0070.
 0112-agent-ui-fork-from-a-turn.patch
+# 0113: "Rewind to Here" beside 0112's fork: after a confirmation (conversation
+# only, or with the files), `_claude/rewind` (plus 0.38.0) copies the kept
+# turns into a new session, which opens as a sub-thread; the original is
+# kept (Zeo next proposal §6.33). On 0112.
+0113-agent-ui-rewind-to-a-turn.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
