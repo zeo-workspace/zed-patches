@@ -566,6 +566,10 @@
 # something, and it sits on the panel's background (Zeo next proposal §6.32).
 # On 0102 and 0108.
 0109-agent-ui-pinned-message-scrollbar-and-toggle.patch
+# 0110: a status bar button that opens upstream's remote projects modal
+# (projects::OpenRemote), hidden by status_bar.remote_projects_button, also in
+# the settings window's Status Bar section (Zeo next proposal §6.36).
+0110-recent-projects-status-bar-remote-button.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
