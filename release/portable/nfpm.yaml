@@ -36,6 +36,15 @@ contents:
     dst: /usr/share/icons/hicolor/1024x1024/apps/dev.zeo.Zeo.png
   - src: ${ZEO_STAGE}/usr/share/metainfo/dev.zeo.Zeo.metainfo.xml
     dst: /usr/share/metainfo/dev.zeo.Zeo.metainfo.xml
+  # Zed's licence texts and the cargo-about attribution (build-in-container.sh).
+  # Plain files, not `type: doc`: nfpm 2.47 left those out of the .deb entirely
+  # (kept them only in the .rpm), measured on 0.12.0.
+  - src: ${ZEO_STAGE}/usr/share/doc/zeo/LICENSE-GPL
+    dst: /usr/share/doc/zeo/LICENSE-GPL
+  - src: ${ZEO_STAGE}/usr/share/doc/zeo/LICENSE-APACHE
+    dst: /usr/share/doc/zeo/LICENSE-APACHE
+  - src: ${ZEO_STAGE}/usr/share/doc/zeo/licenses.md
+    dst: /usr/share/doc/zeo/licenses.md
 
 # Runtime libraries: the binary's NEEDED entries plus what gpui dlopen()s
 # (Vulkan, the Wayland client, libX11). The portable build also links

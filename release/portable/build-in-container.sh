@@ -116,6 +116,37 @@ if ((voice)); then
 	log "voice input: ${voice_env}"
 	cargo clean --locked --release --package whisper-rs-sys
 fi
+
+# generate_licenses -- assets/licenses.md, as upstream's script/bundle-linux makes
+# it before compiling: the binary embeds it for `zed: open licenses`, whose
+# asset_str panics on a missing asset, and it is the packages' attribution for every
+# bundled crate, theme and icon set. Until 0.12.0 no Zeo build had it.
+# The script would `cargo install` its pinned cargo-about when the image's differs,
+# an unpinned download at build time, so a mismatch stops the build instead: bump
+# CARGO_ABOUT_VERSION in the Containerfile.
+# Unlicense joins Zed's accepted list only with voice input: whisper-rs and
+# whisper-rs-sys (0067) are the two crates under it, measured on 0.12.0, and the
+# ebuild already declares it for them (LICENSE+=" voice? ( Unlicense )").
+generate_licenses() {
+	local want have
+	want="$(sed -n 's/^CARGO_ABOUT_VERSION="\(.*\)"$/\1/p' script/generate-licenses)"
+	have="$(cargo about --version | cut -d' ' -f2)"
+	if [[ -z "${want}" || "${want}" != "${have}" ]]; then
+		echo "error: script/generate-licenses pins cargo-about '${want}', the image has '${have}'" >&2
+		return 1
+	fi
+	if ((voice)); then
+		sed -i 's/^    "MIT-0",$/&\n    "Unlicense",/' script/licenses/zed-licenses.toml
+		if ! grep -qx '    "Unlicense",' script/licenses/zed-licenses.toml; then
+			echo "error: could not add Unlicense to script/licenses/zed-licenses.toml" >&2
+			return 1
+		fi
+	fi
+	script/generate-licenses "${src}/assets/licenses.md"
+	[[ -s "${src}/assets/licenses.md" ]]
+}
+log "generating assets/licenses.md (cargo-about)"
+generate_licenses
 sccache --zero-stats >/dev/null
 log "building (cargo build --release --locked)"
 cargo build --release --locked --package zed --package cli --features zed/mimalloc
@@ -167,6 +198,19 @@ if [[ -n "${avx512_fns}" ]]; then
 	exit 1
 fi
 
+# The embedded copy is what `zed: open licenses` reads; a build that lost it would
+# ship the panic again. The binary cannot be grepped for it: rust-embed's
+# `compression` feature stores every asset deflated (a prompt template's text is
+# not in the binary either). The assets crate's dep-info is the compiler's own list
+# of the files it embedded, so the newest one must name licenses.md.
+assets_dep="$(find /work/target/release/deps -maxdepth 1 -name 'assets-*.d' -printf '%T@ %p\n' |
+	sort -n | tail -1 | cut -d' ' -f2-)"
+if [[ -z "${assets_dep}" ]] || ! grep -q '/assets/licenses\.md' "${assets_dep}"; then
+	echo "error: assets/licenses.md is not embedded (no entry in ${assets_dep:-assets-*.d})" >&2
+	exit 1
+fi
+log "licenses.md embedded (${assets_dep##*/})"
+
 # src_install, into a staging tree laid out like zeo-bin's.
 log "staging ${stage}"
 rm -rf "${stage}"
@@ -177,6 +221,11 @@ install -Dm644 crates/zed/resources/app-icon-zeo.png \
 	"${stage}/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
 install -Dm644 crates/zed/resources/app-icon-zeo@2x.png \
 	"${stage}/usr/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
+# Zed's own licence texts and the attribution file, beside the binary as upstream
+# ships them: GPL-3.0 requires the licence to travel with the program.
+for doc in LICENSE-GPL LICENSE-APACHE assets/licenses.md; do
+	install -Dm644 "${doc}" "${stage}/usr/share/doc/zeo/${doc##*/}"
+done
 strip --strip-unneeded "${stage}/usr/bin/zeo" "${stage}/usr/libexec/zeo-editor"
 
 # The point of this build: refuse a binary that needs a newer glibc than the
@@ -201,6 +250,7 @@ done
 	printf 'zed source     https://github.com/zed-industries/zed/archive/%s.tar.gz\n' "${ZEO_COMMIT}"
 	printf 'source sha256  %s\n' "${ZEO_SOURCE_SHA256}"
 	printf 'features       zed/mimalloc\n'
+	printf 'licenses       %s, usr/share/doc/zeo/licenses.md\n' "$(cargo about --version)"
 	printf 'rustc          %s (official toolchain, rustup)\n' "$(rustc --version)"
 	printf 'cc / c++       %s\n' "$(clang --version | head -1)"
 	printf 'CFLAGS         %s\n' "${CFLAGS}"

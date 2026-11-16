@@ -42,6 +42,19 @@ RUN curl -fsSLo /tmp/rustup-init \
 	&& rm /tmp/rustup-init \
 	&& chmod -R a+rwX /opt/rustup /opt/cargo
 
+# cargo-about 0.8.2 (2025-09-19), the exact version Zed's script/generate-licenses
+# pins. It writes assets/licenses.md -- every bundled theme, icon set and crate
+# with its licence -- which the binary embeds for `zed: open licenses` and which
+# upstream's script/bundle-linux also ships beside the binary. Without it that
+# action panics (asset_str's expect) and the packages carry no licence text.
+# --locked builds it from its own Cargo.lock, so the dependency set is the
+# published one; build-in-container.sh refuses a Zed that pins another version
+# rather than let the script `cargo install` an unpinned one at build time.
+ARG CARGO_ABOUT_VERSION=0.8.2
+RUN cargo install --locked --root /opt/cargo "cargo-about@${CARGO_ABOUT_VERSION}" \
+	&& rm -rf /opt/cargo/registry /opt/cargo/git \
+	&& chmod -R a+rwX /opt/cargo
+
 # nfpm 2.47.0 (2026-06-20): one config, both .deb and .rpm.
 ARG NFPM_VERSION=2.47.0
 ARG NFPM_SHA256=0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
