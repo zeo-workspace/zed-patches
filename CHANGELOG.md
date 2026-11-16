@@ -36,6 +36,21 @@ bumps inside a range are summarised rather than listed one by one.
 - `0117` (USE `claude-agent-acp-plus`, after `0116`): "Open Recent File" -- a picker of recently
   opened files with a table of its own (`ZeoRecentFilesDb`, 200 rows), and the File menu's
   "Open Recent Project…" / "Open Recent File…" pair (§6.37).
+- `0118`–`0121` (USE `claude-agent-acp-plus`, after `0117`), the Zeo next proposal's asks of
+  2026-11-16: the plan card's minimize before its close (`0118`, §6.41); Clear on a question of the
+  question card (`0119`, §6.42); "Open Thread at This Task" only for a background subagent, on the
+  tasks card and the Agent Tasks panel (`0120`, §6.47); BTW beside Steer on a queued message
+  (`0121`, §6.45, on `0115`/`0116`).
+
+### Changed
+
+- Four shipped patches amended in place, each with a paragraph added to its header: `0107` (a sent
+  message keeps the block look, §6.39), `0109` (the pinned message's dark background is an inner
+  area, not the whole card -- ask 70 corrects ask 54, §6.46), `0010` (the model picker's default
+  pin stays beside the favourite star on hover, §6.48) and `0057` (a jail turned on or off since
+  the agent started shows as pending, and a click restarts the agent, §6.50). The tree's commits
+  were folded with `amend!` + `rebase --autosquash`; the series applied in order reproduces the
+  tree byte for byte.
 
 ## [0.12.0_p20261114] — 2026-11-15 (tagged)
 
