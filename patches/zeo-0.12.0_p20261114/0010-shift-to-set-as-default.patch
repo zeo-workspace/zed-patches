@@ -802,7 +802,7 @@ index 61baf85..b152270 100644
  
      #[gpui::test]
 diff --git a/crates/agent_ui/src/conversation_view/thread_view.rs b/crates/agent_ui/src/conversation_view/thread_view.rs
-index 63d90a9..dc3d5d8 100644
+index 63d90a9..561aa1d 100644
 --- a/crates/agent_ui/src/conversation_view/thread_view.rs
 +++ b/crates/agent_ui/src/conversation_view/thread_view.rs
 @@ -26,6 +26,7 @@ use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
@@ -885,9 +885,8 @@ index 63d90a9..dc3d5d8 100644
 +                        };
  
 -                        menu.push_item(entry.handler({
--                            let effort = effort_level.value;
 +                        menu = menu.custom_entry(render_entry, {
-+                            let effort = effort_level.value.clone();
+                             let effort = effort_level.value;
                              let weak_self = weak_self.clone();
 -                            move |_window, cx| {
 +                            move |window, cx| {
@@ -932,7 +931,7 @@ index 63d90a9..dc3d5d8 100644
              select.await?;
              this.update(cx, |this, cx| this.retry_generation(cx))?;
 diff --git a/crates/agent_ui/src/mode_selector.rs b/crates/agent_ui/src/mode_selector.rs
-index 38e292e..ef604f9 100644
+index 38e292e..4c6f09f 100644
 --- a/crates/agent_ui/src/mode_selector.rs
 +++ b/crates/agent_ui/src/mode_selector.rs
 @@ -7,10 +7,11 @@ use gpui::{Context, Entity, WeakEntity, Window, prelude::*};
@@ -1065,7 +1064,7 @@ index 38e292e..ef604f9 100644
 +                            .into_any_element()
 +                    },
 +                    {
-+                        let mode_id = mode.value.clone();
++                        let mode_id = mode.value;
 +                        let weak_self = weak_self.clone();
 +                        move |window, cx| {
 +                            let persist_default = persists_default(window);

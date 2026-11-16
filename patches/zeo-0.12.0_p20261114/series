@@ -618,6 +618,18 @@
 # 0121: BTW beside Steer asks a queued message on the side, answered in 0115's
 # card (§6.45, ask 69). On 0115 and 0116.
 0121-agent-ui-btw-beside-steer.patch
+# 0122: text in quotation marks gets a coloured background in the composer and in
+# a sent message, marks included, under a key of its own
+# (HighlightKey::ComposerQuotation); not inside code, never across a blank line,
+# and not the ASCII single quote, which is also the apostrophe (§6.40, ask 64).
+# On 0107.
+0122-agent-ui-quoted-text-highlighted.patch
+# 0123: thread lists belong to a project or are global, as pins do: the active
+# project's lists first under "This Project", then "Global"; another project's
+# hidden. New List / New Global List, Make Global, Move to This Project. The
+# scope is a domain of its own (ThreadListScopeDb); a project list's name_key
+# carries its project (§6.49, ask 73). On 0048, 0069 and 0106.
+0123-sidebar-thread-lists-per-project.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
