@@ -605,6 +605,19 @@
 # table of its own (ZeoRecentFilesDb). The File menu's "Open Recent…" becomes
 # "Open Recent Project…" (Zeo next proposal §6.37, zed#38968).
 0117-recent-projects-open-recent-file.patch
+# 0118: the plan card's minimize follows the title, right before its close, as
+# a window's title bar has them; the question and tasks cards already end their
+# headers that way (Zeo next proposal §6.41, ask 65).
+0118-agent-ui-plan-card-minimize-on-the-right.patch
+# 0119: a select question of the question card shows Clear while it has an
+# answer, taking it and its own "Other" box back to unanswered (§6.42, ask 66).
+0119-agent-ui-question-card-clear-selection.patch
+# 0120: "Open Thread at This Task" only for a background subagent with a thread
+# or output, on the tasks card and the Agent Tasks panel (§6.47, ask 71).
+0120-agent-ui-open-at-task-only-for-background-subagents.patch
+# 0121: BTW beside Steer asks a queued message on the side, answered in 0115's
+# card (§6.45, ask 69). On 0115 and 0116.
+0121-agent-ui-btw-beside-steer.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
