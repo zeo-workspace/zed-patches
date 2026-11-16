@@ -31,6 +31,12 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+### Added
+
+- `0117` (USE `claude-agent-acp-plus`, after `0116`): "Open Recent File" -- a picker of recently
+  opened files with a table of its own (`ZeoRecentFilesDb`, 200 rows), and the File menu's
+  "Open Recent Project…" / "Open Recent File…" pair (§6.37).
+
 ## [0.12.0_p20261114] — 2026-11-15 (tagged)
 
 Zeo `0.12.0_p20261114`: `patches/zeo-0.11.0_p20261114` becomes `patches/zeo-0.12.0_p20261114`,
