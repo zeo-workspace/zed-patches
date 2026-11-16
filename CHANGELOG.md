@@ -31,7 +31,7 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-## [0.12.0_p20261114] — 2026-11-15 (untagged)
+## [0.12.0_p20261114] — 2026-11-15 (tagged)
 
 Zeo `0.12.0_p20261114`: `patches/zeo-0.11.0_p20261114` becomes `patches/zeo-0.12.0_p20261114`,
 same Zed `f0fa51bb`. Eight patches from the Zeo next proposal (§6.8, §6.32, §6.33, §6.34, §6.36);
