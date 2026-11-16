@@ -599,6 +599,12 @@
 # into the running turn at once through `_session/steering` and joins the
 # thread where the agent took it (Zeo next proposal §6.8). On 0115.
 0116-agent-ui-steer-into-an-acp-agents-turn.patch
+# 0117: "Open Recent File" -- a picker of recently opened files, most recent
+# first, files outside any project included, each labelled with the project
+# that holds it; the pick opens in the current window. The history lives in a
+# table of its own (ZeoRecentFilesDb). The File menu's "Open Recent…" becomes
+# "Open Recent Project…" (Zeo next proposal §6.37, zed#38968).
+0117-recent-projects-open-recent-file.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
