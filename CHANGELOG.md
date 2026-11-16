@@ -31,6 +31,46 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.12.0_p20261114] — 2026-11-15 (untagged)
+
+Zeo `0.12.0_p20261114`: `patches/zeo-0.11.0_p20261114` becomes `patches/zeo-0.12.0_p20261114`,
+same Zed `f0fa51bb`. Eight patches from the Zeo next proposal (§6.8, §6.32, §6.33, §6.34, §6.36);
+user-visible notes are in `zeo/CHANGELOG.md` under 0.12.0. §6.38 needed no patch: upstream's
+Settings → AI → Agent Configuration already has "Expand Edit/Terminal Card". The series is 112.
+
+### Added
+
+- `0109` (USE `claude-agent-acp-plus`, after `0108`): the pinned user message scrolls with a
+  visible scrollbar when expanded, shows its toggle only when the minimized line hides something,
+  and sits on the panel's background (§6.32). On `0102` and `0108`.
+- `0110` (USE `claude-agent-acp-plus`): a status bar button that opens upstream's remote projects
+  modal (`projects::OpenRemote`), hidden by `status_bar.remote_projects_button` (§6.36).
+- `0111` (USE `claude-agent-acp-plus`, after `0110`): the status bar's panel buttons follow
+  `status_bar.panel_button_order`, set in the settings window (§6.36, no drag and drop).
+- `0112` (USE `claude-agent-acp-plus`, on `0070`): a fork button on every finished turn opens a
+  "with context" sub-thread cut at that turn (`_meta["_claude/forkAt"]`, plus 0.38.0) (§6.33).
+- `0113` (USE `claude-agent-acp-plus`, after `0112`): "Rewind to Here" — `_claude/rewind`
+  (plus 0.38.0) copies the kept turns into a new session opened as a sub-thread (§6.33).
+- `0114` (USE `claude-agent-acp-plus`, after `0113`): the context ring opens a "Context Usage"
+  card from `_claude/context/usage` (plus 0.38.0), and "View Report" opens the breakdown as
+  Markdown with its preview (§6.34).
+- `0115` (USE `claude-agent-acp-plus`, after `0114`): `/btw` asks `_claude/btw` (plus 0.38.0) at
+  once, even during a turn; the answer shows in a dismissable card and stays out of the
+  conversation (§6.8).
+- `0116` (USE `claude-agent-acp-plus`, after `0115`): the queue's Steer for an ACP agent that
+  advertises `_meta.steering.supported` — the message goes into the running turn through
+  `_session/steering` (§6.8).
+
+No `RDEPEND` move: every feature appears only when the agent advertises it, so an older adapter
+leaves Zeo as it was.
+
+### Tooling
+
+- This file: the `0.8.0_p20261108` … `0.11.0_p20261114` cuts had been written as paragraphs
+  inside `[Unreleased]`; each now has its own heading, as `status.sh` expects.
+
+## [0.11.0_p20261114] — 2026-11-14 (untagged)
+
 Zeo `0.11.0_p20261114`: the series moves to Zed `f0fa51bb` (2026-11-14; `agent-client-protocol`
 5.2.0 with schema 1.17, Zed 1.30.0) as `patches/zeo-0.11.0_p20261114`. The `wave3` chain was
 cherry-picked onto the new baseline; user-visible notes are in `zeo/CHANGELOG.md` under 0.11.0.
@@ -63,6 +103,8 @@ Next Zeo (planned 0.11.0), under `patches/zeo-0.10.3_p20261110` before the relea
   one context line, the `mod` it adds now sits under `mod composer_blocks;`). Cut from
   `series-0107` in the prepared tree, byte-identical to the tested tree.
 
+## [0.10.3_p20261110] — 2026-11-13 (untagged)
+
 Zeo `0.10.3_p20261110`: `patches/zeo-0.10.2_p20261110` becomes `patches/zeo-0.10.3_p20261110`, same
 Zed `f0d896f2`. One correction from the operator's session on 0.10.2; user-visible, recorded in
 `zeo/CHANGELOG.md` under 0.10.3. The series is 102.
@@ -78,6 +120,8 @@ Zed `f0d896f2`. One correction from the operator's session on 0.10.2; user-visib
 - `0063` regenerated on top (`index` and `@@` lines only). `0106` was cut from a branch in series
   order (`series-0106` in the prepared tree), whose final tree is byte-identical to the one the
   tests ran on.
+
+## [0.10.2_p20261110] — 2026-11-13 (tagged)
 
 Zeo `0.10.2_p20261110`: `patches/zeo-0.10.1_p20261110` becomes `patches/zeo-0.10.2_p20261110`, same
 Zed `f0d896f2`. Two corrections from the operator's session on 0.10.1; user-visible, recorded in
@@ -97,6 +141,8 @@ Zed `f0d896f2`. Two corrections from the operator's session on 0.10.1; user-visi
   lines only). Both new patches were cut from a branch in series order, whose final tree is
   byte-identical to the one the tests ran on.
 
+## [0.10.1_p20261110] — 2026-11-13 (untagged)
+
 Zeo `0.10.1_p20261110`: `patches/zeo-0.10.0_p20261110` becomes `patches/zeo-0.10.1_p20261110`, same
 Zed `f0d896f2`. One correction from the operator's first session on 0.10.0; user-visible, recorded
 in `zeo/CHANGELOG.md` under 0.10.1.
@@ -111,6 +157,8 @@ in `zeo/CHANGELOG.md` under 0.10.1.
   sections. `0002`, `0052`, `0057`, `0058`, `0084`, `0066`, `0067` and `0085` regenerated too
   (`index` and `@@` lines only). The tree the whole series produces is byte-identical to the one
   the tests ran on.
+
+## [0.10.0_p20261110] — 2026-11-13 (tagged)
 
 Zeo `0.10.0_p20261110`: `patches/zeo-0.9.1_p20261110` becomes `patches/zeo-0.10.0_p20261110`, same
 Zed `f0d896f2`. Wave 3 of the Zeo next proposal (`docs/ZEO-NEXT-PROPOSAL.md` §6); user-visible,
@@ -143,6 +191,8 @@ recorded in `zeo/CHANGELOG.md` under 0.10.0. Seventeen patches added; the series
   `src_compile` does: without it a portable build's About window read `1.29.0+zeo` on the Zed
   row instead of the packaged commit (`0091`). Found by the smoke run of the 0.10.0 binary.
 
+## [0.9.1_p20261110] — 2026-11-10 (untagged)
+
 Zeo `0.9.1_p20261110`: `patches/zeo-0.9.1_p20261109` becomes `patches/zeo-0.9.1_p20261110`, Zed
 `483b746b` → `f0d896f2` (4 upstream commits, 2026-11-09). Snapshot-only: Zeo stays 0.9.1, so no
 `zeo/CHANGELOG.md` section. The seven-day release hold is waived by the operator for this bump
@@ -155,6 +205,8 @@ Zeo `0.9.1_p20261110`: `patches/zeo-0.9.1_p20261109` becomes `patches/zeo-0.9.1_
   it, and no patch did either: all 82 commits cherry-picked cleanly onto the new baseline.
 - `0002`, `0035`, `0036`, `0039`, `0052`, `0057`, `0058`, `0066`, `0067`, `0072` regenerated
   (`index` and `@@` lines only); the other 72 are byte-identical.
+
+## [0.9.1_p20261109] — 2026-11-10 (tagged)
 
 Zeo `0.9.1_p20261109`: `patches/zeo-0.9.0_p20261109` becomes `patches/zeo-0.9.1_p20261109`, same
 Zed `483b746b`. Three fixes from the operator's report; user-visible, recorded in
@@ -169,6 +221,8 @@ Zed `483b746b`. Three fixes from the operator's report; user-visible, recorded i
 
 - `0080` and `0082` carry their fixes, each with a "Fixed in Zeo 0.9.1" paragraph in the header.
   `0052`, `0057`, `0058`, `0067`, `0083`, `0084` and `0085` regenerated on top (offsets only).
+
+## [0.8.0_p20261108] — 2026-11-09 (untagged)
 
 Zeo `0.8.0_p20261108`: the series carried from `zeo-0.8.0_p20261101` (Zed `a4b39c38`) to Zed
 `d2a4fb6d`, 75 upstream commits, Zed 1.28.0 → 1.29.0. Snapshot-only, so no user-visible change
