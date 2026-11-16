@@ -41,13 +41,25 @@ bumps inside a range are summarised rather than listed one by one.
   question card (`0119`, §6.42); "Open Thread at This Task" only for a background subagent, on the
   tasks card and the Agent Tasks panel (`0120`, §6.47); BTW beside Steer on a queued message
   (`0121`, §6.45, on `0115`/`0116`).
+- `0122` (USE `claude-agent-acp-plus`, after `0121`, on `0107`): text in quotation marks gets a
+  coloured background in the composer and in a sent message, marks included -- `"…"`, `“…”`,
+  `„…“`, `«…»`, `‹…›`, `「…」`, `『…』` and `‘…’` after a space; never inside code, across a blank
+  line or for the ASCII apostrophe. A new editor key, `HighlightKey::ComposerQuotation` (§6.40,
+  ask 64).
+- `0123` (USE `claude-agent-acp-plus`, after `0122`, on `0048`/`0069`/`0106`): thread lists belong
+  to a project or are global, as pins do -- the active project's lists first under "This Project",
+  then "Global"; another project's hidden until it is active. "New List" makes a list of the active
+  project, "New Global List" a global one; a header's menu gains "Make Global" and "Move to This
+  Project"; "Move to List" offers only the thread's project's lists and the global ones. A domain
+  of its own, `ThreadListScopeDb`; existing lists stay global (§6.49, ask 73).
 
 ### Changed
 
 - Four shipped patches amended in place, each with a paragraph added to its header: `0107` (a sent
   message keeps the block look, §6.39), `0109` (the pinned message's dark background is an inner
   area, not the whole card -- ask 70 corrects ask 54, §6.46), `0010` (the model picker's default
-  pin stays beside the favourite star on hover, §6.48) and `0057` (a jail turned on or off since
+  pin stays beside the favourite star on hover, §6.48; and two `.clone()`s clippy 1.100's
+  `redundant_clone` flags are dropped) and `0057` (a jail turned on or off since
   the agent started shows as pending, and a click restarts the agent, §6.50). The tree's commits
   were folded with `amend!` + `rebase --autosquash`; the series applied in order reproduces the
   tree byte for byte.
