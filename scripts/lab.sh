@@ -39,6 +39,10 @@
 #   ZP_LAB_MIN_FREE_GB  refuse to start below this much free space (default 30;
 #                    a build needs ~22 GB: tree 14, sccache 4.5, cargo-home 3)
 #   ZP_LAB_FETCH_DIR artefacts land in <dir>/<PF> (default ~/.cache/zeo-portable/lab)
+#   ZP_LAB_SLOT      the worker's shared budget (default /mnt/work/slots/slot, which
+#                    Shidashi publishes): the build reserves --jobs CPUs and
+#                    ZP_LAB_MEMORY_GIB (default 30) there and waits its turn
+#                    beside Shidashi and lab; absent, only the lock below applies
 #   plus what lib.sh resolves locally: ZP_OVERLAY, ZP_DISTDIR, ZP_CHANGELOG.
 #
 # It never publishes. Events are key=value lines on stdout.
@@ -147,7 +151,7 @@ cmd_build() {
 		die 2 "rsync of the distfiles failed"
 
 	remote 'set -euo pipefail
-		root="$1" pf="$2" jobs="$3"
+		root="$1" pf="$2" jobs="$3" slot="$4" mem="$5"
 		job="${root}/jobs/${pf}"
 		mkdir -p "${job}"
 		rm -f "${job}/rc"
@@ -160,9 +164,17 @@ echo "event=start pf=${pf} jobs=${jobs} host=\$(hostname) at=\$(date -Is)"
 # context overlay there ("mount overlay ... invalid argument"). Keep it on the disk.
 mkdir -p "${root}/tmp"
 export TMPDIR="${root}/tmp"
+# The shared CPU/memory budget of the worker (contrib/worker/slot in Shidashi): wait
+# for a share beside the jobs, CI and dev VMs of Shidashi and the jobs of lab. Without
+# it, only the lock above (one Zeo build at a time) applies. No apostrophes in here:
+# this text sits inside a single-quoted remote script.
+reserve=()
+if [ -x "${slot}" ]; then
+	reserve=("${slot}" run --owner "zeo-lab:${pf}" --cpus "${jobs}" --memory "${mem}" --wait -1 --)
+fi
 ZP_CONTAINER_ENGINE=podman ZP_PORTABLE_JOBS="${jobs}" ZP_PORTABLE_DIR="${root}/portable" \
 ZP_OVERLAY="${root}/overlay" ZP_DISTDIR="${root}/distfiles" ZP_REPO="${root}/src/zed-patches" \
-	bash "${root}/src/zed-patches/scripts/release-portable.sh" "${pf}" --no-flatpak
+	"\${reserve[@]}" bash "${root}/src/zed-patches/scripts/release-portable.sh" "${pf}" --no-flatpak
 rc=\$?
 echo "event=done pf=${pf} rc=\${rc} at=\$(date -Is)"
 echo "\${rc}" >"${job}/rc"
@@ -170,7 +182,7 @@ EOS
 		setsid nohup bash "${job}/run.sh" >"${job}/log" 2>&1 </dev/null &
 		echo $! >"${job}/pid"
 		printf "event=started pf=%s jobs=%s pid=%s log=%s\n" "${pf}" "${jobs}" "$!" "${job}/log"' \
-		"${LAB_ROOT}" "${pf}" "${jobs}"
+		"${LAB_ROOT}" "${pf}" "${jobs}" "${ZP_LAB_SLOT:-/mnt/work/slots/slot}" "${ZP_LAB_MEMORY_GIB:-30}"
 }
 
 cmd_status() {

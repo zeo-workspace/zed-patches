@@ -135,6 +135,23 @@ st=$?
 set -e
 if ! [[ "${st}" == 1 ]] || ! grep -q 'state=failed pf=.* rc=1' "${tmp}/st"; then fail "a failed build is not exit 1 state=failed: $(cat "${tmp}/st")"; fi
 
+# --- the worker's shared budget, when the host has one ----------------------------
+cat >"${tmp}/bin/slot" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${SLOT_REQUESTS:?}"
+while [[ $# -gt 0 && $1 != -- ]]; do shift; done
+shift
+exec "$@"
+EOS
+chmod +x "${tmp}/bin/slot"
+ZP_LAB_SLOT="${tmp}/bin/slot" SLOT_REQUESTS="${tmp}/slot-requests" ZP_LAB_MEMORY_GIB=28 \
+	lab_sh build "${pf}" --jobs 7 >/dev/null
+wait_done
+req="$(cat "${tmp}/slot-requests")"
+[[ "${req}" == *"run --owner zeo-lab:${pf} --cpus 7 --memory 28 --wait -1 -- bash "* ]] ||
+	fail "the build did not reserve its share in the shared budget: ${req}"
+lab_sh status "${pf}" >/dev/null || fail "the build under the shared budget failed"
+
 # --- a build that is stopped ---------------------------------------------------
 LAB_STUB_SLEEP=60 lab_sh build "${pf}" >/dev/null
 sleep 0.5
