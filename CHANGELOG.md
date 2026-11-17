@@ -31,7 +31,7 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-## [0.13.0_p20261114] — 2026-11-16 (untagged)
+## [0.13.0_p20261114] — 2026-11-16 (tagged)
 
 Zeo `0.13.0_p20261114`: `patches/zeo-0.12.0_p20261114` becomes `patches/zeo-0.13.0_p20261114`,
 same Zed `f0fa51bb`. Ten patches added (`0117`–`0125`) and four amended (`0010`, `0057`, `0107`,
