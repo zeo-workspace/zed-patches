@@ -52,6 +52,12 @@ bumps inside a range are summarised rather than listed one by one.
   project, "New Global List" a global one; a header's menu gains "Make Global" and "Move to This
   Project"; "Move to List" offers only the thread's project's lists and the global ones. A domain
   of its own, `ThreadListScopeDb`; existing lists stay global (§6.49, ask 73).
+- `0125` (USE `claude-agent-acp-plus`, after `0123`, on `0090`): tool, terminal and edit cards in
+  three states -- collapsed (one line, cut with `…`), minimized (the whole command or title) and
+  maximized (with the content) -- stepped by the card's chevron. A default per kind: new settings
+  `agent.terminal_card_default`, `agent.edit_card_default`, `agent.tool_card_default`, on the
+  Settings page; unset, each kind keeps its old look. The agent menu's "Terminals Minimized by
+  Default" toggle (`0090`) becomes three submenus, Terminal/Tool/Edit Cards (§6.44, ask 68).
 - `0124` (unconditional, after `0061`, on `0021`): a remote host with no Zeo server gets the one
   `zeo-bin` carries at `usr/libexec/zeo-remote-server`, uploaded over ssh or into a dev container
   instead of fetched from zed.dev; `ZEO_REMOTE_SERVER` points at another build. Built for x86-64-v3,
