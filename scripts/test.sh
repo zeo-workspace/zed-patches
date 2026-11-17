@@ -19,7 +19,8 @@
 #
 #   (always)    nextest over the crates the series touches: one process per test,
 #               as upstream runs it. Built with the system toolchain; RUN with
-#               rustup's toolchain first on PATH, because extension_host compiles
+#               rustup's toolchain first on PATH (its proxies under CARGO_HOME, default
+#               ~/.cargo), because extension_host compiles
 #               a wasm32-wasip2 extension and Gentoo's rust has no such target.
 #               Building with rustup on PATH would swap rustc and rebuild all.
 #   --doc       `cargo test --doc` for the same crates (nextest runs no doctests).
@@ -47,6 +48,11 @@
 # vendored crates' paths, so a new work directory rebuilds every dependency;
 # ZP_RUSTUP_TOOLCHAIN (default: the system rustc's version); and the ZP_*
 # overrides lib.sh honours.
+#
+# ZP_AUTO_PREPARE=1 fetches the Zed distfile and prepares the tree when either is
+# missing, instead of stopping. Only .lab.toml sets it: on bentoo-lab each run
+# starts from a mirror that has no work/ and an empty distfile cache, while here
+# both are deliberate steps.
 #
 # Exit: 0 every phase passed · 1 a phase failed · 2 environment problem.
 
@@ -106,6 +112,13 @@ main() {
 	local target="${ZP_TEST_TARGET:-${root}/target}"
 	local workdir="${ZP_TEST_WORKDIR:-${portage_tmp}/portage/${ZP_CATEGORY_PATH%/*}/${pf}/work}"
 	mkdir -p "${src}" "${target}" "${meta}" "${portage_tmp}"
+	if [[ ! -d "${ZP_WORKTREE}/.git" && "${ZP_AUTO_PREPARE:-}" == 1 ]]; then
+		if [[ ! -f "${ZP_DISTFILE}" ]]; then
+			step "ebuild fetch -> ${ZP_DISTFILE}"
+			ebuild "${ZP_EBUILD}" fetch || die 2 "ebuild fetch failed for ${pf}"
+		fi
+		bash "$(dirname "${BASH_SOURCE[0]}")/prepare-tree.sh" "${pf}" || die 2 "prepare-tree.sh ${pf} failed"
+	fi
 	[[ -d "${ZP_WORKTREE}/.git" ]] || die 2 "no prepared tree at ${ZP_WORKTREE} -- run: prepare-tree.sh ${pf}"
 
 	# --- the Portage work directory the offline rewrite points at ----------------
@@ -166,7 +179,7 @@ main() {
 	local crate
 	for crate in "${CRATES[@]}"; do pkgs+=(-p "${crate}"); done
 	local toolchain="${ZP_RUSTUP_TOOLCHAIN:-$(rustc --version | awk '{print $2}')}"
-	local -a runenv=(PATH="${HOME}/.cargo/bin:${PATH}" RUSTUP_TOOLCHAIN="${toolchain}")
+	local -a runenv=(PATH="${CARGO_HOME:-${HOME}/.cargo}/bin:${PATH}" RUSTUP_TOOLCHAIN="${toolchain}")
 	local failed=0
 
 	# nextest_phase <label> <build args...> -- <run args...>

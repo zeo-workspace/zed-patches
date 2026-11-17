@@ -1,0 +1,44 @@
+# zed-patches on bentoo-lab (the `lab` tool, ~/Projetos/Pessoais/lab/docs/DESIGN.md).
+#
+# test.sh runs inside the Zeo builder image Shidashi builds (scripts/zeo-builder-image.sh
+# there): the desktop's Rust 1.100.0, the zeo ebuild's dependencies, cargo-nextest and
+# rustup's wasm32-wasip2, so the suite links against the same Gentoo libraries it does
+# here. The image carries ::gentoo and ::bentoo at the commit it was built from; a version
+# whose ebuild is not in that tree needs the image rebuilt first.
+#
+# Gaps against a desktop run: no AVX-512 on the lab's Ryzen 7 5700X; the overlay is the
+# image's, not the editing checkout; --e2e is not wired (no token reaches the lab).
+#
+# Release builds keep their own route: scripts/lab.sh build <PF>.
+
+[project]
+image = "localhost/shidashi-zeo-builder@sha256:71c4249cba7b383df8d5a640d77f16179bf793d08d2d08856c055f97590e38cd"
+# Zeo's build refuses root (Shidashi, 2026-11-17); uid 1000 is the image's "bentoo", and gid
+# 250 is portage: ebuild unpack chgrps its build dirs to it, as on the desktop.
+user = "1000:250"
+cpus = 12
+memory = "32g"
+
+[project.caches]
+"/lab-home" = "home"
+# Crates and the Zed archive, fetched once per version.
+"/var/cache/distfiles" = "distfiles"
+# Prepared trees and test.sh's root: the debug target alone is ~74 GB, reused per run.
+"/zp" = "zp"
+
+[project.env]
+ZP_OVERLAY = "/var/db/repos/bentoo"
+ZP_DISTDIR = "/var/cache/distfiles"
+ZP_WORKROOT = "/zp/work"
+ZP_TEST_ROOT = "/zp/test"
+ZP_AUTO_PREPARE = "1"
+# 8 tests at a time while cargo builds with all 12 CPUs: at 12, epic_panel's
+# panel_rows_more_not_shown (45 s alone, here and on the desktop) passed nextest's 60 s
+# timeout under contention (2026-11-17). The desktop runs 8 too.
+NEXTEST_TEST_THREADS = "8"
+
+[tasks.test]
+run = "bash scripts/test.sh"
+
+[redirect]
+patterns = ["bash scripts/test.sh *", "scripts/test.sh *"]
