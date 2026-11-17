@@ -636,6 +636,12 @@
 # scope is a domain of its own (ThreadListScopeDb); a project list's name_key
 # carries its project (§6.49, ask 73). On 0048, 0069 and 0106.
 0123-sidebar-thread-lists-per-project.patch
+# 0125: tool, terminal and edit cards in three states -- collapsed (one line),
+# minimized (the whole command or title), maximized (and the content) -- a click
+# steps through them; a default per kind (agent.terminal_card_default,
+# edit_card_default, tool_card_default) and the agent menu's three submenus,
+# which replace 0090's toggle (§6.44, ask 68). On 0090.
+0125-agent-ui-tool-cards-in-three-states.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
