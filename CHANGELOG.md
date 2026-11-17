@@ -31,6 +31,13 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.13.0_p20261114] — 2026-11-16 (untagged)
+
+Zeo `0.13.0_p20261114`: `patches/zeo-0.12.0_p20261114` becomes `patches/zeo-0.13.0_p20261114`,
+same Zed `f0fa51bb`. Ten patches added (`0117`–`0125`) and four amended (`0010`, `0057`, `0107`,
+`0109`), from the Zeo next proposal (§6.37, §6.39–§6.42, §6.44–§6.50) and the remote server
+`zeo-bin` carries; user-visible notes are in `zeo/CHANGELOG.md` under 0.13.0. The series is 121.
+
 ### Added
 
 - `0117` (USE `claude-agent-acp-plus`, after `0116`): "Open Recent File" -- a picker of recently
