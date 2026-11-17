@@ -131,6 +131,12 @@
 # the one map every local start passes through. UNGROUPED like 0024; its tests
 # sit in 0057's lifecycle file, whose fixture spawns a real agent (story 050).
 0061-agent-mark-agent-servers-with-zeo-thread.patch
+# 0124: a host with no remote server gets the one zeo-bin carries beside the
+# editor, uploaded over ssh or into a dev container: a release Zeo never fetches
+# one from zed.dev (0021). Built for x86-64-v3, offered to Linux x86-64 only; a
+# Zeo built from source carries none, so it changes nothing there. UNGROUPED:
+# zeo-bin applies the whole series, and the patch depends on 0021 alone.
+0124-remote-upload-the-server-zeo-bin-carries.patch
 
 # @feature: claude-agent-acp-plus
 0001-force-enable-claude-agent-acp-plus.patch

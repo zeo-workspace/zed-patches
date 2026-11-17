@@ -52,6 +52,11 @@ bumps inside a range are summarised rather than listed one by one.
   project, "New Global List" a global one; a header's menu gains "Make Global" and "Move to This
   Project"; "Move to List" offers only the thread's project's lists and the global ones. A domain
   of its own, `ThreadListScopeDb`; existing lists stay global (§6.49, ask 73).
+- `0124` (unconditional, after `0061`, on `0021`): a remote host with no Zeo server gets the one
+  `zeo-bin` carries at `usr/libexec/zeo-remote-server`, uploaded over ssh or into a dev container
+  instead of fetched from zed.dev; `ZEO_REMOTE_SERVER` points at another build. Built for x86-64-v3,
+  offered to Linux x86-64 only; a source-built `zeo` carries none. `test.sh` gains crate `remote`.
+  Written as `0117` on top of the 0.12.0 series and renumbered on the train, where `0117` was taken.
 
 ### Changed
 
