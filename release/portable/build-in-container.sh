@@ -150,6 +150,12 @@ generate_licenses
 sccache --zero-stats >/dev/null
 log "building (cargo build --release --locked)"
 cargo build --release --locked --package zed --package cli --features zed/mimalloc
+# remote_server: the server Zeo uploads to a remote host that has none (patch 0124).
+# Its own invocation, as upstream's script/bundle-linux does: built together with
+# zed, cargo unifies features and the server inherits the editor's X11/xkbcommon
+# links, then dies on a headless host (measured on bentoo-lab, 2026-11-16).
+log "building remote_server (separate cargo invocation)"
+cargo build --release --locked --package remote_server
 # The CMake cache is what whisper.cpp was really configured with: there must be
 # one, and every one found must say NATIVE, AVX-512 and the runtime-dispatched
 # CPU variants are all off, and ggml has no ccache wrapper. build.rs forwards any GGML_* in the environment, so
@@ -216,6 +222,8 @@ log "staging ${stage}"
 rm -rf "${stage}"
 install -Dm755 /work/target/release/cli "${stage}/usr/bin/zeo"
 install -Dm755 /work/target/release/zeo "${stage}/usr/libexec/zeo-editor"
+# beside the editor, where patch 0124 looks for it
+install -Dm755 /work/target/release/remote-server "${stage}/usr/libexec/zeo-remote-server"
 install -Dm644 "${APP_ID}.desktop" "${stage}/usr/share/applications/${APP_ID}.desktop"
 install -Dm644 crates/zed/resources/app-icon-zeo.png \
 	"${stage}/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
@@ -226,11 +234,14 @@ install -Dm644 crates/zed/resources/app-icon-zeo@2x.png \
 for doc in LICENSE-GPL LICENSE-APACHE assets/licenses.md; do
 	install -Dm644 "${doc}" "${stage}/usr/share/doc/zeo/${doc##*/}"
 done
-strip --strip-unneeded "${stage}/usr/bin/zeo" "${stage}/usr/libexec/zeo-editor"
+strip --strip-unneeded "${stage}/usr/bin/zeo" "${stage}/usr/libexec/zeo-editor" \
+	"${stage}/usr/libexec/zeo-remote-server"
 
 # The point of this build: refuse a binary that needs a newer glibc than the
 # oldest distribution it claims.
-for bin in "${stage}/usr/bin/zeo" "${stage}/usr/libexec/zeo-editor"; do
+# The remote server runs on the remote host: the same ceiling holds for it.
+for bin in "${stage}/usr/bin/zeo" "${stage}/usr/libexec/zeo-editor" \
+	"${stage}/usr/libexec/zeo-remote-server"; do
 	need="$(objdump -T "${bin}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)"
 	if [[ "$(printf '%s\n%s\n' "${need}" "${max_glibc}" | sort -V | tail -1)" != "${max_glibc}" ]]; then
 		echo "error: ${bin##*/} needs glibc ${need}, above ${max_glibc}" >&2
@@ -238,6 +249,15 @@ for bin in "${stage}/usr/bin/zeo" "${stage}/usr/libexec/zeo-editor"; do
 	fi
 	log "${bin##*/}: highest glibc symbol ${need}"
 done
+
+# The server runs on hosts with no display stack: refuse one that links any of it.
+gui_libs="$(readelf -d "${stage}/usr/libexec/zeo-remote-server" |
+	sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | grep -E '^lib(X|xcb|xkbcommon|wayland|vulkan|GL|EGL)' || true)"
+if [[ -n "${gui_libs}" ]]; then
+	echo "error: zeo-remote-server links display libraries: $(echo "${gui_libs}" | tr '\n' ' ')" >&2
+	exit 1
+fi
+log "zeo-remote-server: NEEDED has no display libraries"
 
 # PROVENANCE.txt, in the format zeo-bin has always carried, naming this build's
 # real toolchain instead of the Gentoo one.
@@ -250,6 +270,7 @@ done
 	printf 'zed source     https://github.com/zed-industries/zed/archive/%s.tar.gz\n' "${ZEO_COMMIT}"
 	printf 'source sha256  %s\n' "${ZEO_SOURCE_SHA256}"
 	printf 'features       zed/mimalloc\n'
+	printf 'remote server  usr/libexec/zeo-remote-server (patch 0124), uploaded to a remote host that has none\n'
 	printf 'licenses       %s, usr/share/doc/zeo/licenses.md\n' "$(cargo about --version)"
 	printf 'rustc          %s (official toolchain, rustup)\n' "$(rustc --version)"
 	printf 'cc / c++       %s\n' "$(clang --version | head -1)"
@@ -259,7 +280,8 @@ done
 		printf 'whisper.cpp    %s (CMakeCache: GGML_NATIVE, GGML_AVX512, GGML_CPU_ALL_VARIANTS, GGML_CCACHE OFF)\n' "${voice_env}"
 	fi
 	printf 'glibc          needs %s at most (ceiling checked: %s)\n\n' \
-		"$(objdump -T "${stage}/usr/libexec/zeo-editor" "${stage}/usr/bin/zeo" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)" \
+		"$(objdump -T "${stage}/usr/libexec/zeo-editor" "${stage}/usr/bin/zeo" \
+			"${stage}/usr/libexec/zeo-remote-server" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)" \
 		"${max_glibc}"
 	printf 'patches, in apply order (sha256):\n'
 	while IFS= read -r patch; do

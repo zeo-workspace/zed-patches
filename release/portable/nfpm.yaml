@@ -28,6 +28,10 @@ contents:
   - src: ${ZEO_STAGE}/usr/libexec/zeo-editor
     dst: /usr/libexec/zeo-editor
     file_info: { mode: 0755 }
+  # uploaded to a remote host that has no server (patch 0124)
+  - src: ${ZEO_STAGE}/usr/libexec/zeo-remote-server
+    dst: /usr/libexec/zeo-remote-server
+    file_info: { mode: 0755 }
   - src: ${ZEO_STAGE}/usr/share/applications/dev.zeo.Zeo.desktop
     dst: /usr/share/applications/dev.zeo.Zeo.desktop
   - src: ${ZEO_STAGE}/usr/share/icons/hicolor/512x512/apps/dev.zeo.Zeo.png

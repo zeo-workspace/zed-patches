@@ -33,6 +33,7 @@ modules:
     build-commands:
       - install -Dm755 usr/bin/zeo /app/bin/zeo
       - install -Dm755 usr/libexec/zeo-editor /app/libexec/zeo-editor
+      - install -Dm755 usr/libexec/zeo-remote-server /app/libexec/zeo-remote-server
       - install -Dm644 usr/share/applications/dev.zeo.Zeo.desktop /app/share/applications/dev.zeo.Zeo.desktop
       - install -Dm644 usr/share/icons/hicolor/512x512/apps/dev.zeo.Zeo.png /app/share/icons/hicolor/512x512/apps/dev.zeo.Zeo.png
       - install -Dm644 usr/share/metainfo/dev.zeo.Zeo.metainfo.xml /app/share/metainfo/dev.zeo.Zeo.metainfo.xml
