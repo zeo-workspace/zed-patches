@@ -642,6 +642,11 @@
 # edit_card_default, tool_card_default) and the agent menu's three submenus,
 # which replace 0090's toggle (§6.44, ask 68). On 0090.
 0125-agent-ui-tool-cards-in-three-states.patch
+# 0126: agent.ask_questions_in_cards (default true) -- off, every session request
+# (new, load, resume; v1 and v2) carries _meta askQuestionsInCards: false, which
+# turns off the plus prompt rule that routes open questions into question cards
+# (§6.43, ask 67). On 0036 (its test harness) and 0125 (the Settings page).
+0126-agent-servers-let-the-user-keep-an-agent-s-questions-out-of-cards.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
