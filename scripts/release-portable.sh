@@ -30,6 +30,10 @@
 # cargo CARGO_BUILD_JOBS=n, so it runs n jobs rather than one per host core
 # squeezed into n. Unset, the container uses every core, as before.
 #
+# ZP_CONTAINER_ENGINE=docker|podman picks the engine (default docker). A host
+# with podman alone -- the bentoo-lab worker that lab.sh builds on -- sets podman;
+# the two take the same arguments for everything this script runs.
+#
 # It never publishes. The artefacts land in ${ZP_PORTABLE_DIR}/<PF>/out/dist,
 # ready for `gh release upload` once a human authorises it.
 #
@@ -72,7 +76,12 @@ main() {
 	[[ -f "${patches}/series" ]] || die 2 "no series: ${patches}/series"
 	[[ -n "${webrtc}" && -f "${ZP_DISTDIR}/${webrtc}" ]] || die 2 "prebuilt WebRTC missing from ${ZP_DISTDIR}"
 	[[ -f "${files}/app-icon-zeo.png" ]] || die 2 "icons missing from ${files}"
-	command -v docker >/dev/null || die 2 "docker is required"
+	local engine="${ZP_CONTAINER_ENGINE:-docker}"
+	case "${engine}" in
+	docker | podman) ;;
+	*) die 2 "ZP_CONTAINER_ENGINE must be docker or podman, got: ${engine}" ;;
+	esac
+	command -v "${engine}" >/dev/null || die 2 "${engine} is required"
 	local jobs="${ZP_PORTABLE_JOBS:-}" limits=()
 	if [[ -n "${jobs}" ]]; then
 		[[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || die 2 "ZP_PORTABLE_JOBS must be a positive integer, got: ${jobs}"
@@ -88,12 +97,12 @@ main() {
 	printf 'image %s\n' "${image}"
 	# The tag is the Containerfile's hash, so an existing image is the one this
 	# file describes; rebuilding it would only re-download the toolchain.
-	if ! docker image inspect "${image}" >/dev/null 2>&1; then
-		docker build -q -t "${image}" -f "${here}/Containerfile" "${here}" >/dev/null ||
+	if ! "${engine}" image inspect "${image}" >/dev/null 2>&1; then
+		"${engine}" build -q -t "${image}" -f "${here}/Containerfile" "${here}" >/dev/null ||
 			die 1 "the build image failed to build"
 	fi
 
-	local run=(docker run --rm "${limits[@]}" --user "$(id -u):$(id -g)" -e HOME=/work
+	local run=("${engine}" run --rm "${limits[@]}" --user "$(id -u):$(id -g)" -e HOME=/work
 		-e "ZEO_PV=${pv}" -e "ZEO_PVR=${pvr}" -e "ZEO_COMMIT=${ZP_COMMIT}"
 		-e "ZEO_SOURCE_SHA256=${source_sha256}"
 		-v "${ZP_DISTFILE}:/in/zed.tar.gz:ro"

@@ -2326,6 +2326,15 @@ test_release_patches_skips_default_off_groups() {
 	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
 }
 
+# --- lab.sh: builds on the lab host, proven against a local fake host ---------
+test_lab_builds_detached_and_fetches_checked() {
+	case_start "lab.sh: sends the working tree, runs release-portable detached under podman, reports state, refuses a 2nd build, fetches with checksums"
+	local out status
+	out="$(ZP_REPO="${REPO_ROOT}" bash "${SCRIPTS}/tests/lab-local.sh" 2>&1)"
+	status=$?
+	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
+}
+
 # --- release-portable.sh: asset names carry no ~ (story 073, R4.2) --------------
 test_release_portable_untilde_artefacts() {
 	case_start "release-portable: ~ becomes . in every artefact name, so SHA256SUMS names what GitHub serves"
@@ -2830,6 +2839,29 @@ test_release_portable_jobs_caps_the_container() {
 	rm -rf "${tmp}"
 }
 
+test_release_portable_engine_is_selectable() {
+	case_start "release-portable: ZP_CONTAINER_ENGINE=podman runs every container step with podman, never docker; an unknown engine exits 2"
+	local tmp plog dlog out status
+	tmp="$(mktemp -d)"
+	release_env "${tmp}"
+	cl_header "${tmp}/CHANGELOG.md"
+	printf '## [0.9.9] — 2026-01-01\n\n### Added\n\n- A fixture.\n' >>"${tmp}/CHANGELOG.md"
+	sed 's/docker\.log/podman.log/' "${tmp}/bin/docker" >"${tmp}/bin/podman"
+	chmod +x "${tmp}/bin/podman"
+	: >"${tmp}/podman.log"
+	ZP_CONTAINER_ENGINE=podman run_release "${tmp}" "${tmp}/CHANGELOG.md" --no-flatpak >/dev/null
+	plog="$(cat "${tmp}/podman.log")"
+	dlog="$(cat "${tmp}/docker.log")"
+	out="$(ZP_CONTAINER_ENGINE=containerd run_release "${tmp}" "${tmp}/CHANGELOG.md" --no-flatpak)"
+	status=$?
+	assert_contains "${plog}" "image inspect" &&
+		assert_contains "${plog}" "run --rm" &&
+		assert_not_contains "${dlog}" "run " &&
+		assert_status 2 "${status}" &&
+		assert_contains "${out}" "containerd" && ok
+	rm -rf "${tmp}"
+}
+
 # The release scripts print their own header comment as their help, so a
 # header that grows must not lose its last lines (story 028).
 test_release_help_prints_whole_header() {
@@ -2925,6 +2957,7 @@ main() {
 		test_release_refuses_version_without_changelog
 		test_release_refuses_unreadable_changelog_as_environment
 		test_release_portable_jobs_caps_the_container
+		test_release_portable_engine_is_selectable
 		test_release_help_prints_whole_header
 
 		test_refresh_preserves_source_set
@@ -3001,6 +3034,7 @@ main() {
 
 		test_release_patches_skips_default_off_groups
 		test_release_portable_untilde_artefacts
+		test_lab_builds_detached_and_fetches_checked
 	)
 
 	for t in "${tests[@]}"; do
