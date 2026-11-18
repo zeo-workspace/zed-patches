@@ -112,12 +112,18 @@ check_overlay() {
 		fi
 	done
 
+	# A set, not `printf | grep -qxF`: under pipefail that pipe failed whenever
+	# grep matched and exited before printf finished writing (SIGPIPE, 141), so a
+	# name early in the series was reported as an orphan at random -- 0062 was,
+	# on 2026-11-17, and 21 in 3000 runs under load reproduced it.
+	local -A in_series=()
+	for name in "${_series_ref2[@]}"; do in_series["${name}"]=1; done
 	local -a orphans=()
 	local f base
 	for f in "${files}"/*.patch; do
 		[[ -e "${f}" ]] || continue
 		base="${f##*/}"
-		printf '%s\n' "${_series_ref2[@]}" | grep -qxF "${base}" || orphans+=("${base}")
+		[[ -n "${in_series["${base}"]:-}" ]] || orphans+=("${base}")
 	done
 
 	if ((differing == 0 && absent == 0 && ${#orphans[@]} == 0)); then

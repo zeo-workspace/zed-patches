@@ -169,7 +169,10 @@ fi
 # In a dry run the overlay was deliberately not written, so "patches <-> overlay"
 # drifting is this script's own doing and means nothing about the ebuild. Only a
 # "series <-> ebuild" disagreement is the handoff this script exists to stop at.
-if bash "${SCRIPTS}/check-sync.sh" "${to}" 2>&1 | grep -q '^DRIFT *series <-> ebuild'; then
+# Captured first, not piped into `grep -q`: under pipefail an early-exiting grep
+# can kill the writer with SIGPIPE and turn a match into a miss.
+check_sync_out="$(bash "${SCRIPTS}/check-sync.sh" "${to}" 2>&1 || true)"
+if grep -q '^DRIFT *series <-> ebuild' <<<"${check_sync_out}"; then
 	printf '\n\033[1mthe series is ready; the ebuild is not.\033[0m\n'
 	printf '\nEdit the PATCHES+=() blocks in:\n  %s/%s/%s.ebuild\n' "${overlay}" "${ZP_CATEGORY_PATH}" "${to}"
 	printf '\nso they name exactly what patches/%s/series names, under the same USE\n' "${to}"
