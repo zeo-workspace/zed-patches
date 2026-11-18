@@ -56,6 +56,11 @@
 # the command beside the editor instead of a prompt (Zeo next proposal §6.25).
 # On 0022 and 0025. Rebrand, so ungrouped.
 0098-zed-install-cli-only-while-zeo-is-not-reachable.patch
+# 0127: Windows packaging for the zeo channel -- Zeo.exe and bin\zeo.exe, Zeo's
+# icon, publisher, zeo:// and installer identity, and none of Zed's updater or
+# Explorer package (docs/ZEO-PLATFORMS-PROPOSAL.md W2 in the hub). Touches only
+# Windows build files, so a Linux build compiles nothing new. Rebrand, so ungrouped.
+0127-windows-package-the-zeo-channel-as-Zeo.patch
 
 # 0033: Claude Agent (Plus) and Claude Agent TUI ship as default agents -- npx
 # entries added to the ACP registry list and enabled in default.json, always
