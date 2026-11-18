@@ -23,7 +23,7 @@
   <launchable type="desktop-id">dev.zeo.Zeo.desktop</launchable>
   <url type="homepage">https://github.com/zeo-workspace/zeo</url>
   <url type="bugtracker">https://github.com/zeo-workspace/zeo/issues</url>
-  <url type="vcs-browser">https://github.com/zeo-workspace/zed-patches</url>
+  <url type="vcs-browser">https://github.com/zeo-workspace/zeo-patches</url>
   <content_rating type="oars-1.1"/>
   <provides>
     <binary>zeo</binary>
