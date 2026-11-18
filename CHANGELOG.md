@@ -31,6 +31,45 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.14.0_p20261118] — 2026-11-18 (untagged)
+
+Zeo `0.14.0_p20261118`: the series moves from Zed `f0fa51bb` to `96362135` (51 commits), and
+`patches/zeo-0.13.0_p20261114` becomes `patches/zeo-0.14.0_p20261118`. The bump brings
+`agent-client-protocol` 5.3.0 with schema 1.18 (#66979) and moves the `async-task` git dependency
+from `zed-industries/async-task` to `smol-rs/async-task@41fd3359`; `CRATES`/`GIT_CRATES` were
+regenerated with pycargoebuild. **The seven-day cooldown was waived for every dependency of this
+bump by the operator on 2026-11-17** -- `agent-client-protocol` 5.3.0 and its schema 1.18.0 were
+published on 2026-11-14. The series is 122.
+
+`refresh.sh` conflicted, so the series was carried by cherry-pick onto the new baseline.
+
+### Added
+
+- `0126` is registered in the ebuild (USE `claude-agent-acp-plus`, after `0125`): the agent's
+  questions go to the question card unless `agent.ask_questions_in_cards` is off (§6.43). It sat in
+  the series unregistered since `167036a`; user-visible notes are in `zeo/CHANGELOG.md` under 0.14.0.
+
+### Changed
+
+- `0081`: ACP schema 1.18 folded the plan file into the markdown plan -- `PlanContent::File` is
+  gone and upstream's `render_plan_body` returns `AnyElement`; the scrollbar wraps that element.
+- `0118`: upstream now draws the plan disclosure for every plan; the header order stays title,
+  Open Plan File, minimize, close.
+- `0025` and `0124`: context only (an indentation change in the onboarding headline; a format-patch
+  signature line dropped).
+- The ebuild's `async-task` rewrite follows the move to `smol-rs` (no `.git` suffix upstream).
+- `rebrand/`: 24 new upstream strings accepted -- 23 in the new Linux sandbox crate
+  (`sandbox_linux`, #67062: `"zed sandbox: …"` / `"zed sandbox supervisor: …"` log and error lines,
+  `"Zed closed the setup channel"`) and `snippet_provider`'s `"Hello ${1:Zed}"`.
+
+### Fixed
+
+- `check-sync.sh` reported a patch listed in the series as an overlay orphan at random (`0062` on
+  2026-11-17): under `pipefail`, `printf … | grep -qxF` failed whenever `grep` matched and exited
+  before `printf` finished writing (SIGPIPE). The series is now an associative set; 300 runs under
+  load showed no false drift. `bump.sh` captures `check-sync.sh`'s output before matching it, for
+  the same reason.
+
 ## [0.13.0_p20261114] — 2026-11-16 (tagged)
 
 Zeo `0.13.0_p20261114`: `patches/zeo-0.12.0_p20261114` becomes `patches/zeo-0.13.0_p20261114`,
