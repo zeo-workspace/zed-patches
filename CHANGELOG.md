@@ -31,7 +31,7 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-## [0.14.0_p20261118] — 2026-11-18 (untagged)
+## [0.14.0_p20261118] — 2026-11-18 (tagged)
 
 Zeo `0.14.0_p20261118`: the series moves from Zed `f0fa51bb` to `96362135` (51 commits), and
 `patches/zeo-0.13.0_p20261114` becomes `patches/zeo-0.14.0_p20261118`. The bump brings
