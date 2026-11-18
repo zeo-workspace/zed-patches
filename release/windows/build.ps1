@@ -138,6 +138,9 @@ $started = Get-Date
 Log 'bundled' "minutes=$([int]((Get-Date) - $started).TotalMinutes)"
 
 $inno = Join-Path $Src 'inno\x86_64'
+# zeo.exe writes UTF-8; read with the console's OEM code page, its en dash came out as "ΓÇô" in
+# the first PROVENANCE (2026-11-18).
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $cliVersion = (& (Join-Path $inno 'bin\zeo.exe') --version | Out-String).Trim()
 Log 'cli-version' "output=`"$cliVersion`""
 

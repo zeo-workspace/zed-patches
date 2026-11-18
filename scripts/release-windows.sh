@@ -259,10 +259,19 @@ write_provenance() {
 		printf 'package        %s\n' "${pf}"
 		printf 'zed commit     %s\n' "${ZP_COMMIT}"
 		printf 'zed archive    %s  %s\n' "$(sha256sum "${ZP_DISTFILE}" | cut -d' ' -f1)" "${ZP_DISTFILE##*/}"
-		if [[ "${origin}" == absent ]]; then
+		# Where it came from, named by artefact: a path on the build host means nothing to a
+		# reader of a published PROVENANCE, and the first one leaked a home directory.
+		local label
+		case "${origin}" in
+		absent) label="" ;;
+		*/portable/zeo-*/usr/libexec/zeo-remote-server) label="usr/libexec/zeo-remote-server of zeo-${pvr}-x86_64.tar.xz (release v${pvr})" ;;
+		*/zeo-portable/*) label="usr/libexec/zeo-remote-server of release-portable.sh's staged tree for ${pf}" ;;
+		*) label="${origin##*/} (--remote-server)" ;;
+		esac
+		if [[ -z "${label}" ]]; then
 			printf 'remote server  absent (--no-remote-server)\n'
 		else
-			printf 'remote server  %s  %s\n' "$(sha256sum "${origin}" | cut -d' ' -f1)" "${origin}"
+			printf 'remote server  %s  %s\n' "$(sha256sum "${origin}" | cut -d' ' -f1)" "${label}"
 		fi
 		printf '\n# Build inputs (release/windows/build-inputs.lock)\n'
 		grep -vE '^[[:space:]]*(#|$)' "${ZP_REPO}/release/windows/build-inputs.lock" | awk -F'\t' '{ print $3 "  " $1 }'
