@@ -1,0 +1,15 @@
+# The binary inputs of a Zeo Windows release build, pinned by sha256: name<TAB>url<TAB>sha256.
+# Zed's build fetches each of these itself, with no hash check; release-windows.sh fetches them
+# on the host instead, checks them here, and build.ps1 checks them again in the guest before
+# handing them in. Each is the exact version upstream Zed f0fa51bb pins, so the 7-day rule is
+# met by their age. GitHub hashes are the release asset digests GitHub reports; AGS comes from a
+# tag archive that has none and was measured on download, 2026-11-17.
+#
+# webrtc-sys-build (livekit-rust-sdks fbda05eb) downloads WEBRTC_TAG webrtc-0001d84-4 unless
+# LK_CUSTOM_WEBRTC names an unpacked copy, which is what the ebuild does on Linux (2026-03-17).
+webrtc-win-x64-release.zip	https://github.com/zed-industries/livekit-rust-sdks/releases/download/webrtc-0001d84-4/webrtc-win-x64-release.zip	b16f68e1fef8bd8089b9c7fc46c3c9b43ad5257c84460794a3668ec5accc1f13
+# bundle-windows.ps1 DownloadAMDGpuServices: AMD GPU Services 6.3.0, amd_ags_x64.dll.
+AGS_SDK_v6.3.0.zip	https://codeload.github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/zip/refs/tags/v6.3.0	292c5ce0c7f51d44a1e56f2a73d82f1e7304bb14d2b8e39a05708877210de884
+# bundle-windows.ps1 DownloadConpty: conpty.dll and OpenConsole.exe (2026-07-16). crates/zed's
+# build.rs downloads the same package into target\ for `cargo run`; that copy is not shipped.
+Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg	https://github.com/microsoft/terminal/releases/download/v1.25.1912.0/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg	05fe9b571ea4fb198f5012405cb39a132cf23eee50feaa496524c149b2502692

@@ -28,7 +28,7 @@ description = "unused — the default rule set is what scans"
 regex = '''\$^'''
 
 [allowlist]
-description = "RFC 6455 §1.3's own example Sec-WebSocket-Key (base64 of 'the sample nonce')"
+description = "public values: RFC 6455 §1.3's example Sec-WebSocket-Key; Microsoft's generic Windows 11 install keys"
 # A Sec-WebSocket-Key is a handshake nonce: sent in the clear, echoed back
 # hashed, public by construction. This particular one is the specification's own
 # sample value, which is why it appears in a test handshake rather than a
@@ -39,4 +39,11 @@ description = "RFC 6455 §1.3's own example Sec-WebSocket-Key (base64 of 'the sa
 # the orchestration repository's .gitleaks.toml one directory up.
 regexes = [
   '''dGhlIHNhbXBsZSBub25jZQ==''',
+  # Microsoft's generic installation keys for Windows 11 Home and Pro, in
+  # release/windows/build-answers.sh: published by Microsoft so an unattended
+  # install can pick an edition, and they activate nothing (2026-11-17). The
+  # licence key that activates the Zeo build guest is typed by the operator in
+  # the guest and never reaches this repository.
+  '''YTMG3-N6DKC-DKB77-7M9GH-8HVX7''',
+  '''VK7JG-NPHTM-C97JM-9MPGT-3V66T''',
 ]

@@ -1,0 +1,30 @@
+# Every file the Zeo Windows build guest installs, pinned by sha256: name<TAB>url<TAB>sha256.
+# build-answers.sh and provision.ps1 refuse a file whose hash differs. A version is taken only
+# once it is at least seven days old; the date it was published follows each entry as a comment.
+# GitHub hashes are the release asset digests GitHub reports; the others were measured on
+# download, 2026-11-17.
+#
+# Win32-OpenSSH 10.4.0.0p1 (2026-10-20).
+OpenSSH-Win64.msi	https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.4.0.0p1-Preview/OpenSSH-Win64-v10.4.0.0.msi	788d8643464a01eb63640a2fd746f9ed23d106b5a901a35f88dc8cd40e446ac9
+# Git for Windows 2.56.0.windows.4 (2026-10-26); 2.56.1 (2026-11-10) was under seven days.
+Git-64-bit.exe	https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/Git-2.56.0.4-64-bit.exe	4961a4a8cc778d8b6e00a5819e5fe4d078b754555aff7aedc2d77a5d74c2de80
+# CMake 4.4.5 (2026-10-27); 4.5.0 (2026-11-12) was under seven days. whisper.cpp (0067) needs it.
+cmake-windows-x86_64.msi	https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5-windows-x86_64.msi	c18b52b4017c4e5ffcd7d516ea39c4e0ed37f58920b90a5c98a46280b1857145
+# LLVM 23.1.5 (2026-11-03): libclang for bindgen. 23.1.6 (2026-11-17) was under seven days.
+LLVM-win64.msi	https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/LLVM-23.1.5-win64.msi	288ab326377157a9e02e6fb9724914cc2b55963882d493a405f31dc66e837c12
+# Inno Setup 6.7.4 (2026-10-28): bundle-windows.ps1 calls "Inno Setup 6\ISCC.exe", not 7.
+innosetup.exe	https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe	a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
+# rustup-init 1.29.3 (2026-11-03); sha256 from static.rust-lang.org's .sha256 file. The
+# toolchain itself is rust-toolchain.toml's (1.98.1), installed by rustup.
+rustup-init.exe	https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-pc-windows-msvc/rustup-init.exe	38027d51d69a5d05493627a0634dbea52d6cd793c8f072d2373d3f4163eec7db
+# PowerShell 7.6.9 (2026-10-25); 7.6.10 (2026-11-10) was not yet seven days old. Zed's
+# bundle-windows.ps1 and generate-licenses.ps1 need 7: `? :` does not parse in Windows
+# PowerShell 5.1, and only 7 stops on a failing native command
+# ($PSNativeCommandUseErrorActionPreference).
+PowerShell-win-x64.msi	https://github.com/PowerShell/PowerShell/releases/download/v7.6.9/PowerShell-7.6.9-win-x64.msi	50d33c7494aaf82b987cfd4de3f232d04f91fdd4c0deeca8a669cced3e7cf8f9
+# Visual Studio 2022 Community bootstrapper, measured 2026-11-17. Microsoft publishes only the
+# moving aka.ms link, so this hash pins today's bootstrapper and fails loudly when it changes;
+# the components it then fetches are checked by the installer's own signatures, not by this
+# file, and provision.ps1 records the installed version. Community, because bundle-windows.ps1
+# opens "Microsoft Visual Studio\2022\Community"'s developer shell.
+vs_community.exe	https://aka.ms/vs/17/release/vs_community.exe	051dffb68c39b9a4f15b830fdae8d08dd5620369e923262c46f27e07a428a68c

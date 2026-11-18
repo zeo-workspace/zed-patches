@@ -23,29 +23,8 @@ rm -rf "${src}"
 mkdir -p "${src}"
 tar -xzf /in/zed.tar.gz -C "${src}" --strip-components=1
 
-# release_patches -- the series as the release ships it: every group the
-# package's default USE set enables. That is every group except `test` (tests
-# only, applied by the ebuild under USE=test) and every group whose `@feature`
-# line is followed by a `# @default: off` marker (its USE flag is off by
-# default, e.g. ai-jail). The marker belongs to the group above it and is reset
-# at the next `@feature`. Same order as the series.
-release_patches() {
-	local line group="" default_off=0
-	while IFS= read -r line; do
-		if [[ "${line}" =~ ^#[[:space:]]*@feature:[[:space:]]*([^[:space:]]+) ]]; then
-			group="${BASH_REMATCH[1]}"
-			default_off=0
-			continue
-		fi
-		if [[ "${line}" =~ ^#[[:space:]]*@default:[[:space:]]*off[[:space:]]*$ ]]; then
-			default_off=1
-			continue
-		fi
-		[[ -z "${line}" || "${line}" == \#* || "${group}" == test ]] && continue
-		((default_off)) && continue
-		printf '%s\n' "${line}"
-	done < /in/patches/series
-}
+# shellcheck source=release/portable/release-patches.sh
+source /pkg/release-patches.sh
 
 log "applying the series"
 cd "${src}"
@@ -53,7 +32,7 @@ n=0
 while IFS= read -r patch; do
 	patch -p1 --no-backup-if-mismatch --quiet < "/in/patches/${patch}"
 	n=$((n + 1))
-done < <(release_patches)
+done < <(release_patches /in/patches/series)
 log "${n} patches applied"
 
 # src_prepare: icons, release channel, desktop entry -- byte for byte the edits
@@ -286,7 +265,7 @@ log "zeo-remote-server: NEEDED has no display libraries"
 	printf 'patches, in apply order (sha256):\n'
 	while IFS= read -r patch; do
 		printf '  %s  %s\n' "$(sha256sum "/in/patches/${patch}" | cut -d' ' -f1)" "${patch}"
-	done < <(release_patches)
+	done < <(release_patches /in/patches/series)
 	printf '\nNEEDED (usr/libexec/zeo-editor):\n'
 	objdump -p "${stage}/usr/libexec/zeo-editor" | awk '/NEEDED/ { print "  " $2 }'
 	printf '\nThe Corresponding Source is the zed source above plus these patches,\n'
