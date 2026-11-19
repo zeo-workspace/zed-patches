@@ -31,6 +31,29 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+### Added
+
+- `0128`–`0132`, after `0126` (USE `claude-agent-acp-plus`): the five probable defects the
+  upstream-native review found (hub `docs/UPSTREAM-NATIVE-REVIEW.md`, §9), each proved first by a
+  test that failed on the series without it (bentoo-lab, 2026-11-19), each stacked on the patches
+  it changes rather than folded into them:
+  - `0128` -- `0026`'s floating Previous/Next stop at an answered question
+    (`is_user_authored_scroll_target`, upstream #64007); its Copy is upstream's `CopyButton`.
+  - `0129` -- a collapsed project's header counts `WaitingForAnswer` (`0030`, `0072`), as upstream
+    counts a pending question since #66708.
+  - `0130` -- History (`0015`) is scoped by the project group key: a linked worktree's archived
+    thread is listed under its repository, a thread with no folder stays reachable.
+  - `0131` -- message times (`0087`) on the receipt transport (the Zed Agent, ACP v2).
+  - `0132` -- a `Waiting` subagent card (`0072`) embeds its pending permission and opens full
+    screen at its latest entries.
+
+  Not in the ebuild's `PATCHES+=()` yet: `check-sync.sh` reports them until the next Zeo release
+  registers them, and their user-visible notes go to `zeo/CHANGELOG.md` with that release.
+
+### Changed
+
+- `0052`, `0058`, `0063`, `0067`: offsets only, regenerated on top of `0128`–`0132`.
+
 ## [0.14.0_p20261118] — 2026-11-18 (tagged)
 
 Zeo `0.14.0_p20261118`: the series moves from Zed `f0fa51bb` to `96362135` (51 commits), and

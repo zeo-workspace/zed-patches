@@ -652,6 +652,28 @@
 # turns off the plus prompt rule that routes open questions into question cards
 # (§6.43, ask 67). On 0036 (its test harness) and 0125 (the Settings page).
 0126-agent-servers-let-the-user-keep-an-agent-s-questions-out-of-cards.patch
+# 0128-0132: the five probable defects the upstream-native review found
+# (docs/UPSTREAM-NATIVE-REVIEW.md in the hub, section 9), each proved by a
+# test that failed on the series before it, and each stacked on the patches
+# it changes rather than folded into them (2026-11-19).
+# 0128: 0026's floating Previous/Next stop at an answered question, as Zed's
+# own navigation does (is_user_authored_scroll_target, upstream #64007), and
+# its Copy is upstream's CopyButton with the copied check (#64664).
+0128-agent-ui-floating-controls-follow-native-navigation-and-copy.patch
+# 0129: a collapsed project's header counts a thread waiting for an answer
+# (0030's status, and 0072's waiting child), as upstream counts a question
+# since #66708.
+0129-sidebar-collapsed-project-counts-a-thread-waiting-for-an-answer.patch
+# 0130: History (0015) is scoped by the project's group key -- main worktree
+# paths and host -- so a linked worktree's archived thread is listed under
+# its repository, and a thread with no folder stays reachable.
+0130-agent-ui-history-scopes-by-project-identity.patch
+# 0131: message times (0087) on the receipt transport too -- the Zed Agent
+# and ACP v2 -- where running_turn stays None.
+0131-acp-thread-message-times-on-the-receipt-transport.patch
+# 0132: a waiting subagent's card (0072) keeps its pending permission prompt
+# and opens full screen at its latest entries.
+0132-agent-ui-waiting-subagent-card-keeps-its-prompt.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
@@ -744,3 +766,4 @@
 # Linux, and run against Claude Agent (Plus) as well as Zed's native agent.
 0050-project-revive-three-upstream-git-tests.patch
 0051-agent-e2e-suites-run-against-Claude-Agent-Plus.patch
+
