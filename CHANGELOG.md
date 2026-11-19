@@ -31,6 +31,13 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.15.0_p20261118] — 2026-11-19 (tagged)
+
+Zeo `0.15.0_p20261118`: `patches/zeo-0.14.0_p20261118` becomes `patches/zeo-0.15.0_p20261118`,
+same Zed `96362135`. Five patches added (`0128`–`0132`), and the 0.14.0 Windows work that had not
+reached the overlay (`0025`'s 76 more strings, `0063`'s Edge lookup, zeo-patches `030af64`) ships
+with them; user-visible notes are in `zeo/CHANGELOG.md` under 0.15.0. The series is 128.
+
 ### Added
 
 - `0128`–`0132`, after `0126` (USE `claude-agent-acp-plus`): the five probable defects the
@@ -47,11 +54,12 @@ bumps inside a range are summarised rather than listed one by one.
   - `0132` -- a `Waiting` subagent card (`0072`) embeds its pending permission and opens full
     screen at its latest entries.
 
-  Not in the ebuild's `PATCHES+=()` yet: `check-sync.sh` reports them until the next Zeo release
-  registers them, and their user-visible notes go to `zeo/CHANGELOG.md` with that release.
+  Registered in the ebuild's `PATCHES+=()` after `0126`, under the same USE flag.
 
 ### Changed
 
+- `0025`: 76 more literals say Zeo (`030af64`; `rebrand/zed-literals.txt` 327 -> 251).
+- `0063`: the isolated devtools window falls back to Edge on Windows (`030af64`).
 - `0052`, `0058`, `0063`, `0067`: offsets only, regenerated on top of `0128`–`0132`.
 
 ## [0.14.0_p20261118] — 2026-11-18 (tagged)
