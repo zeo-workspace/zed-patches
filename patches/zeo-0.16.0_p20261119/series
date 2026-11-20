@@ -674,6 +674,10 @@
 # 0132: a waiting subagent's card (0072) keeps its pending permission prompt
 # and opens full screen at its latest entries.
 0132-agent-ui-waiting-subagent-card-keeps-its-prompt.patch
+# 0133: Enter in a question card's field (0005/0027) does not send the card; it
+# goes out from Submit only, by click or by Tab then Enter. The card's half of
+# 0043, which made Enter inert in the composer while a question is open.
+0133-agent-ui-enter-in-a-question-card-field-does-not-send.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch
