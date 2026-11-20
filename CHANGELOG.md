@@ -70,6 +70,20 @@ wasmtime 48.0.9. `patches/zeo-0.15.0_p20261118` is copied forward, not renamed. 
   `test-support` feature (`0098`; `925ee76e`).
 - `.lab.toml` pins the builder image `20261120-f15ae43af473` (zeo-0.16.0_p20261119).
 
+### Verification
+
+- `cargo check --workspace --all-targets` clean; clippy on every touched crate: only `0002`'s
+  known `claude_code_ide` warnings; rustfmt: no file the series touches regressed.
+- verify 127/127; `git am` of the 127 files onto the baseline reproduces the compiled tree;
+  check-sync in sync with the scratch overlay (changelog relation against a scratch copy with a
+  provisional 0.16.0 section -- the real one is not cut).
+- `test.sh` on bentoo-lab (job `20261120-022217-fa0633`, image `ab6b0db4`): nextest 6468/6468,
+  22 skipped. Red probes (local, `agent_ui config_options`): Shift rule, ToDo filter, row order.
+- `ebuild prepare` in the scratch overlay: 125 applied (USE=-test); `pkgcheck --cache=-git`: the
+  known x32 `NonsolvableDepsInDev` only.
+- `check-rebrand.sh`: one new "Zed" literal, a test assertion message in `0128` -- left for
+  triage, not accepted.
+
 ## [0.15.0_p20261118] — 2026-11-19 (tagged)
 
 Zeo `0.15.0_p20261118`: `patches/zeo-0.14.0_p20261118` becomes `patches/zeo-0.15.0_p20261118`,
