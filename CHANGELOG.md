@@ -31,6 +31,45 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+Working PF `zeo-0.16.0_p20261119`: the series on Zed `7279c76ef71d` (2026-11-19, 48 commits past
+`96362135`, Zed 1.31.0): `agent-client-protocol` 5.4.0 / schema 1.19.0, tree-sitter `cf5d3a63`,
+wasmtime 48.0.9. `patches/zeo-0.15.0_p20261118` is copied forward, not renamed. 0.16.0 rather than
+`-r1` because `0131`'s removal takes away something 0.15.0 shipped; the version is not cut yet
+(`zeo/CHANGELOG.md` holds the notes under `[Unreleased]`). The series is 127.
+
+### Removed
+
+- `0131` (message times on the receipt transport: the Zed Agent and ACP v2): agent-side features
+  are for Claude Agent (Plus) and the TUI adapter only (operator, 2026-11-19). Dropped from
+  `series` (the number stays retired, with the reason) and from the ebuild's `PATCHES+=()`.
+
+### Changed
+
+- Carried by cherry-pick (`refresh.sh` stopped at `0049`): the 0.15.0 chain rebuilt with `git am`
+  on `96362135` (`git am` refused `0103`, `0125` and `0126`; `patch`, as `eapply`, took them),
+  picked onto the new baseline, conflicts
+  resolved, compile fixes folded into their owning patches, every file regenerated with its header
+  kept. Each patch whose code changed beyond context says what and why in a dated paragraph of its
+  header: `0001`, `0007`, `0010`, `0027`, `0036`, `0037`, `0043`, `0046`, `0049`, `0051`, `0055`,
+  `0057`, `0059`, `0063`, `0070`, `0071`, `0073`, `0086`, `0098`. The ones that change behaviour:
+  - `0010`/`0059`/`0073` on upstream `df1ba676`'s reorganised composer options: a thread-local
+    `set_config_option_for_thread` (keeps upstream's new error toast) for every pick without
+    Shift, including the new Agent Options submenus; every boolean surface -- toggle button,
+    Agent Options entry, `ToggleFastMode` key -- is session-only; `plan_updates` stays out of the
+    Agent Options menu as well as the row.
+  - `0010`: the default-pin marker moved into `language_model_selector` (upstream `1043f4a8`
+    moved the model picker there), re-exported by `agent_ui::set_as_default`.
+  - `0049`: the switcher's pinned-row rule re-seated on upstream's `ThreadEntryWorkspace` switcher.
+  - `0057`/`0046`: upstream `07278edd`'s `ResolvedAgentServerCommand` -- the jailed launch keeps
+    the installation lease; the system-adapter launch holds none.
+  - `0086`: upstream `df1ba676` removed the reversal it undid; kept as a guard, flagged as a
+    retirement candidate.
+- Upstream's dead-code sweep removed APIs the series uses; restored by their first user:
+  `Tooltip::new_element` (`0037`; `5a0e9521`), `AgentPanel::activate_retained_thread` (`0070`;
+  `4e2c957a`), `test_support::stub_agent_connection` (`0071`; `4e2c957a`), `install_cli`'s
+  `test-support` feature (`0098`; `925ee76e`).
+- `.lab.toml` pins the builder image `20261120-f15ae43af473` (zeo-0.16.0_p20261119).
+
 ## [0.15.0_p20261118] — 2026-11-19 (tagged)
 
 Zeo `0.15.0_p20261118`: `patches/zeo-0.14.0_p20261118` becomes `patches/zeo-0.15.0_p20261118`,

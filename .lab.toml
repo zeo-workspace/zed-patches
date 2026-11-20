@@ -12,9 +12,10 @@
 # Release builds keep their own route: scripts/lab.sh build <PF>.
 
 [project]
-# 20261118-0a12f45c1856: ::bentoo at 0a12f45c1856, zeo-0.14.0_p20261118 (rebuilt 2026-11-18;
-# 20261117-727ec7776fe7, sha256:71c4249c…, carried 0.13.0 only).
-image = "localhost/shidashi-zeo-builder@sha256:e62e9d20989ffe3e701fb2352606b4cd533c5d3603d6cc565cc45f1236f84a68"
+# 20261120-f15ae43af473: ::bentoo at f15ae43af473 (the zeo-bump-7279 scratch commit on
+# origin/master), zeo-0.16.0_p20261119 (built 2026-11-20; replaces 20261118-0a12f45c1856,
+# sha256:e62e9d20…, which carried zeo-0.14.0_p20261118).
+image = "localhost/shidashi-zeo-builder@sha256:ab6b0db496968dca177ca1fd0b5953856c17cda866dc94144e3ff8af9d30b31e"
 # Zeo's build refuses root (Shidashi, 2026-11-17); uid 1000 is the image's "bentoo", and gid
 # 250 is portage: ebuild unpack chgrps its build dirs to it, as on the desktop.
 user = "1000:250"
