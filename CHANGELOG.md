@@ -31,6 +31,27 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+The series on Zed `0a514d7ef59c` (2026-11-20, 8 commits past `7279c76ef71d`), as
+`patches/zeo-0.17.0_p20261120` -- copied forward from `zeo-0.16.0_p20261119`, not renamed;
+the version is provisional until the release is cut. The series is 129.
+
+- **Carried by cherry-pick**: `refresh.sh` stopped at `0027`. Conflicts in `0027`, `0090`
+  (upstream a65e743ad9's authentication status in the agent menu) and `0111` (the dock's
+  `has_agent_panel`); compile fixes folded into `0034`, `0036`, `0057`, `0070` (a65e743ad9's
+  `ClientContext.auth_status`). Every header kept byte for byte.
+- **`0050`**: `test_odd_events_for_ignored_dirs` no longer requires the initial scan's
+  `HeadChanged` -- upstream 87e6a02e's faster scan can finish before the test subscribes;
+  it now checks that the scan found the repository. USE `test`.
+- **Added** `0133` (Enter in a question card's field does not send the card), `0134` (the
+  pinned message's avatar centred on its card), `0135` (composer options: effort on the
+  right, the options button last, on/off options as switches in a menu that stays open).
+  All three in the default agent group (USE `claude-agent-acp-plus`).
+- **Lab**: `.lab.toml` pins builder image `20261120-579bb23b31ad`, built from a copy of
+  ::gentoo minus its 2026-11-20 `rust-1.100.0` mask ("for mozilla testing").
+- Gates: `test.sh` on bentoo-lab 6481/6481 (22 skipped); clippy `-p agent_ui -p project
+  --tests` clean on Zeo's code; `verify.sh` 129/129; `check-sync.sh` in sync against a
+  scratch overlay; Xvfb proof in the hub's `docs/assets/zeo-0134-0135-composer-2026-11-20/`.
+
 ## [0.16.0_p20261119] — 2026-11-20 (tagged)
 
 Zeo `0.16.0_p20261119`: the series on Zed `7279c76ef71d` (2026-11-19, 48 commits past
