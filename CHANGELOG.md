@@ -31,9 +31,12 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
-The series on Zed `0a514d7ef59c` (2026-11-20, 8 commits past `7279c76ef71d`), as
-`patches/zeo-0.17.0_p20261120` -- copied forward from `zeo-0.16.0_p20261119`, not renamed;
-the version is provisional until the release is cut. The series is 129.
+## [0.17.0_p20261120] — 2026-11-20 (tagged)
+
+Zeo `0.17.0_p20261120`: the series on Zed `0a514d7ef59c` (2026-11-20, 8 commits past
+`7279c76ef71d`). `patches/zeo-0.16.0_p20261119` is copied forward to
+`patches/zeo-0.17.0_p20261120`, not renamed. Minor: 0135 changes what the composer row shows.
+User-visible notes are in `zeo/CHANGELOG.md` under 0.17.0. The series is 129.
 
 - **Carried by cherry-pick**: `refresh.sh` stopped at `0027`. Conflicts in `0027`, `0090`
   (upstream a65e743ad9's authentication status in the agent menu) and `0111` (the dock's
