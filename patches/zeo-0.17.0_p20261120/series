@@ -685,6 +685,9 @@
 # Options button closes the row; on/off options (booleans and on/off selects
 # such as Plus's Thinking) are switch rows in a menu that stays open.
 0135-agent-ui-composer-options-effort-right-and-switches.patch
+# 0136: an on/off option that cannot change -- Thinking on a model that always
+# thinks -- is not shown in Agent Options (0135 drew it as a disabled switch).
+0136-agent-ui-a-thinking-option-that-cannot-change-is-not-shown.patch
 
 # @feature: claude-code-ide
 0002-claude-code-ide-integration.patch

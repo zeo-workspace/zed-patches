@@ -31,6 +31,11 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+- **Added** `0136` (USE `claude-agent-acp-plus`, after `0135`): an on/off option that cannot
+  change -- Thinking on a model that always thinks -- is left out of Agent Options, and with
+  nothing else there the options button is gone. Gates: `test.sh` 6483/6483 (local, all cores,
+  operator's call), clippy clean on Zeo's code, `verify.sh` 130/130, Xvfb proof in the hub's
+  `docs/assets/zeo-0136-thinking-fixed-2026-11-21/`. Not in the overlay ebuild yet.
 - **Fixed** `release/windows/guest-lab.sh`: starting the lab guest no longer dies with "QEMU
   exited" while QEMU is still coming up. It checked for QEMU's pidfile right after launching
   `slot run`, before slot had reserved and QEMU had written it; with an empty `qemu.log` the
