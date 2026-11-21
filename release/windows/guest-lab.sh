@@ -20,6 +20,8 @@ lab_host="${ZEO_WIN_LAB:-bentoo-lab}"
 lab_dir="${ZEO_WIN_LAB_DIR:-/mnt/work/zeo-win}"
 lab_port="${ZEO_WIN_LAB_PORT:-2222}"
 lab_slot="${ZEO_WIN_LAB_SLOT:-/mnt/work/slots/slot}"
+# Seconds between checks while the guest starts (the self-test shortens it).
+lab_poll="${ZEO_WIN_LAB_POLL:-10}"
 # 12 vCPUs and 32 GB: the operator's choice (2026-11-18) on the lab's 16 threads and 42 GiB slot
 # budget, leaving 4 CPUs and 10 GiB to the other consumers. One socket: Windows 11 Home uses a
 # single one, and libvirt's default of one socket per vCPU left the desktop guest on a fraction
@@ -51,6 +53,15 @@ lab_seed_key_alias() {
 lab_pid() { lab_ "p=\$(cat '${lab_dir}/qemu.pid' 2>/dev/null) && kill -0 \"\$p\" 2>/dev/null && echo \"\$p\"" 2>/dev/null || true; }
 
 lab_running() { [[ -n "$(lab_pid)" ]]; }
+
+# lab_launch_alive -- whether the process lab_start launched is still there. `slot run` execs
+# QEMU (its last line is `exec "$@"`), so this is one pid from the reservation to the running
+# guest -- alive while slot waits or reserves and while QEMU initialises, before QEMU has written
+# qemu.pid. Without it, that window read as "QEMU exited" and the start died while QEMU came up
+# and held the slot (2026-11-20, the 0.17.0 Windows build).
+lab_launch_alive() {
+	lab_ "p=\$(cat '${lab_dir}/launch.pid' 2>/dev/null) && kill -0 \"\$p\" 2>/dev/null" 2>/dev/null
+}
 
 lab_start() {
 	if lab_running; then
@@ -84,9 +95,9 @@ lab_start() {
 	printf -v quoted '%q ' "${args[@]}"
 	# Braces: `&` must background the launch alone. Applied to the whole `cd && rm && ...` list it
 	# made a subshell that held ssh's output open, and ssh waited for QEMU to exit (2026-11-18).
-	lab_ "cd '${lab_dir}' && rm -f qemu.pid && { setsid nohup '${lab_slot}' run --owner zeo-win:build \
+	lab_ "cd '${lab_dir}' && rm -f qemu.pid launch.pid && { setsid nohup '${lab_slot}' run --owner zeo-win:build \
 		--cpus ${lab_cpus} --memory $((lab_memory_gib + 1)) --wait -1 -- ${quoted} \
-		>qemu.log 2>&1 </dev/null & }" || die 1 "starting QEMU on ${lab_host} failed"
+		>qemu.log 2>&1 </dev/null & echo \$! >launch.pid; }" || die 1 "starting QEMU on ${lab_host} failed"
 	echo "guest event=starting host=${lab_host} cpus=${lab_cpus} memory_gib=${lab_memory_gib}"
 	# Ten minutes to answer ssh once QEMU runs; however long the slot queue takes before that
 	# (a builder image holds every CPU for longer than ten minutes, 2026-11-18).
@@ -97,16 +108,18 @@ lab_start() {
 			return 0
 		fi
 		if ! lab_running; then
+			# No QEMU pid yet: dead only if what was launched is gone too.
+			if ! lab_launch_alive; then
+				lab_ "tail -20 '${lab_dir}/qemu.log'" >&2 || true
+				die 1 "QEMU exited on ${lab_host} (log above)"
+			fi
 			if lab_ "grep -q 'slot: queued' '${lab_dir}/qemu.log'" 2>/dev/null; then
 				((queued)) || echo "guest event=queued host=${lab_host} (slot list shows who holds it)"
 				queued=1
 				deadline=$((SECONDS + 600))
-			else
-				lab_ "tail -20 '${lab_dir}/qemu.log'" >&2 || true
-				die 1 "QEMU exited on ${lab_host} (log above)"
 			fi
 		fi
-		sleep 10
+		sleep "${lab_poll}"
 	done
 	die 1 "the guest did not answer ssh within 10 minutes (guest.sh screenshot shows its screen)"
 }

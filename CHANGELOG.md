@@ -31,6 +31,15 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+- **Fixed** `release/windows/guest-lab.sh`: starting the lab guest no longer dies with "QEMU
+  exited" while QEMU is still coming up. It checked for QEMU's pidfile right after launching
+  `slot run`, before slot had reserved and QEMU had written it; with an empty `qemu.log` the
+  window read as a dead QEMU, and the start was abandoned while QEMU came up and held the slot
+  (the 0.17.0 Windows build, 2026-11-20). The launched pid goes to `launch.pid` -- one pid from
+  reservation to guest, since slot execs QEMU -- and only its death is a failure.
+  `ZEO_WIN_LAB_POLL` (default 10 s) sets the check interval. Test:
+  `scripts/tests/guest-lab-start.sh`, in `selftest.sh` (117/117).
+
 ## [0.17.0_p20261120] — 2026-11-20 (tagged)
 
 Zeo `0.17.0_p20261120`: the series on Zed `0a514d7ef59c` (2026-11-20, 8 commits past

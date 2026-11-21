@@ -2335,6 +2335,15 @@ test_lab_builds_detached_and_fetches_checked() {
 	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
 }
 
+# --- release/windows/guest-lab.sh: a slow QEMU start is not a dead one ----------
+test_guest_lab_start_waits_for_a_slow_qemu() {
+	case_start "guest-lab: lab_start waits while slot reserves and QEMU initialises, still reports a QEMU that exits, announces a queue once"
+	local out status
+	out="$(ZP_REPO="${REPO_ROOT}" bash "${SCRIPTS}/tests/guest-lab-start.sh" 2>&1)"
+	status=$?
+	assert_status 0 "${status}" && assert_contains "${out}" "PASS:" && ok
+}
+
 # --- release-portable.sh: asset names carry no ~ (story 073, R4.2) --------------
 test_release_portable_untilde_artefacts() {
 	case_start "release-portable: ~ becomes . in every artefact name, so SHA256SUMS names what GitHub serves"
@@ -3035,6 +3044,7 @@ main() {
 		test_release_patches_skips_default_off_groups
 		test_release_portable_untilde_artefacts
 		test_lab_builds_detached_and_fetches_checked
+		test_guest_lab_start_waits_for_a_slow_qemu
 	)
 
 	for t in "${tests[@]}"; do
