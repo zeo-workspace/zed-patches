@@ -31,11 +31,18 @@ bumps inside a range are summarised rather than listed one by one.
 
 ## [Unreleased]
 
+## [0.17.1_p20261120] — 2026-11-21 (tagged)
+
+Zeo `0.17.1_p20261120`: `patches/zeo-0.17.0_p20261120` plus `0136`, copied forward to
+`patches/zeo-0.17.1_p20261120`, not renamed; Zed `0a514d7ef59c` unchanged. Patch, not minor: 0136
+removes a control that could not do anything. User-visible notes are in `zeo/CHANGELOG.md` under
+0.17.1. The series is 130. Linux artefacts built locally (operator, 2026-11-21: all cores).
+
 - **Added** `0136` (USE `claude-agent-acp-plus`, after `0135`): an on/off option that cannot
   change -- Thinking on a model that always thinks -- is left out of Agent Options, and with
   nothing else there the options button is gone. Gates: `test.sh` 6483/6483 (local, all cores,
   operator's call), clippy clean on Zeo's code, `verify.sh` 130/130, Xvfb proof in the hub's
-  `docs/assets/zeo-0136-thinking-fixed-2026-11-21/`. Not in the overlay ebuild yet.
+  `docs/assets/zeo-0136-thinking-fixed-2026-11-21/`. Registered in the 0.17.1 ebuild.
 - **Fixed** `release/windows/guest-lab.sh`: starting the lab guest no longer dies with "QEMU
   exited" while QEMU is still coming up. It checked for QEMU's pidfile right after launching
   `slot run`, before slot had reserved and QEMU had written it; with an empty `qemu.log` the
